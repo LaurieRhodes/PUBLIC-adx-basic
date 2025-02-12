@@ -1,0 +1,18 @@
+﻿//
+// Function Name: ASimDhcpEvent
+// Description: This ASIM parser supports normalizing Dhcp event logs from all supported sources to the ASIM Dhcp Event normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimDhcpEvent(    ['pack']:bool=False)
+{
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludeASimDhcpEvent') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser| where isnotempty(SourceSpecificParser));
+let ASimBuiltInDisabled=toscalar('ExcludeASimDhcpEvent' in (DisabledParsers) or 'Any' in (DisabledParsers)); 
+let parser=(pack:bool=false){
+union isfuzzy=true
+  vimDhcpEventEmpty,
+  ASimDhcpEventNative (disabled=(ASimBuiltInDisabled or ('ExcludeASimDhcpEventNative' in (DisabledParsers))))
+}; 
+parser (pack=pack)
+}

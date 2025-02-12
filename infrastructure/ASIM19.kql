@@ -1,0 +1,1994 @@
+//
+// Function Name: ASimProcessCreateLinuxSysmon
+// Description: This ASIM parser supports normalizing Sysmon for Linux process create events (event 1) collected using the Syslog connector to the ASIM Process Event normalized schema. 
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimProcessCreateLinuxSysmon(    ['disabled']:bool=false)
+{
+let ParsedProcessEvent=(){
+    Syslog
+    | where not(disabled)
+    | where SyslogMessage has_all ('<Provider Name="Linux-Sysmon"', '<EventID>1</EventID>')
+    | parse SyslogMessage with 
+            *
+            '<EventRecordID>' EventRecordId:int '</EventRecordID>'
+            *
+            '<Computer>' SysmonComputer:string '</Computer>'
+            *
+            '<Data Name="RuleName">'RuleName // parsing the XML using the original fields name - for readability 
+            '</Data><Data Name="UtcTime">'UtcTime
+            '</Data><Data Name="ProcessGuid">{'ProcessGuid
+            '}</Data><Data Name="ProcessId">'ProcessId:string
+            '</Data><Data Name="Image">'Image
+            '</Data><Data Name="FileVersion">'FileVersion
+            '</Data><Data Name="Description">'Description
+            '</Data><Data Name="Product">'Product
+            '</Data><Data Name="Company">'Company'</Data>' *
+    | extend  OriginalFileName = extract (@'"OriginalFileName">([^<]+)<',1,SyslogMessage) // this field exists in sysmon version 10.42 and above - using extact to avoid parsing failure
+    | parse SyslogMessage with *
+            '<Data Name="CommandLine">'CommandLine'</Data>'
+            '<Data Name="CurrentDirectory">'CurrentDirectory
+            '</Data><Data Name="User">'User
+            '</Data><Data Name="LogonGuid">{'LogonGuid
+            '}</Data><Data Name="LogonId">'LogonId
+            '</Data><Data Name="TerminalSessionId">'TerminalSessionId
+            '</Data><Data Name="IntegrityLevel">'IntegrityLevel
+            '</Data><Data Name="Hashes">'Hashes
+            '</Data><Data Name="ParentProcessGuid">{'ParentProcessGuid
+            '}</Data><Data Name="ParentProcessId">'ParentProcessId:string
+            '</Data><Data Name="ParentImage">'ParentImage
+            '</Data><Data Name="ParentCommandLine">'ParentCommandLine '</Data>'*
+    | parse SyslogMessage with *'<Data Name="ParentUser">'ActorUsername '</Data>' *// this field appears in newer versions of Sysmon 
+    | extend    TargetProcessSHA1=extract(@'SHA1=(\w+)',1, tostring(Hashes)),
+                TargetProcessSHA256=extract(@'SHA256=(\w+)',1, tostring(Hashes)),
+                TargetProcessIMPHASH=extract(@'IMPHASH=(\w+)',1,tostring(Hashes)), // add to the empty schema + Excel file
+                TargetProcessMD5=extract(@'MD5=(\w+)',1, tostring(Hashes))
+    // End of XML parse
+    | project-away SyslogMessage, Hashes
+    | extend 
+                EventType = "ProcessCreated",
+                EventStartTime = TimeGenerated,
+                EventEndTime = TimeGenerated,
+                EventCount = int(1),
+                EventVendor = "Microsoft",
+                EventSchemaVersion = "0.1.0",
+                EventSchema = 'ProcessEvent',
+                EventProduct = "Sysmon for Linux",
+                EventResult = 'Success',
+                EventOriginalUid = tostring(EventRecordId),
+                DvcOs = "Linux",
+                TargetUserSessionId = tostring(LogonId)  ,           
+                TargetUsernameType = "Simple",
+                TargetUsername = User,
+                TargetProcessCommandLine = CommandLine,
+                TargetProcessCurrentDirectory = CurrentDirectory,
+                ActorUsernameType = "Simple",
+                EventOriginalType = '1' // Set with a constant value to avoid parsing
+    | project-rename 
+                // EventMessage = RenderedDescription, // field not available in Linux
+                DvcHostName = SysmonComputer, // Computer may be different than HostName, in which case HostIP may be incorrect. 
+                DvcIpAddr = HostIP, 
+                TargetUserSessionGuid = LogonGuid, 
+                TargetProcessId = ProcessId,
+                TargetProcessGuid = ProcessGuid,
+                TargetProcessName = Image,
+                TargetProcessIntegrityLevel = IntegrityLevel,
+                TargetProcessCompany = Company,
+                TargetProcessFileDescription = Description,
+                TargetProcessFileVersion = FileVersion,
+                TargetProcessFileProduct = Product,
+                ActingProcessId = ParentProcessId,
+                ActingProcessGuid = ParentProcessGuid,                          
+                ActingProcessCommandLine = ParentCommandLine,
+                ActingProcessName = ParentImage
+    | extend // aliases
+                User = ActorUsername,
+                Process = TargetProcessName,
+                Dvc = DvcHostName,
+                Hash = coalesce(TargetProcessSHA256, TargetProcessSHA1, TargetProcessMD5) // which appears first - will be aliases to "Hash"
+    | project-away
+                ProcessName, ProcessID
+}; ParsedProcessEvent
+}
+
+
+
+//
+// Function Name: ASimProcessCreateMicrosoftSecurityEvents
+// Description: This ASIM parser supports normalizing Windows process create events (event 4688) collected using the Security Events connectors, utilizing either the Log Analytics agent or the Azure Monitor Agent (AMA) and stored in the SecurityEvent table to the ASIM Process Event normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimProcessCreateMicrosoftSecurityEvents(    ['disabled']:bool=false)
+{
+let MandatoryLabelLookup = datatable (MandatoryLabel:string,MandatoryLabelRid:string, MandatoryLabelText:string, MandatoryLabelMeaning:string)
+  [
+    'S-1-16-0', '0x00000000', 'SECURITY_MANDATORY_UNTRUSTED_RID', 'Untrusted',
+    'S-1-16-4096', '0x00001000', 'SECURITY_MANDATORY_LOW_RID', 'Low integrity',
+    'S-1-16-8192', '0x00002000', 'SECURITY_MANDATORY_MEDIUM_RID', 'Medium integrity',
+    'S-1-16-8448', '0x00002100', 'SECURITY_MANDATORY_MEDIUM_PLUS_RID', 'Medium high integrity',
+    'S-1-16-12288', '0X00003000', 'SECURITY_MANDATORY_HIGH_RID', 'High integrity',
+    'S-1-16-16384', '0x00004000', 'SECURITY_MANDATORY_SYSTEM_RID', 'System integrity',
+    'S-1-16-20480', '0x00005000', 'SECURITY_MANDATORY_PROTECTED_PROCESS_RID', 'Protected process'
+  ];
+// Source: https://support.microsoft.com/topic/0fdcaf87-ee5e-8929-e54c-65e04235a634
+let KnownSIDs = datatable (sid:string, username:string, type:string)
+  [
+    'S-1-5-18', 'Local System', 'Simple',
+    'S-1-0-0', 'Nobody', 'Simple'
+  ];
+let UserTypeLookup = datatable (AccountType:string, ActorUserType:string)
+  [
+    'User', 'Regular',
+    'Machine', 'Machine'
+  ];
+let parser=(disabled:bool=false){
+SecurityEvent
+| where not(disabled)
+// -- Filter
+| where EventID == 4688
+// -- Map
+| extend
+  // Event
+    EventCount = int(1),
+    EventVendor = 'Microsoft',
+    EventProduct = 'Security Events',
+    EventSchemaVersion = '0.1.3',
+    EventSchema = 'ProcessEvent',
+    EventResult = 'Success',
+    EventStartTime = todatetime(TimeGenerated),
+    EventEndTime = todatetime(TimeGenerated),
+    EventType = 'ProcessCreated',
+    EventOriginalType = tostring(EventID),
+    DvcOs = 'Windows'
+| lookup KnownSIDs on $left.SubjectUserSid == $right.sid
+| extend
+    ActorUsername = iff (SubjectUserName == "-", username, SubjectAccount),
+    ActorUsernameType = iff(SubjectUserName == '-',type, 'Windows')
+| lookup KnownSIDs on $left.TargetUserSid == $right.sid
+| extend
+    TargetUsername = iff (TargetUserName == "-", username, TargetAccount),
+    TargetUsernameType = iff(TargetDomainName == '-',type, 'Windows')
+| lookup UserTypeLookup on AccountType
+| extend
+    ActorUserIdType = 'SID',
+    TargetUserIdType = 'SID',
+  // Processes
+    ActingProcessId = tostring(toint(ProcessId)),
+    TargetProcessId = tostring(toint(NewProcessId)),
+    TargetProcessCommandLine = CommandLine
+  | project-rename
+    DvcId = SourceComputerId,
+    DvcHostname = Computer,
+    ActingProcessName = ParentProcessName,
+    TargetProcessName = NewProcessName,
+    ActorDomainName = SubjectDomainName,
+    ActorUserId = SubjectUserSid,
+    ActorSessionId = SubjectLogonId,
+    TargetUserId =TargetUserSid,
+    TargetUserSessionId = TargetLogonId,
+    EventOriginalUid = EventOriginId,
+    TargetProcessTokenElevation = TokenElevationType
+ | lookup MandatoryLabelLookup on MandatoryLabel
+  // -- Aliases
+  | extend
+    User = TargetUsername,
+    Dvc = DvcHostname,
+    Process = TargetProcessName
+  // -- Remove potentially confusing
+  | project-keep Event*, Dvc*, Actor*, Target*, Acting*, User, Dvc, Process, CommandLine, TimeGenerated, Type, _ResourceId
+  | project-away
+      TargetDomainName,
+      TargetUserName,
+      TargetAccount,
+      EventID
+};
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimProcessEventCreateMicrosoftSysmon
+// Description: This ASIM parser supports normalizing Sysmon process create events (event 1) collected logs ingested in 'Event' table to the ASIM Process Event normalized schema. 
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimProcessEventCreateMicrosoftSysmon(    ['disabled']:bool=false)
+{
+let parser = (disabled: bool = false) {
+    // this is the parser for sysmon from Event table
+    let parser_Event =
+      Event 
+      | where not(disabled)
+      | where Source == "Microsoft-Windows-Sysmon" and EventID == 1
+      | parse-kv EventData as (
+          ProcessGuid: string, 
+          ProcessId: string,
+          Image: string,
+          FileVersion: string,
+          Description: string,
+          Product: string,
+          Company: string,
+          OriginalFileName: string,
+          CommandLine: string,
+          CurrentDirectory: string,
+          User: string,
+          LogonGuid: string, 
+          LogonId: string,
+          IntegrityLevel: string,
+          Hashes: string,
+          ParentProcessGuid: string, 
+          ParentProcessId: string,
+          ParentImage: string,
+          ParentCommandLine: string,
+          ParentUser: string
+          ) 
+          with (regex=@'<Data Name="(\w+)">{?([^<]*?)}?</Data>')
+      | parse-kv Hashes as (MD5: string, SHA1: string, SHA256: string, IMPHASH: string) with (quote='"')
+      | extend
+          Hash = coalesce (SHA256, SHA1, IMPHASH, MD5, "")
+      | extend
+          HashType = tostring(dynamic(["SHA256", "SHA1", "IMPHASH", "MD5"])[array_index_of(pack_array(SHA256, SHA1, IMPHASH, MD5), Hash)])
+      | project-rename
+          TargetProcessMD5 = MD5,
+          TargetProcessSHA1 = SHA1,
+          TargetProcessSHA256 = SHA256,
+          TargetProcessIMPHASH = IMPHASH
+      | project-away Hashes
+      | extend         
+          TargetUsername = User,
+          TargetProcessCommandLine = CommandLine
+      | project-rename 
+          DvcHostname = Computer,
+          TargetUserSessionGuid = LogonGuid,
+          TargetProcessId = ProcessId,
+          TargetUserSessionId = LogonId,  
+          TargetProcessGuid = ProcessGuid,
+          TargetProcessName = Image,
+          TargetProcessFilename = OriginalFileName,
+          TargetProcessCurrentDirectory = CurrentDirectory,
+          TargetProcessIntegrityLevel = IntegrityLevel,    
+          TargetProcessFileCompany = Company,
+          TargetProcessFileDescription = Description,
+          TargetProcessFileVersion = FileVersion,
+          TargetProcessFileProduct = Product,   
+          ActingProcessId = ParentProcessId,
+          ActingProcessGuid = ParentProcessGuid,                          
+          ActingProcessCommandLine = ParentCommandLine,
+          ActingProcessName = ParentImage,
+          ActorUsername = ParentUser
+      | extend 
+          TargetUsernameType = iff(isnotempty(TargetUsername), 'Windows', ''),
+          ActorUsernameType = iff(isnotempty(ActorUsername), 'Windows', ''),
+          EventProduct = "Sysmon",
+          // aliases
+          Process = TargetProcessName,
+          Dvc = DvcHostname,
+          EventUid = _ItemId
+      | project-away
+          EventData,
+          ParameterXml,
+          AzureDeploymentID,
+          EventCategory,
+          EventID,
+          EventLevel,
+          EventLevelName,
+          TenantId,
+          EventLog,
+          MG,
+          ManagementGroupName,
+          Message,
+          Role,
+          SourceSystem,
+          Source,
+          UserName,
+          RenderedDescription,
+          _ResourceId,
+          _ItemId
+      | extend 
+          EventType = "ProcessCreated",
+          EventOriginalType = "1",
+          EventStartTime = todatetime(TimeGenerated),
+          EventEndTime = todatetime(TimeGenerated),
+          EventCount = int(1),
+          EventVendor = "Microsoft",
+          EventSchemaVersion = "0.1.0",
+          EventSchema = 'ProcessEvent',
+          EventProduct = "Sysmon",
+          EventResult = 'Success',
+          DvcOs = "Windows",
+          TargetUsernameType = "Windows",
+          ActorUsernameType = "Windows"
+  ;
+    parser_Event   
+};
+parser (disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimProcessEventCreateMicrosoftSysmonWindowsEvent
+// Description: This ASIM parser supports normalizing Sysmon process create events (event 1) collected logs ingested in 'WindowsEvent' table to the ASIM Process Event normalized schema. 
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimProcessEventCreateMicrosoftSysmonWindowsEvent(    ['disabled']:bool=false)
+{
+let parser = (disabled: bool = false) {
+    // this is the parser for sysmon from WindowsEvent table
+    let parser_WindowsEvent=
+      WindowsEvent
+      | where not(disabled)
+      | where Provider == "Microsoft-Windows-Sysmon" and EventID == 1
+      | parse-kv tostring(EventData.Hashes) as (MD5: string, SHA1: string, SHA256: string, IMPHASH: string) with (quote='"')
+      | extend
+          Hash = coalesce (SHA256, SHA1, IMPHASH, MD5, "")
+      | extend
+          HashType = tostring(dynamic(["SHA256", "SHA1", "IMPHASH", "MD5"])[array_index_of(pack_array(SHA256, SHA1, IMPHASH, MD5), Hash)])
+      | project-rename
+          TargetProcessMD5 = MD5,
+          TargetProcessSHA1 = SHA1,
+          TargetProcessSHA256 = SHA256,
+          TargetProcessIMPHASH = IMPHASH
+      | extend 
+          EventOriginalType = tostring(EventID),
+          TargetUserSessionId = tostring(EventData.LogonId),           
+          TargetUsername = tostring(EventData.User),
+          TargetProcessCommandLine = tostring(EventData.CommandLine),
+          TargetProcessCurrentDirectory = tostring(EventData.CurrentDirectory),
+          TargetUserSessionGuid = extract ('^{(.*)}$', 1, tostring(EventData.LogonGuid), typeof(string)),
+          TargetProcessId = tostring(EventData.ProcessId),
+          TargetProcessGuid = extract ('^{(.*)}$', 1, tostring(EventData.ProcessGuid), typeof(string)),
+          TargetProcessName = tostring(EventData.Image),
+          TargetProcessFilename = tostring(EventData.OriginalFileName),
+          TargetProcessIntegrityLevel = tostring(EventData.IntegrityLevel),
+          TargetProcessFileCompany = tostring(EventData.Company),
+          TargetProcessFileDescription = tostring(EventData.Description),
+          TargetProcessFileVersion = tostring(EventData.FileVersion),
+          TargetProcessFileProduct = tostring(EventData.Product),
+          ActingProcessId = tostring(EventData.ParentProcessId),  
+          ActingProcessGuid = extract ('^{(.*)}$', 1, tostring(EventData.ParentProcessGuid), typeof(string)),                 
+          ActingProcessCommandLine = tostring(EventData.ParentCommandLine),
+          ActingProcessName = tostring(EventData.ParentImage),
+          ActorUsername = tostring(EventData.ParentUser)
+      | extend 
+          TargetUsernameType = iff(isnotempty(TargetUsername), 'Windows', ''),
+          ActorUsernameType = iff(isnotempty(ActorUsername), 'Windows', ''),
+          EventProduct = "Security Events"
+      | project-rename
+          DvcHostname = Computer,
+          EventOriginalUid = EventOriginId
+      | extend // aliases 
+          Dvc = DvcHostname,
+          User = TargetUsername,
+          CommandLine = TargetProcessCommandLine,
+          Process = TargetProcessName,
+          EventUid = _ItemId
+      | project-away
+          EventData,
+          Provider,
+          ManagementGroupName,
+          RawEventData,
+          SourceSystem,
+          Task,
+          TenantId,
+          EventID,
+          Data,
+          Channel,
+          EventLevel,
+          EventLevelName,
+          Correlation,
+          EventRecordId,
+          Keywords,
+          Opcode,
+          SystemProcessId,
+          SystemThreadId,
+          SystemUserId,
+          TimeCreated,
+          Version,
+          _ResourceId,
+          _ItemId
+      | extend 
+          EventType = "ProcessCreated",
+          EventOriginalType = "1",
+          EventStartTime = todatetime(TimeGenerated),
+          EventEndTime = todatetime(TimeGenerated),
+          EventCount = int(1),
+          EventVendor = "Microsoft",
+          EventSchemaVersion = "0.1.0",
+          EventSchema = 'ProcessEvent',
+          EventProduct = "Sysmon",
+          EventResult = 'Success',
+          DvcOs = "Windows",
+          TargetUsernameType = "Windows",
+          ActorUsernameType = "Windows";
+    parser_WindowsEvent
+};
+parser (disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimProcessCreateMicrosoftWindowsEvents
+// Description: This ASIM parser supports normalizing Windows process create events (event 4688) collected using the WEF connector (WindowsEvent table) to the ASIM Process Event normalized schema. 
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimProcessCreateMicrosoftWindowsEvents(    ['disabled']:bool=false)
+{
+let ASIM_GetFilenamePart = (path:string) { tostring(split(path,@'\')[-1]) };
+let ASIM_ResolveWindowsUsername = (T:(username:string, domain:string, sid:string)) { 
+    T 
+    | extend 
+         type = case (
+            username == "-", "",
+            domain == "-", "Simple",
+            "Windows"
+        ),
+        username = case (
+          username == "-", "",
+          domain == '-', username,
+          strcat(domain, @"\" , username)
+        )
+};
+let MandatoryLabelLookup = datatable (MandatoryLabel:string,MandatoryLabelRid:string, MandatoryLabelText:string, MandatoryLabelMeaning:string)
+[
+    'S-1-16-0', '0x00000000', 'SECURITY_MANDATORY_UNTRUSTED_RID', 'Untrusted',
+    'S-1-16-4096', '0x00001000', 'SECURITY_MANDATORY_LOW_RID', 'Low integrity',
+    'S-1-16-8192', '0x00002000', 'SECURITY_MANDATORY_MEDIUM_RID', 'Medium integrity',
+    'S-1-16-8448', '0x00002100', 'SECURITY_MANDATORY_MEDIUM_PLUS_RID', 'Medium high integrity',
+    'S-1-16-12288', '0X00003000', 'SECURITY_MANDATORY_HIGH_RID', 'High integrity',
+    'S-1-16-16384', '0x00004000', 'SECURITY_MANDATORY_SYSTEM_RID', 'System integrity',
+    'S-1-16-20480', '0x00005000', 'SECURITY_MANDATORY_PROTECTED_PROCESS_RID', 'Protected process'
+    ];
+let parser=(disabled:boolean=false){
+WindowsEvent
+| where not(disabled)
+| where EventID == 4688
+| project-rename
+    DvcHostname = Computer
+| extend
+    EventCount = int(1),
+    EventVendor = 'Microsoft',
+    EventProduct = 'Security Events',
+    EventSchemaVersion = '0.1.0',
+    EventSchema = 'ProcessEvent',
+    EventResult = 'Success',
+    EventStartTime = todatetime(TimeGenerated),
+    EventEndTime = todatetime(TimeGenerated),
+    EventType = 'ProcessCreated',
+    EventOriginalType = tostring(EventID),
+    DvcOs = 'Windows'
+| extend 
+    ActorUsername = strcat(EventData.SubjectDomainName, @'\', EventData.SubjectUserName), 
+    ActorUserId = tostring(EventData.SubjectUserSid)
+| extend
+    ActorUserIdType = iff (ActorUserId <> "S-1-0-0", "SID", ""),
+    ActorUserId = iff (ActorUserId <> "S-1-0-0", ActorUserId, ""),    
+    ActorUsernameType = "Windows",
+    username = tostring(EventData.TargetUserName)
+| extend
+    TargetUsername = iff(username == "-", ActorUsername, strcat(EventData.SubjectDomainName, @'\', username)),
+    TargetUserId = iff(username == "-", ActorUserId, tostring(EventData.TargetUserSid))
+| extend
+    TargetUserIdType = iff (TargetUserId <> "S-1-0-0", "SID", ""),
+    TargetUserId = iff (TargetUserId <> "S-1-0-0", TargetUserId, ""), 
+    TargetUsernameType = "Windows"
+| project-away
+    username
+| extend 
+    TargetUserSid = TargetUserId,
+    ActorUserSid = ActorUserId,
+    ActorUserType = _ASIM_GetWindowsUserType(ActorUsername, ActorUserId),
+    TargetUserType = _ASIM_GetWindowsUserType(TargetUsername, TargetUserId)
+| extend
+    ActorSessionId = tostring(toint(EventData.SubjectLogonId)),
+    TargetUserSessionId = tostring(toint(EventData.TargetLogonId)),    
+    // Processes 
+    ActingProcessId = tostring(toint(tolong(EventData.ProcessId))),
+    ActingProcessName = tostring(EventData.ParentProcessName),
+    TargetProcessId = tostring(toint(tolong(EventData.NewProcessId))),
+    TargetProcessName = tostring(EventData.NewProcessName),
+    TargetProcessCommandLine = tostring(EventData.CommandLine),
+    TargetProcessTokenElevation = tostring(EventData.TokenElevationType),
+    MandatoryLabel = tostring(EventData.MandatoryLabel)
+| extend 
+    ActingProcessFilename = ASIM_GetFilenamePart(ActingProcessName),
+    TargetProcessFilename = ASIM_GetFilenamePart(TargetProcessName)
+| lookup MandatoryLabelLookup on MandatoryLabel
+// -- Aliases
+| extend
+    User = TargetUsername,
+    Dvc = DvcHostname,
+    Process = TargetProcessName,
+    CommandLine = TargetProcessCommandLine
+| project-away Channel, EventData, Data, EventID, EventLevelName, EventLevel, Provider, RawEventData, Task, TenantId, ManagementGroupName, SourceSystem, EventOriginId
+}; 
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimProcessCreateSentinelOne
+// Description: This ASIM parser supports normalizing SentinelOne logs to the ASIM Process Event normalized schema. SentinelOne events are captured through SentinelOne data connector which ingests SentinelOne server objects such as Threats, Agents, Applications, Activities, Policies, Groups, and more events into Microsoft Sentinel through the REST API.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimProcessCreateSentinelOne(    ['disabled']:bool=false)
+{
+let ThreatConfidenceLookup_undefined = datatable(
+    alertInfo_analystVerdict_s: string,
+    ThreatConfidence_undefined: int
+)
+[
+    "FALSE_POSITIVE", 5,
+    "Undefined", 15,
+    "SUSPICIOUS", 25,
+    "TRUE_POSITIVE", 33 
+];
+let ThreatConfidenceLookup_suspicious = datatable(
+    alertInfo_analystVerdict_s: string,
+    ThreatConfidence_suspicious: int
+)
+[
+    "FALSE_POSITIVE", 40,
+    "Undefined", 50,
+    "SUSPICIOUS", 60,
+    "TRUE_POSITIVE", 67 
+];
+let ThreatConfidenceLookup_malicious = datatable(
+    alertInfo_analystVerdict_s: string,
+    ThreatConfidence_malicious: int
+)
+[
+    "FALSE_POSITIVE", 75,
+    "Undefined", 80,
+    "SUSPICIOUS", 90,
+    "TRUE_POSITIVE", 100 
+];
+let parser = (disabled: bool=false) {
+    let alldata = SentinelOne_CL
+        | where not(disabled) 
+            and event_name_s == "Alerts."
+            and alertInfo_eventType_s == "PROCESSCREATION";
+    let undefineddata = alldata
+        | where ruleInfo_treatAsThreat_s == "UNDEFINED"
+        | lookup ThreatConfidenceLookup_undefined on alertInfo_analystVerdict_s;
+    let suspiciousdata = alldata
+        | where ruleInfo_treatAsThreat_s == "Suspicious"
+        | lookup ThreatConfidenceLookup_suspicious on alertInfo_analystVerdict_s;
+    let maaliciousdata = alldata
+        | where ruleInfo_treatAsThreat_s == "Malicious"
+        | lookup ThreatConfidenceLookup_malicious on alertInfo_analystVerdict_s;
+    union undefineddata, suspiciousdata, maaliciousdata
+    | extend ThreatConfidence = coalesce(ThreatConfidence_undefined, ThreatConfidence_suspicious, ThreatConfidence_malicious)
+    | project-rename
+        DvcId = agentDetectionInfo_uuid_g,
+        EventStartTime = sourceProcessInfo_pidStarttime_t,
+        TargetProcessCommandLine = targetProcessInfo_tgtProcCmdLine_s,
+        TargetProcessId = targetProcessInfo_tgtProcPid_s,
+        TargetProcessName = targetProcessInfo_tgtProcName_s,
+        EventUid = _ItemId,
+        TargetProcessCreationTime = targetProcessInfo_tgtProcessStartTime_t,
+        ActingProcessName = sourceProcessInfo_name_s,
+        ParentProcessName = sourceParentProcessInfo_name_s,
+        ActingProcessCommandLine = sourceProcessInfo_commandline_s,
+        ActingProcessGuid = sourceProcessInfo_uniqueId_g,
+        ActingProcessSHA1 = sourceProcessInfo_fileHashSha1_s,
+        ParentProcessSHA1 = sourceParentProcessInfo_fileHashSha1_s,
+        ActingProcessSHA256 = sourceProcessInfo_fileHashSha256_s,
+        ParentProcessSHA256 = sourceParentProcessInfo_fileHashSha256_s,
+        DvcOs = agentDetectionInfo_osName_s,
+        DvcOsVersion = agentDetectionInfo_osRevision_s,
+        TargetProcessIntegrityLevel = targetProcessInfo_tgtProcIntegrityLevel_s,
+        EventOriginalType = alertInfo_eventType_s,
+        EventOriginalSeverity = ruleInfo_severity_s,
+        EventOriginalUid = alertInfo_dvEventId_s,
+        RuleName = ruleInfo_name_s,
+        ThreatOriginalConfidence = ruleInfo_treatAsThreat_s
+    | invoke _ASIM_ResolveDvcFQDN('agentDetectionInfo_name_s')
+    | extend
+        ActingProcessId = sourceProcessInfo_pid_s,
+        ActorUsername = sourceProcessInfo_user_s,
+        TargetUsername = sourceProcessInfo_user_s,
+        Hash = coalesce(targetProcessInfo_tgtFileHashSha256_s, targetProcessInfo_tgtFileHashSha1_s),
+        ParentProcessId = sourceProcessInfo_pid_s,
+        TargetProcessSHA1 = targetProcessInfo_tgtFileHashSha1_s,
+        TargetProcessSHA256 = targetProcessInfo_tgtFileHashSha256_s,
+        ParentProcessMD5 = replace_string(sourceParentProcessInfo_fileHashMd5_g, "-", ""),
+        ActingProcessMD5 = replace_string(sourceProcessInfo_fileHashMd5_g, "-", ""),
+        EventSeverity = iff(EventOriginalSeverity == "Critical", "High", EventOriginalSeverity)
+    | extend
+        EventCount = int(1),
+        EventProduct = "SentinelOne",
+        EventResult = "Success",
+        DvcAction = "Allowed",
+        EventSchemaVersion = "0.1.4",
+        EventType = "ProcessCreated",
+        EventVendor = "SentinelOne",
+        EventSchema = "ProcessEvent"
+    | extend 
+        Dvc = DvcId,
+        EventEndTime = EventStartTime,
+        User = TargetUsername,
+        ActingProcessCreationTime = EventStartTime,
+        CommandLine = TargetProcessCommandLine,
+        Process = TargetProcessName,
+        Rule = RuleName
+    | extend 
+        HashType = case(
+              isnotempty(Hash) and isnotempty(TargetProcessSHA256),
+              "TargetProcessSHA256",
+              isnotempty(Hash) and isnotempty(TargetProcessSHA1),
+              "TargetProcessSHA1",
+              ""
+          ),
+        TargetUsernameType = _ASIM_GetUsernameType(TargetUsername),
+        TargetUserType = _ASIM_GetUserType(TargetUsername, ""),
+        DvcIdType = iff(isnotempty(DvcId), "Other", ""),
+        ActorUsernameType = _ASIM_GetUsernameType(ActorUsername),
+        ActorUserType = _ASIM_GetUserType(ActorUsername, "")
+    | project-away
+        *_d,
+        *_s,
+        *_g,
+        *_t,
+        *_b,
+        _ResourceId,
+        TenantId,
+        RawData,
+        Computer,
+        MG,
+        ManagementGroupName,
+        SourceSystem,
+        ThreatConfidence_*
+};
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimProcessCreateTrendMicroVisionOne
+// Description: This ASIM parser supports normalizing Trend Micro Vision One logs to the ASIM Process Create normalized schema. Trend Micro Vision One events are captured through Trend Vision One data connector which ingests XDR logs into Microsoft Sentinel through the Trend Vision One API.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimProcessCreateTrendMicroVisionOne(    ['disabled']:bool=false)
+{
+let GetFilenamePart = (path: string) { tostring(split(path, @'\')[-1]) };
+let EventSeverityLookup = datatable(detail_filterRiskLevel_s: string, EventSeverity: string)[
+    "low", "Low",
+    "medium", "Medium",
+    "high", "High",
+    "info", "Informational",
+    "critical", "High"
+];
+let IntegrityLevelLookup = datatable(IntegrityLevel: real, IntegrityType: string)
+    [
+    0, "Untrusted",
+    4096, "Low",
+    8192, "Medium",
+    12288, "High",
+    16384, "System"
+];
+let parser = (disabled: bool=false) {
+    TrendMicro_XDR_OAT_CL
+    | where not(disabled)
+    | where detail_eventId_s == "TELEMETRY_PROCESS"
+        and detail_eventSubId_s has_any ("TELEMETRY_PROCESS_CREATE","TELEMETRY_PROCESS_LOAD_IMAGE","TELEMETRY_PROCESS_OPEN")
+    | parse filters_s with * "[" filters: string "]"
+    | parse-kv filters as (description: string, name: string) with (pair_delimiter=",", kv_delimiter=":", quote='"')
+    | extend
+        ActingProcessId = tostring(toint(detail_processPid_d)),
+        TargetProcessId = tostring(toint(detail_objectPid_d)),
+        ParentProcessId = tostring(toint(detail_parentPid_d)),
+        TargetProcessCreationTime = unixtime_milliseconds_todatetime(detail_objectLaunchTime_d),
+        ActingProcessCreationTime = unixtime_milliseconds_todatetime(detail_processLaunchTime_d),
+        ActingProcessFilename = GetFilenamePart(detail_processFilePath_s),
+        ParentProcessCreationTime = unixtime_milliseconds_todatetime(detail_parentLaunchTime_d),
+        ParentProcessName = detail_parentName_s,
+        TargetProcessFilename = GetFilenamePart(detail_objectFilePath_s),
+        ActingProcessFileSize = tolong(detail_processFileSize_d),
+        TargetUserSessionId = tostring(toint(detail_objectAuthId_d)),
+        ActorSessionId = tostring(toint(detail_authId_d)),
+        TargetProcessMD5 = replace_string(detail_objectFileHashMd5_g, "-", ""),
+        ActingProcessMD5 = replace_string(detail_processFileHashMd5_g, "-", ""),
+        ParentProcessMD5 = replace_string(detail_parentFileHashMd5_g, "-", ""),
+        TargetProcessCommandLine = replace_string(detail_objectCmd_s, '"', ''),
+        ActingProcessCommandLine = replace_string(detail_processCmd_s, '"', ''),
+        AdditionalFields = bag_pack(
+                      "name", name,
+                      "tags", detail_tags_s
+                  )
+    | lookup EventSeverityLookup on detail_filterRiskLevel_s
+    | invoke _ASIM_ResolveDvcFQDN('detail_endpointHostName_s')
+    | lookup IntegrityLevelLookup on $left.detail_parentIntegrityLevel_d == $right.IntegrityLevel
+    | project-rename ParentProcessIntegrityLevel = IntegrityType
+    | lookup IntegrityLevelLookup on $left.detail_objectIntegrityLevel_d == $right.IntegrityLevel
+    | project-rename TargetProcessIntegrityLevel = IntegrityType
+    | lookup IntegrityLevelLookup on $left.detail_integrityLevel_d == $right.IntegrityLevel
+    | project-rename ActingProcessIntegrityLevel = IntegrityType
+    | extend
+        EventCount = int(1),
+        EventProduct = "Vision One",
+        EventResult = "Success",
+        EventSchemaVersion = "0.1.4",
+        EventType = "ProcessCreated",
+        EventVendor = "Trend Micro",
+        EventSchema = "ProcessEvent",
+        DvcAction = "Allowed"
+    | project-rename
+        ActorUsername = detail_processUser_s,
+        EventStartTime = detail_eventTimeDT_t,
+        TargetProcessName = detail_objectName_s,
+        TargetUsername = detail_objectUser_s,
+        ActingProcessName = detail_processName_s,
+        ActingProcessSHA1 = detail_processFileHashSha1_s,
+        ActingProcessSHA256 = detail_processFileHashSha256_s,
+        DvcId = detail_endpointGuid_g,
+        DvcOs = detail_osName_s,
+        DvcOsVersion = detail_osVer_s,
+        EventOriginalSubType = detail_eventSubId_s,
+        EventOriginalType = detail_eventId_s,
+        EventOriginalUid = detail_uuid_g,
+        EventOriginalSeverity = detail_filterRiskLevel_s,
+        EventProductVersion = detail_pver_s,
+        ParentProcessSHA1 = detail_parentFileHashSha1_s,
+        ParentProcessSHA256 = detail_parentFileHashSha256_s,
+        TargetProcessSHA1 = detail_objectFileHashSha1_s,
+        TargetProcessSHA256 = detail_objectFileHashSha256_s,
+        EventUid = _ItemId,
+        EventMessage = description
+    | extend 
+        Dvc = DvcHostname,
+        EventEndTime = EventStartTime,
+        CommandLine = TargetProcessCommandLine,
+        Process = TargetProcessName,
+        User = TargetUsername,
+        Hash = coalesce(TargetProcessSHA256, TargetProcessSHA1, TargetProcessMD5)
+    | extend
+        DvcIdType = iff(isnotempty(DvcId), "Other", ""),
+        ActorUsernameType = iff(isnotempty(ActorUsername), "Simple", ""),
+        ActorUserType = _ASIM_GetUserType(ActorUsername, ""),
+        TargetUsernameType = iff(isnotempty(TargetUsername), "Simple", ""),
+        TargetUserType = _ASIM_GetUserType(TargetUsername, ""),
+        HashType = case(
+              isnotempty(Hash) and isnotempty(TargetProcessSHA256),
+              "TargetProcessSHA256",
+              isnotempty(Hash) and isnotempty(TargetProcessSHA1),
+              "TargetProcessSHA1",
+              isnotempty(Hash) and isnotempty(TargetProcessMD5),
+              "TargetProcessMD5",
+              ""
+          )
+    | project-away
+        *_d,
+        *_s,
+        *_g,
+        *_t,
+        *_b,
+        _ResourceId,
+        Computer,
+        MG,
+        ManagementGroupName,
+        RawData,
+        SourceSystem,
+        TenantId,
+        filters,
+        name
+};
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimProcessCreateVMwareCarbonBlackCloud
+// Description: This ASIM parser supports normalizing VMware Carbon Black Cloud logs to the ASIM Process Create normalized schema. VMware Carbon Black Cloud events are captured through VMware Carbon Black Cloud data connector which ingests Carbon Black Audit, Notification and Event data into Microsoft Sentinel through the REST API.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimProcessCreateVMwareCarbonBlackCloud(    ['disabled']:bool=false)
+{
+let EventFieldsLookup = datatable(
+  sensor_action_s: string,
+  DvcAction: string,
+  EventResult: string
+)[
+    "ACTION_ALLOW", "Allow", "Success",
+    "ACTION_BLOCK", "Block", "Failure",
+    "ACTION_TERMINATE", "Terminate", "Failure",
+    "ACTION_BREAK", "Break", "Failure",
+    "ACTION_SUSPEND", "Suspend", "Failure",
+    "", "", "Success"
+];
+let ThreatConfidenceLookup = datatable (ThreatOriginalConfidence: string, ThreatConfidence: int)
+    [
+    "1", 10,
+    "2", 20,
+    "3", 30,
+    "4", 40,
+    "5", 50,
+    "6", 60,
+    "7", 70,
+    "8", 80,
+    "9", 90,
+    "10", 100
+];
+let parser = (disabled: bool=false) {
+    let CarbonBlackEventsSchema = datatable (
+    eventType_s: string,
+    childproc_pid_d: real,
+    process_hash_s: string,
+    parent_hash_s: string,
+    childproc_hash_s: string,
+    sensor_action_s: string,
+    alert_id_g: string,
+    event_id_g: string,
+    createTime_s: string,
+    process_pid_d: real,
+    parent_pid_d: real,
+    org_key_s: string,
+    parent_cmdline_s: string,
+    process_reputation_s: string,
+    childproc_reputation_s: string,
+    parent_reputation_s: string,
+    process_guid_s: string,
+    childproc_guid_s: string,
+    parent_guid_s: string,
+    process_username_s: string,
+    target_cmdline_s: string,
+    childproc_name_s: string,
+    childproc_username_s: string,
+    device_external_ip_s: string,
+    device_group_s: string,
+    process_cmdline_s: string,
+    process_path_s: string,
+    device_id_s: string,
+    device_os_s: string,
+    event_description_s: string,
+    action_s: string,
+    event_origin_s: string,
+    parent_path_s: string,
+    device_name_s: string
+)[];
+    let CarbonBlackNotificationsSchema = datatable (
+    type_s: string,
+    threatInfo_incidentId_g: string,
+    threatInfo_score_d: real,
+    threatInfo_summary_s: string,
+    threatInfo_time_d: real,
+    threatInfo_threatCause_threatCategory_s: string,
+    threatInfo_threatCause_causeEventId_g: string,
+    ruleName_s: string,
+    deviceInfo_deviceVersion_s: string,
+    threatInfo_threatCause_originSourceType_s: string,
+    threatInfo_threatCause_reputation_s: string,
+    threatInfo_threatCause_reason_s: string,
+    id_g: string,
+    primary_event_id_g: string,
+    threat_id_g: string
+)[];
+    let processdata = union (CarbonBlackEvents_CL), (CarbonBlackEventsSchema)
+        | where not(disabled)
+        | where eventType_s == "endpoint.event.procstart" and isnotempty(childproc_pid_d)
+        | parse process_hash_s with * '["' ActingProcessMD5: string '","' ActingProcessSHA256: string '"]'
+        | parse parent_hash_s with * '["' ParentProcessMD5: string  '","' ParentProcessSHA256: string '"]'
+        | parse childproc_hash_s with * '["' TargetProcessMD5: string '","' TargetProcessSHA256: string '"]'
+        | lookup EventFieldsLookup on sensor_action_s;
+    let processdatawiththreat = processdata
+        | where isnotempty(alert_id_g) and isnotempty(event_id_g)
+        | join kind=leftouter(union (CarbonBlackNotifications_CL), (CarbonBlackNotificationsSchema)
+            | where type_s == "THREAT"
+            | project
+                threatInfo_incidentId_g,
+                threatInfo_score_d,
+                threatInfo_summary_s,
+                threatInfo_time_d,
+                threatInfo_threatCause_threatCategory_s,
+                threatInfo_threatCause_causeEventId_g,
+                ruleName_s,
+                deviceInfo_deviceVersion_s,
+                threatInfo_threatCause_originSourceType_s,
+                threatInfo_threatCause_reputation_s,
+                threatInfo_threatCause_reason_s)
+            on
+            $left.alert_id_g == $right.threatInfo_incidentId_g,
+            $left.event_id_g == $right.threatInfo_threatCause_causeEventId_g
+        | join kind=leftouter (union (CarbonBlackNotifications_CL), (CarbonBlackNotificationsSchema)
+            | where type_s == "CB_ANALYTICS"
+            | project
+                id_g,
+                primary_event_id_g,
+                deviceInfo_deviceVersion_s,
+                threat_id_g,
+                threatInfo_score_d,
+                threatInfo_summary_s,
+                threatInfo_threatCause_reason_s)
+            on $left.alert_id_g == $right.id_g, $left.event_id_g == $right.primary_event_id_g
+        | extend 
+            ThreatDescription = coalesce(threatInfo_summary_s, threatInfo_summary_s1),
+            ThreatCategory = threatInfo_threatCause_threatCategory_s,
+            ThreatFirstReportedTime = unixtime_milliseconds_todatetime(threatInfo_time_d),
+            RuleName = ruleName_s,
+            AdditionalFields_threat = bag_pack(
+                              "threatInfo_threatCause_reason",
+                              coalesce(threatInfo_threatCause_reason_s, threatInfo_threatCause_reason_s1),
+                              "threatInfo_threatCause_reputation",
+                              threatInfo_threatCause_reputation_s,
+                              "threatInfo_threatCause_originSourceType",
+                              threatInfo_threatCause_originSourceType_s
+                          ),
+            ThreatId = threat_id_g,
+            ThreatOriginalConfidence = tostring(toint(coalesce(threatInfo_score_d, threatInfo_score_d1))),
+            DvcOsVersion = coalesce(deviceInfo_deviceVersion_s, deviceInfo_deviceVersion_s1)
+        | lookup ThreatConfidenceLookup on ThreatOriginalConfidence
+        | extend Rule = RuleName;
+    let processdatawithoutthreat = processdata
+        | where isempty(alert_id_g) or isempty(event_id_g);
+    union processdatawithoutthreat, processdatawiththreat
+    | extend
+        EventStartTime = todatetime(split(createTime_s, '+')[0]),
+        TargetProcessId = tostring(toint(childproc_pid_d)),
+        ActingProcessId = tostring(toint(process_pid_d)),
+        ParentProcessId = tostring(toint(parent_pid_d)),
+        AdditionalFields_Common = bag_pack(
+                              "org_key",
+                              org_key_s,
+                              "alert_id",
+                              alert_id_g,
+                              "parent_cmdline",
+                              parent_cmdline_s,
+                              "process_reputation",
+                              process_reputation_s,
+                              "childproc_reputation",
+                              childproc_reputation_s,
+                              "parent_reputation",
+                              parent_reputation_s,
+                              "process_guid",
+                              process_guid_s,
+                              "childproc_guid",
+                              childproc_guid_s,
+                              "parent_guid",
+                              parent_guid_s
+                          )
+    | invoke _ASIM_ResolveDvcFQDN('device_name_s')
+    | project-rename 
+        ActorUsername = process_username_s,
+        TargetProcessCommandLine = target_cmdline_s,
+        TargetProcessName = childproc_name_s,
+        TargetUsername = childproc_username_s,
+        DvcIpAddr = device_external_ip_s,
+        DvcScope = device_group_s,
+        ActingProcessCommandLine = process_cmdline_s,
+        ActingProcessName = process_path_s,
+        DvcId = device_id_s,
+        DvcOriginalAction = sensor_action_s,
+        DvcOs = device_os_s,
+        EventMessage = event_description_s,
+        EventOriginalType = action_s,
+        EventOriginalUid = event_id_g,
+        EventOwner = event_origin_s,
+        ParentProcessName = parent_path_s,
+        EventUid = _ItemId
+    | extend
+        EventCount = int(1),
+        EventProduct = "Carbon Black Cloud",
+        EventSchemaVersion = "0.1.4",
+        EventType = "ProcessCreated",
+        EventVendor = "VMware",
+        EventSchema = "ProcessEvent",
+        AdditionalFields = bag_merge(AdditionalFields_threat, AdditionalFields_Common)
+    | extend 
+        Dvc = coalesce(DvcFQDN, DvcId, DvcHostname, DvcIpAddr),
+        EventEndTime = EventStartTime,
+        Hash = coalesce(TargetProcessSHA256, TargetProcessMD5),
+        CommandLine = TargetProcessCommandLine,
+        Process = TargetProcessName,
+        User = TargetUsername,
+        DvcIdType = iff(isnotempty(DvcId), "Other", ""),
+        ActorUsernameType = _ASIM_GetUsernameType(ActorUsername),
+        ActorUserType = _ASIM_GetUserType(ActorUsername, ""),
+        HashType = case(
+              isnotempty(TargetProcessSHA256),
+              "TargetProcessSHA256",
+              isnotempty(TargetProcessMD5),
+              "TargetProcessMD5",
+              ""
+          ),
+        TargetUsernameType = _ASIM_GetUsernameType(TargetUsername),
+        TargetUserType = _ASIM_GetUserType(TargetUsername, "")
+    | project-away
+        *_s,
+        *_d,
+        *_g,
+        *_b,
+        _ResourceId,
+        Computer,
+        MG,
+        ManagementGroupName,
+        RawData,
+        SourceSystem,
+        TenantId,
+        AdditionalFields_*
+};
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimProcessEvent
+// Description: This ASIM parser supports normalizing process event logs from all supported sources to the ASIM ProcessEvent normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimProcessEvent
+{
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludeASimProcess') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser);
+let imProcessEventBuiltInDisabled=toscalar('ExcludeASimProcessEventBuiltIn' in (DisabledParsers) or 'Any' in (DisabledParsers)); 
+union isfuzzy=true
+  vimProcessEmpty,
+  ASimProcessEventMicrosoft365D(imProcessEventBuiltInDisabled or ('ExcludeASimProcessEventMicrosoft365D' in (DisabledParsers) )),
+  ASimProcessEventCreateMicrosoftSysmon(imProcessEventBuiltInDisabled or ('ExcludeASimProcessEventCreateMicrosoftSysmon' in (DisabledParsers) )),
+  ASimProcessEventCreateMicrosoftSysmonWindowsEvent(imProcessEventBuiltInDisabled or ('ExcludeASimProcessEventCreateMicrosoftSysmonWindowsEvent' in (DisabledParsers) )),
+  ASimProcessTerminateMicrosoftSysmon(imProcessEventBuiltInDisabled or ('ExcludeASimProcessTerminateMicrosoftSysmon' in (DisabledParsers) )),
+  ASimProcessCreateMicrosoftSecurityEvents(imProcessEventBuiltInDisabled or ('ExcludeASimProcessCreateMicrosoftSecurityEvents' in (DisabledParsers) )),
+  ASimProcessTerminateMicrosoftSecurityEvents(imProcessEventBuiltInDisabled or ('ExcludeASimProcessTerminateMicrosoftSecurityEvents' in (DisabledParsers) )),
+  ASimProcessCreateLinuxSysmon(imProcessEventBuiltInDisabled or ('ExcludeASimProcessCreateLinuxSysmon' in (DisabledParsers) )),
+  ASimProcessTerminateLinuxSysmon(imProcessEventBuiltInDisabled or ('ExcludeASimProcessTerminateLinuxSysmon' in (DisabledParsers) )),
+  ASimProcessTerminateMicrosoftWindowsEvents(imProcessEventBuiltInDisabled or ('ExcludeASimProcessTerminateMicrosoftWindowsEvents' in (DisabledParsers) )),
+  ASimProcessCreateMicrosoftWindowsEvents(imProcessEventBuiltInDisabled or ('ExcludeASimProcessCreateMicrosoftWindowsEvents' in (DisabledParsers) )),
+  ASimProcessEventMD4IoT(imProcessEventBuiltInDisabled or ('ExcludeASimProcessEventMD4IoTh' in (DisabledParsers) )),
+  ASimProcessCreateSentinelOne(imProcessEventBuiltInDisabled or ('ExcludeASimProcessCreateSentinelOne' in (DisabledParsers) )),
+  ASimProcessEventNative(imProcessEventBuiltInDisabled or ('ExcludeASimProcessEventNative' in (DisabledParsers) )),
+  ASimProcessCreateVMwareCarbonBlackCloud(imProcessEventBuiltInDisabled or ('ExcludeASimProcessCreateVMwareCarbonBlackCloud' in (DisabledParsers) )),
+  ASimProcessTerminateVMwareCarbonBlackCloud(imProcessEventBuiltInDisabled or ('ExcludeASimProcessTerminateVMwareCarbonBlackCloud' in (DisabledParsers) )),
+  ASimProcessCreateTrendMicroVisionOne(imProcessEventBuiltInDisabled or ('ExcludeASimProcessCreateTrendMicroVisionOne' in (DisabledParsers) ))
+}
+
+
+
+//
+// Function Name: ASimProcessEventCreate
+// Description: This ASIM parser supports normalizing process create event logs from all supported sources to the ASIM ProcessEvent normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimProcessEventCreate
+{
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludeASimProcessEventCreate') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser);
+let imProcessEventBuiltInDisabled=toscalar('ExcludeASimProcessEventBuiltIn' in (DisabledParsers) or 'Any' in (DisabledParsers)); 
+union isfuzzy=true
+  vimProcessEmpty,
+  ASimProcessEventMicrosoft365D(imProcessEventBuiltInDisabled or ('ExcludeASimProcessEventMicrosoft365D' in (DisabledParsers) )),
+  ASimProcessCreateMicrosoftSysmon(imProcessEventBuiltInDisabled or ('ExcludeASimProcessCreateMicrosoftSysmon' in (DisabledParsers) )),
+  ASimProcessCreateMicrosoftSecurityEvents(imProcessEventBuiltInDisabled or ('ExcludeASimProcessCreateMicrosoftSecurityEvents' in (DisabledParsers) )),
+  ASimProcessCreateLinuxSysmon(imProcessEventBuiltInDisabled or ('ExcludeASimProcessCreateLinuxSysmon' in (DisabledParsers) )),
+  ASimProcessCreateMicrosoftWindowsEvents(imProcessEventBuiltInDisabled or ('ExcludeASimProcessCreateMicrosoftWindowsEvents' in (DisabledParsers) )),
+  ASimProcessCreateSentinelOne(imProcessEventBuiltInDisabled or ('ExcludeASimProcessCreateSentinelOne' in (DisabledParsers) )),
+  ASimProcessEventMD4IoT(imProcessEventBuiltInDisabled or ('ExcludeASimProcessEventMD4IoT' in (DisabledParsers) )),
+  ASimProcessEventNative(imProcessEventBuiltInDisabled or ('ExcludeASimProcessEventNative' in (DisabledParsers) )),
+  ASimProcessCreateVMwareCarbonBlackCloud(imProcessEventBuiltInDisabled or ('ExcludeASimProcessCreateVMwareCarbonBlackCloud' in (DisabledParsers) )),
+  ASimProcessCreateTrendMicroVisionOne(imProcessEventBuiltInDisabled or ('ExcludeASimProcessCreateTrendMicroVisionOne' in (DisabledParsers) ))
+}
+
+
+
+//
+// Function Name: ASimProcessEventMD4IoT
+// Description: This ASIM parser supports normalizing Microsoft Defender for IoT events to the ASIM Process Event normalized schema. 
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimProcessEventMD4IoT(    ['disabled']:bool=false)
+{
+let ProcessEvents_MD4IoT=()
+{
+  SecurityIoTRawEvent | where not(disabled)
+  | where RawEventName == "Process"
+  | extend
+    EventDetails = todynamic(EventDetails)
+  | extend 
+    DvcOs = iif (EventDetails.MessageSource == "Linux", "Linux", "Windows") // Intermediate fix
+  | extend 
+    EventOriginalUid = tostring(EventDetails.OriginalEventId), 
+    EventCount = toint(EventDetails.HitCount), 
+    EventProduct = 'Azure Defender for IoT', 
+    EventVendor = 'Microsoft', 
+    EventSchemaVersion = '0.1.0', 
+    EventSchema = 'ProcessEvent',
+    EventStartTime = todatetime(EventDetails.TimestampUTC), 
+    EventEndTime = todatetime(TimeGenerated), 
+    EventType = iff (EventDetails.EventType == 'EXIT', 'ProcessTerminate', 'ProcessCreated'), 
+    EventSubType = tostring(EventDetails.EventType),
+    EventResult = 'Success', 
+    TargetProcessId = tostring(EventDetails.ProcessId), 
+    TargetProcessCommandLine = coalesce (tostring(EventDetails.Commandline), tostring(EventDetails.Executable)), 
+    TargetProcessName = coalesce (tostring(EventDetails.Executable), split(EventDetails.Commandline," ")[0]),
+    TargetUsernameType = iif (DvcOs == "Windows", "Windows", "Simple"), 
+    TargetUsername = iff (DvcOs == "Windows", tostring(EventDetails.UserName), ""), 
+    ActingProcessId = iff (DvcOs == "Windows", tostring(EventDetails.ParentProcessId), "") 
+  | project-rename
+      DvcHostname = DeviceId,
+      EventProductVersion = AgentVersion, // Not available in Windows
+    _ResourceId = AssociatedResourceId, 
+    _SubscriptionId = AzureSubscriptionId 
+  | extend 
+      // -- aliases
+    User = TargetUsername, 
+    CommandLine = TargetProcessCommandLine, 
+    Process = TargetProcessName, 
+    Dvc = DvcHostname 
+  };
+  ProcessEvents_MD4IoT
+}
+
+
+
+//
+// Function Name: ASimProcessEventMicrosoft365D
+// Description: This ASIM parser supports normalizing Microsoft 365 Defender for endpoint to the ASIM Process Event normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimProcessEventMicrosoft365D(    ['disabled']:bool=false)
+{
+let parser=(disabled:boolean=false)
+  {
+  DeviceProcessEvents 
+  | where not(disabled)
+  | extend
+      EventOriginalUid = tostring(ReportId),
+      EventCount = int(1),
+      EventProduct = 'M365 Defender for Endpoint',
+      EventVendor = 'Microsoft',
+      EventSchemaVersion = '0.1.0',
+      EventSchema = 'ProcessEvent',
+      EventStartTime = todatetime(TimeGenerated),
+      EventEndTime = todatetime(TimeGenerated),
+      EventResult = 'Success'
+  | extend
+      ActorUsername = iff (InitiatingProcessAccountDomain == '', InitiatingProcessAccountName, strcat(InitiatingProcessAccountDomain, '\\', InitiatingProcessAccountName)),
+      TargetUsername = iff (AccountDomain == '', AccountName, strcat(AccountDomain, '\\', AccountName)),
+      TargetUsernameType = iff(AccountDomain == '','Simple', 'Windows'),
+      ActorUsernameType = iff(InitiatingProcessAccountDomain == '','Simple', 'Windows'),
+      ActorUserIdType = 'SID',
+      TargetUserIdType = 'SID',
+      ActorSessionId = tostring(InitiatingProcessLogonId),
+      TargetUserSessionId = tostring(LogonId),
+      Hash = coalesce (SHA256, SHA1, MD5, ""),
+      TargetProcessId = tostring(ProcessId),
+      ActingProcessId = tostring(InitiatingProcessId),
+      ParentProcessId = tostring(InitiatingProcessParentId),
+      DvcOs = iff (AdditionalFields has "ProcessPosixProcessGroupId", "Linux", "Windows")
+  | project-away InitiatingProcessAccountDomain, InitiatingProcessAccountName, AccountDomain, AccountName, ProcessId, InitiatingProcessId, InitiatingProcessParentId, LogonId, InitiatingProcessLogonId, ReportId
+  | extend
+       HashType = tostring(dynamic(["SHA256", "SHA1", "MD5"])[array_index_of(pack_array(SHA256, SHA1, MD5),Hash)])
+  | invoke _ASIM_ResolveDvcFQDN('DeviceName')
+  | project-rename
+      DvcId = DeviceId,
+      EventType = ActionType,
+      ActorUserId = InitiatingProcessAccountSid,
+      ActorUserAadId = InitiatingProcessAccountObjectId,
+      ActorUserUpn = InitiatingProcessAccountUpn,
+      TargetUserId = AccountSid,
+      TargetUserAadId = AccountObjectId,
+      TargetUserUpn = AccountUpn,
+      ParentProcessName = InitiatingProcessParentFileName,
+      TargetProcessFilename = FileName,
+      ParentProcessCreationTime = InitiatingProcessParentCreationTime,
+      TargetProcessName = FolderPath,
+      TargetProcessCommandLine = ProcessCommandLine,
+      TargetProcessMD5 = MD5,
+      TargetProcessSHA1 = SHA1,
+      TargetProcessSHA256 = SHA256,
+      TargetProcessIntegrityLevel = ProcessIntegrityLevel,
+      TargetProcessTokenElevation = ProcessTokenElevation,
+      TargetProcessCreationTime = ProcessCreationTime,
+      ActingProcessName = InitiatingProcessFolderPath, 
+      ActingProcessFilename = InitiatingProcessFileName,
+      ActingProcessCommandLine = InitiatingProcessCommandLine, 
+      ActingProcessMD5 = InitiatingProcessMD5, 
+      ActingProcessSHA1 = InitiatingProcessSHA1, 
+      ActingProcessSHA256 = InitiatingProcessSHA256, 
+      ActingProcessIntegrityLevel = InitiatingProcessIntegrityLevel,
+      ActingProcessTokenElevation = InitiatingProcessTokenElevation,
+      ActingProcessCreationTime = InitiatingProcessCreationTime,
+      MDE_MachineGroup = MachineGroup
+  | extend  // -- aliases
+      User = coalesce(TargetUsername, ActorUsername),
+      CommandLine = TargetProcessCommandLine,
+      Process = TargetProcessName,
+      Dvc = DvcHostname
+  | project-away AppGuardContainerId, Timestamp , SourceSystem, TenantId 
+  };
+  parser (disabled = disabled)
+}
+
+
+
+//
+// Function Name: ASimProcessEventNative
+// Description: This ASIM parser supports normalizing the native Process Event table (ASimProcessEventLogs) to the ASIM Process Event normalized schema. While the native table is ASIM compliant, the parser is needed to add capabilities, such as aliases, available only at query time.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimProcessEventNative(    ['disabled']:bool=false)
+{
+let parser=(disabled: bool=false) {
+  ASimProcessEventLogs 
+  | where not(disabled)
+  | project-rename
+      EventUid = _ItemId
+  | extend          
+      EventSchema = "ProcessEvent",
+      DvcScopeId = iff(isempty(DvcScopeId), _SubscriptionId, DvcScopeId)
+  //  -- Aliases
+  | extend
+      EventEndTime = iff (isnull(EventEndTime), TimeGenerated, EventEndTime),
+      EventStartTime = iff (isnull(EventEndTime), TimeGenerated, EventStartTime),
+      Dvc = coalesce (DvcFQDN, DvcHostname, DvcIpAddr, DvcId, _ResourceId),
+      Rule = coalesce(RuleName, tostring(RuleNumber)),
+      User = TargetUsername,
+      Process = TargetProcessName,
+      CommandLine = TargetProcessCommandLine,
+      Hash = coalesce(TargetProcessSHA512, TargetProcessSHA256, TargetProcessMD5, TargetProcessSHA1, TargetProcessIMPHASH)
+  | project-away
+      TenantId,
+      SourceSystem,
+      _SubscriptionId,
+      _ResourceId
+};
+parser (disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimProcessEventTerminate
+// Description: This ASIM parser supports normalizing process terminate event logs from all supported sources to the ASIM ProcessEvent normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimProcessEventTerminate
+{
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludeASimProcess') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser);
+let imProcessEventBuiltInDisabled=toscalar('ExcludeASimProcessEventBuiltIn' in (DisabledParsers) or 'Any' in (DisabledParsers)); 
+union isfuzzy=true
+vimProcessEmpty,
+ASimProcessEventMicrosoft365D(imProcessEventBuiltInDisabled or ('ExcludeASimProcessEventMicrosoft365D' in (DisabledParsers) )),
+ASimProcessTerminateMicrosoftSysmon(imProcessEventBuiltInDisabled or ('ExcludeASimProcessTerminateMicrosoftSysmon' in (DisabledParsers) )),
+ASimProcessTerminateMicrosoftSecurityEvents(imProcessEventBuiltInDisabled or ('ExcludeASimProcessTerminateMicrosoftSecurityEvents' in (DisabledParsers) )),
+ASimProcessTerminateLinuxSysmon(imProcessEventBuiltInDisabled or ('ExcludeASimProcessTerminateLinuxSysmon' in (DisabledParsers) )),
+ASimProcessTerminateMicrosoftWindowsEvents(imProcessEventBuiltInDisabled or ('ExcludeASimProcessTerminateMicrosoftWindowsEvents' in (DisabledParsers) )),
+ASimProcessEventMD4IoT(imProcessEventBuiltInDisabled or ('ExcludeASimProcessEventMD4IoT' in (DisabledParsers) )),
+ASimProcessEventNative(imProcessEventBuiltInDisabled or ('ExcludeASimProcessEventNative' in (DisabledParsers) )),
+ASimProcessTerminateVMwareCarbonBlackCloud(imProcessEventBuiltInDisabled or ('ExcludeASimProcessTerminateVMwareCarbonBlackCloud' in (DisabledParsers) ))
+}
+
+
+
+//
+// Function Name: ASimProcessTerminateLinuxSysmon
+// Description: This ASIM parser supports normalizing Sysmon for Linux process terminate events (event 5) collected using the Syslog connector to the ASIM Process Event normalized schema. 
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimProcessTerminateLinuxSysmon(    ['disabled']:bool=false)
+{
+let ParsedProcessEvent=(){
+Syslog
+| where not(disabled)
+| where SyslogMessage has_all ('<Provider Name="Linux-Sysmon"', '<EventID>5</EventID>')
+| parse SyslogMessage with * '<Data Name="RuleName">'RuleName'</Data>'
+                            '<Data Name="UtcTime">'UtcTime'</Data>'
+                            '<Data Name="ProcessGuid">{'ProcessGuid'}</Data>'
+                            '<Data Name="ProcessId">'ProcessId:string'</Data>'
+                            '<Data Name="Image">'Image'</Data>'*
+| parse SyslogMessage with *'<Data Name="User">'ActorUsername '</Data>' *
+| project-away SyslogMessage
+| extend 
+                        EventType = "ProcessTerminated",
+                        EventStartTime = todatetime(TimeGenerated),
+                        EventEndTime = todatetime(TimeGenerated),
+                        EventCount = int(1),
+                        EventVendor = "Microsoft",
+                        EventSchemaVersion = "0.1.0",
+                        EventSchema = 'ProcessEvent',
+                        EventOriginalType='5',
+                        EventProduct = "Sysmon",
+                        EventResult = 'Success',
+                        DvcOs = "Linux"
+                | project-rename
+                        DvcHostname = Computer,
+                        TargetProcessName = Image,
+                        TargetProcessId = ProcessId
+                | extend
+                        ActorUsernameType = iff(isnotempty(ActorUsername),'Windows', ''),
+                        TargetProcessGuid = ProcessGuid,
+                        //***** Aliases ******
+                        User = ActorUsername,
+                        Process = TargetProcessName,
+                        Dvc = DvcHostname
+}; ParsedProcessEvent
+}
+
+
+
+//
+// Function Name: ASimProcessTerminateMicrosoftSecurityEvents
+// Description: This ASIM parser supports normalizing Windows process terminate events (event 4689) collected using the Security Events connectors, utilizing either the Log Analytics agent or the Azure Monitor Agent (AMA) and stored in the SecurityEvent table to the ASIM Process Event normalized schema. 
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimProcessTerminateMicrosoftSecurityEvents(    ['disabled']:bool=false)
+{
+let ProcessEvents=(){
+ SecurityEvent
+ | where not(disabled)
+ // -- Filter
+ | where EventID == 4689
+ // -- Map
+ | extend
+   // Event
+     EventCount = int(1),
+     EventVendor = "Microsoft",
+     EventProduct = "Security Events",
+     EventSchemaVersion = "0.1.0",
+     EventSchema = 'ProcessEvent',
+     EventStartTime = todatetime(TimeGenerated),
+     EventEndTime = todatetime(TimeGenerated),
+     EventType = "ProcessTerminated",
+     EventResult = 'Success',
+     EventOriginalType = tostring(EventID),
+     EventOriginalUid = EventOriginId,
+     EventResultDetails = Status,
+     EventOriginalResultDetails = Status, 
+   // Device
+     DvcId = SourceComputerId,
+     DvcHostname = Computer,
+     DvcOs = "Windows",
+   // Users
+     ActorUserIdType = iff (SubjectUserSid <> "S-1-0-0", "SID", ""),
+     ActorUserId = iff (SubjectUserSid <> "S-1-0-0", SubjectUserSid, ""), 
+     ActorUsername = iff (SubjectDomainName == '-', SubjectUserName, SubjectAccount),
+     ActorUsernameType = iff(SubjectDomainName == '-','Simple', 'Windows'),
+     ActorSessionId = SubjectLogonId,
+     ActorDomainName = SubjectDomainName,
+   // Processes 
+     TargetProcessId = tostring(toint(ProcessId)),
+     TargetProcessName = ProcessName,
+     TargetProcessCommandLine = CommandLine,
+     TargetProcessTokenElevation = TokenElevationType,
+     Process = ProcessName
+   // Aliases
+   | extend 
+     User = ActorUsername,
+     Dvc = DvcHostname,
+     Process = TargetProcessName
+ }; ProcessEvents
+}
+
+
+
+//
+// Function Name: ASimProcessTerminateMicrosoftSysmon
+// Description: This ASIM parser supports normalizing Microsoft Windows Sysmon process terminate events (event 5) collected using the Event or WEF (WindowsEvent table) connectors to the ASIM Process Event normalized schema. 
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimProcessTerminateMicrosoftSysmon(    ['disabled']:bool=false)
+{
+let parser = (disabled:bool = false) {
+    // this is the parser for sysmon from Event table
+    let parser_Event = (disabled:bool=false) {
+        Event 
+        | where not(disabled)
+        | where Source == "Microsoft-Windows-Sysmon" and EventID == 5
+        | parse-kv EventData as (
+            ProcessId:string,
+            ProcessGuid:string,
+            Image:string,
+            User:string
+          ) 
+          with (regex=@'<Data Name="(\w+)">{?([^<]*?)}?</Data>')
+        | project-rename
+            ActorUsername = User,
+            DvcHostname = Computer,
+            TargetProcessName = Image,
+            TargetProcessGuid = ProcessGuid,
+            TargetProcessId = ProcessId
+        | extend 
+            EventProduct = "Sysmon"
+        | project-away EventData, ParameterXml, RenderedDescription, MG, ManagementGroupName, Message, AzureDeploymentID, SourceSystem, EventCategory, EventLevelName, EventLevel, EventLog, Role, TenantId, UserName
+    };
+    let parser_WindowsEvent=(disabled:bool=false){
+        WindowsEvent
+        | where not(disabled)
+        | where Provider == "Microsoft-Windows-Sysmon" and EventID == 5
+        | extend
+            EventProduct = "Security Events",
+            ActorUsername = tostring(EventData.User),
+            TargetProcessName = tostring(EventData.Image),
+            TargetProcessId = tostring(EventData.ProcessId),
+            TargetProcessGuid = tostring(EventData.ProcessGuid)
+        | project-rename
+            DvcHostname = Computer,
+            EventOriginalUid = EventOriginId
+        | project-away Channel, Data, EventData, EventLevelName, EventLevel, ManagementGroupName, Provider, RawEventData, SourceSystem, Task, TenantId
+    };
+    union isfuzzy=true parser_Event(disabled=disabled) // , parser_WindowsEvent(disabled=disabled)
+    | extend  
+        EventType = "ProcessTerminated",
+        EventStartTime = todatetime(TimeGenerated),
+        EventEndTime = todatetime(TimeGenerated),
+        EventCount = int(1),
+        EventVendor = "Microsoft",
+        EventSchemaVersion = "0.1.0",
+        EventSchema = 'ProcessEvent',
+        EventOriginalType=tostring(EventID),
+        EventResult = 'Success',
+        DvcOs = "Windows",
+        ActorUsernameType = iff(isnotempty(ActorUsername),'Windows', ''),
+        // -- Aliases 
+        User = ActorUsername,
+        Process = TargetProcessName,
+        Dvc = DvcHostname
+    | project-away EventID
+};
+parser (disabled = disabled)
+}
+
+
+
+//
+// Function Name: ASimProcessTerminateMicrosoftWindowsEvents
+// Description: This ASIM parser supports normalizing Windows process terminate events (event 4689) collected using the WEF connector (WindowsEvent table) to the ASIM Process Event normalized schema. 
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimProcessTerminateMicrosoftWindowsEvents(    ['disabled']:bool=false)
+{
+let ASIM_GetFilenamePart = (path:string) { tostring(split(path,@'\')[-1]) };
+let ASIM_ResolveWindowsUsername = (T:(username:string, domain:string, sid:string)) { 
+    T 
+    | extend 
+         type = case (
+            username == "-", "",
+            domain == "-", "Simple",
+            "Windows"
+        ),
+        username = case (
+          username == "-", "",
+          domain == '-', username,
+          strcat(domain, @"\" , username)
+        )
+};
+let parser=(disabled:boolean=false){
+WindowsEvent
+| where not(disabled)
+| where EventID == 4689
+| project-rename
+    DvcHostname = Computer
+| extend
+    EventCount = int(1),
+    EventVendor = 'Microsoft',
+    EventProduct = 'Security Events',
+    EventSchemaVersion = '0.1.0',
+    EventSchema = 'ProcessEvent',
+    EventResult = 'Success',
+    EventStartTime = todatetime(TimeGenerated),
+    EventEndTime = todatetime(TimeGenerated),
+    EventType = 'ProcessTerminated',
+    EventOriginalType = tostring(EventID),
+    DvcOs = 'Windows'
+| extend 
+    ActorUsername = strcat(EventData.SubjectDomainName, @'\', EventData.SubjectUserName), 
+    SubjectUserSid = tostring(EventData.SubjectUserSid)
+| extend
+    ActorUserIdType = iff (SubjectUserSid <> "S-1-0-0", "SID", ""),
+    ActorUserId = iff (SubjectUserSid <> "S-1-0-0", SubjectUserSid, ""), 
+    ActorUsernameType = "Windows"
+| extend 
+    ActorUserSid = ActorUserId,
+    ActorUserType = _ASIM_GetWindowsUserType(ActorUsername, ActorUserId)
+| extend
+    ActorSessionId = tostring(toint(EventData.SubjectLogonId)),
+    // Processes 
+    TargetProcessId = tostring(toint(tolong(EventData.NewProcessId))),
+    TargetProcessName = tostring(EventData.NewProcessName),
+    TargetProcessStatusCode = tostring(EventData.Status)
+| extend 
+    TargetProcessFilename = ASIM_GetFilenamePart(TargetProcessName)
+// -- Aliases
+| extend
+    User = ActorUsername,
+    Dvc = DvcHostname,
+    Process = TargetProcessName
+| project-away Channel, EventData, Data, EventID, EventLevelName, EventLevel, Provider, RawEventData, Task, TenantId, ManagementGroupName, SourceSystem, EventOriginId, SubjectUserSid
+}; 
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimProcessTerminateVMwareCarbonBlackCloud
+// Description: This ASIM parser supports normalizing VMware Carbon Black Cloud logs to the ASIM Process Terminate normalized schema. VMware Carbon Black Cloud events are captured through VMware Carbon Black Cloud data connector which ingests Carbon Black Audit, Notification and Event data into Microsoft Sentinel through the REST API.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimProcessTerminateVMwareCarbonBlackCloud(    ['disabled']:bool=false)
+{
+let EventFieldsLookup = datatable(
+  sensor_action_s: string,
+  DvcAction: string,
+  EventResult: string
+)[
+    "ACTION_ALLOW", "Allow", "Success",
+    "ACTION_BLOCK", "Block", "Failure",
+    "ACTION_TERMINATE", "Terminate", "Failure",
+    "ACTION_BREAK", "Break", "Failure",
+    "ACTION_SUSPEND", "Suspend", "Failure",
+    "", "", "Success"
+];
+let parser = (disabled: bool=false) {
+    CarbonBlackEvents_CL
+    | where not(disabled)
+    | where eventType_s == "endpoint.event.procend" and isnotempty(process_pid_d)
+    | parse process_hash_s with * '["' TargetProcessMD5: string '","' TargetProcessSHA256: string '"]'
+    | parse parent_hash_s with * '["' ActingProcessMD5: string  '","' ActingProcessSHA256: string '"]'
+    | lookup EventFieldsLookup on sensor_action_s
+    | extend
+        EventStartTime = todatetime(split(createTime_s, '+')[0]),
+        TargetProcessId = tostring(toint(process_pid_d)),
+        ActingProcessId = tostring(toint(parent_pid_d)),
+        ActorUsername = process_username_s,
+        TargetProcessCommandLine = coalesce(target_cmdline_s, process_cmdline_s),
+        AdditionalFields = bag_pack(
+                    "org_key", org_key_s,
+                    "alert_id", alert_id_g,
+                    "process_reputation", process_reputation_s,
+                    "parent_reputation", parent_reputation_s,
+                    "parent_guid", parent_guid_s,
+                    "process_guid", process_guid_s
+                )
+    | invoke _ASIM_ResolveDvcFQDN('device_name_s')
+    | project-rename 
+        TargetProcessName = process_path_s,
+        DvcIpAddr = device_external_ip_s,
+        DvcScope = device_group_s,
+        ActingProcessCommandLine = parent_cmdline_s,
+        DvcId = device_id_s,
+        DvcOriginalAction = sensor_action_s,
+        DvcOs = device_os_s,
+        EventOriginalType = action_s,
+        EventOriginalUid = event_id_g,
+        EventOwner = event_origin_s,
+        ActingProcessName = parent_path_s,
+        EventUid = _ItemId
+    | extend
+        EventCount = int(1),
+        EventProduct = "Carbon Black Cloud",
+        EventSchemaVersion = "0.1.4",
+        EventType = "ProcessTerminated",
+        EventVendor = "VMware",
+        EventSchema = "ProcessEvent"
+    | extend 
+        Dvc = coalesce(DvcFQDN, DvcId, DvcHostname, DvcIpAddr),
+        EventEndTime = EventStartTime,
+        Hash = coalesce(TargetProcessSHA256, TargetProcessMD5),
+        CommandLine = TargetProcessCommandLine,
+        Process = TargetProcessName,
+        User = ActorUsername,
+        DvcIdType = iff(isnotempty(DvcId), "Other", ""),
+        ActorUsernameType = _ASIM_GetUsernameType(ActorUsername),
+        ActorUserType = _ASIM_GetUserType(ActorUsername, ""),
+        HashType = case(
+              isnotempty(TargetProcessSHA256),
+              "TargetProcessSHA256",
+              isnotempty(TargetProcessMD5),
+              "TargetProcessMD5",
+              ""
+          )
+    | project-away
+        *_s,
+        *_d,
+        *_g,
+        *_b,
+        _ResourceId,
+        Computer,
+        MG,
+        ManagementGroupName,
+        RawData,
+        SourceSystem,
+        TenantId
+};
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: imProcessCreate
+// Description: This ASIM parser supports normalizing process create event logs from all supported sources to the ASIM ProcessEvent normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) imProcessCreate(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['commandline_has_any']:dynamic=dynamic([]),
+    ['commandline_has_all']:dynamic=dynamic([]),
+    ['commandline_has_any_ip_prefix']:dynamic=dynamic([]),
+    ['actingprocess_has_any']:dynamic=dynamic([]),
+    ['targetprocess_has_any']:dynamic=dynamic([]),
+    ['parentprocess_has_any']:dynamic=dynamic([]),
+    ['targetusername']:string='*',
+    ['dvcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dvcname_has_any']:dynamic=dynamic([]),
+    ['hashes_has_any']:dynamic=dynamic([]),
+    ['eventtype']:string='*')
+{
+let Generic=(starttime:datetime=datetime(null), endtime:datetime=datetime(null), commandline_has_any:dynamic=dynamic([]), commandline_has_all:dynamic=dynamic([]), commandline_has_any_ip_prefix:dynamic=dynamic([]), actingprocess_has_any:dynamic=dynamic([]), targetprocess_has_any:dynamic=dynamic([]), parentprocess_has_any:dynamic=dynamic([]), targetusername:string='*', dvcipaddr_has_any_prefix:dynamic=dynamic([]), dvcname_has_any:dynamic=dynamic([]), hashes_has_any:dynamic=dynamic([]), eventtype:string='*'){
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludeimProcessCreate') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser);
+let imBuiltInDisabled=toscalar('ExcludevimProcessCreateBuiltIn' in (DisabledParsers) or 'Any' in (DisabledParsers)); 
+union isfuzzy=true
+  vimProcessEmpty,
+  vimProcessEventMicrosoft365D (starttime=starttime, endtime=endtime, commandline_has_any=commandline_has_any, commandline_has_all=commandline_has_all, commandline_has_any_ip_prefix=commandline_has_any_ip_prefix, actingprocess_has_any=actingprocess_has_any, targetprocess_has_any=targetprocess_has_any, parentprocess_has_any=parentprocess_has_any, targetusername_has=targetusername, dvcipaddr_has_any_prefix=dvcipaddr_has_any_prefix, dvchostname_has_any=dvcname_has_any, eventtype=eventtype, hashes_has_any=hashes_has_any, (imBuiltInDisabled or('ExcludevimProcessEventMicrosoft365D'   in (DisabledParsers) ))),
+  vimProcessCreateMicrosoftSysmon        (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, targetusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessCreateMicrosoftSysmon'   in (DisabledParsers) ))),
+  vimProcessCreateMicrosoftSecurityEvents(starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, targetusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessCreateMicrosoftSecurityEvents'   in (DisabledParsers) ))),
+  vimProcessCreateLinuxSysmon            (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, targetusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessCreateLinuxSysmon'   in (DisabledParsers) ))),
+  vimProcessCreateMicrosoftWindowsEvents (starttime=starttime, endtime=endtime, commandline_has_any=commandline_has_any, commandline_has_all=commandline_has_all, commandline_has_any_ip_prefix=commandline_has_any_ip_prefix, actingprocess_has_any=actingprocess_has_any, targetprocess_has_any=targetprocess_has_any, parentprocess_has_any=parentprocess_has_any, targetusername_has=targetusername, dvcipaddr_has_any_prefix=dvcipaddr_has_any_prefix, dvchostname_has_any=dvcname_has_any, eventtype=eventtype, hashes_has_any=hashes_has_any, (imBuiltInDisabled or('ExcludevimProcessCreateMicrosoftWindowsEvents'   in (DisabledParsers) ))),
+  vimProcessCreateMD4IoT                  (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, targetusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessEventMD4IoT'   in (DisabledParsers) ))),
+  vimProcessCreateSentinelOne            (starttime=starttime, endtime=endtime, commandline_has_any=commandline_has_any, commandline_has_all=commandline_has_all, commandline_has_any_ip_prefix=commandline_has_any_ip_prefix, actingprocess_has_any=actingprocess_has_any, targetprocess_has_any=targetprocess_has_any, parentprocess_has_any=parentprocess_has_any, targetusername_has=targetusername, dvcipaddr_has_any_prefix=dvcipaddr_has_any_prefix, dvchostname_has_any=dvcname_has_any, eventtype=eventtype, hashes_has_any=hashes_has_any, (imBuiltInDisabled or('ExcludevimProcessCreateSentinelOne'   in (DisabledParsers) ))),
+  vimProcessEventNative (starttime=starttime, endtime=endtime, commandline_has_any=commandline_has_any, commandline_has_all=commandline_has_all, commandline_has_any_ip_prefix=commandline_has_any_ip_prefix, actingprocess_has_any=actingprocess_has_any, targetprocess_has_any=targetprocess_has_any, parentprocess_has_any=parentprocess_has_any, targetusername_has=targetusername, dvcipaddr_has_any_prefix=dvcipaddr_has_any_prefix, dvchostname_has_any=dvcname_has_any, eventtype=eventtype, hashes_has_any=hashes_has_any, disabled=(imBuiltInDisabled or('ExcludevimProcessEventNative'   in (DisabledParsers) ))),
+  vimProcessCreateVMwareCarbonBlackCloud (starttime=starttime, endtime=endtime, commandline_has_any=commandline_has_any, commandline_has_all=commandline_has_all, commandline_has_any_ip_prefix=commandline_has_any_ip_prefix, actingprocess_has_any=actingprocess_has_any, targetprocess_has_any=targetprocess_has_any, parentprocess_has_any=parentprocess_has_any, targetusername_has=targetusername, dvcipaddr_has_any_prefix=dvcipaddr_has_any_prefix, dvchostname_has_any=dvcname_has_any, eventtype=eventtype, hashes_has_any=hashes_has_any, disabled=(imBuiltInDisabled or('ExcludevimProcessCreateVMwareCarbonBlackCloud'   in (DisabledParsers) ))),
+  vimProcessCreateTrendMicroVisionOne    (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, targetusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessCreateTrendMicroVisionOne'   in (DisabledParsers) )))
+};
+Generic(starttime=starttime, endtime=endtime, commandline_has_any=commandline_has_any, commandline_has_all=commandline_has_all, commandline_has_any_ip_prefix=commandline_has_any_ip_prefix, actingprocess_has_any=actingprocess_has_any, targetprocess_has_any=targetprocess_has_any, parentprocess_has_any=parentprocess_has_any, targetusername=targetusername, dvcipaddr_has_any_prefix=dvcipaddr_has_any_prefix, dvcname_has_any=dvcipaddr_has_any_prefix, hashes_has_any=hashes_has_any, eventtype=eventtype)
+}
+
+
+
+//
+// Function Name: imProcessEvent
+// Description: This ASIM parser supports normalizing process event logs from all supported sources to the ASIM ProcessEvent normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) imProcessEvent(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['commandline_has_any']:dynamic=dynamic([]),
+    ['commandline_has_all']:dynamic=dynamic([]),
+    ['commandline_has_any_ip_prefix']:dynamic=dynamic([]),
+    ['actingprocess_has_any']:dynamic=dynamic([]),
+    ['targetprocess_has_any']:dynamic=dynamic([]),
+    ['parentprocess_has_any']:dynamic=dynamic([]),
+    ['actorusername']:string='*',
+    ['targetusername']:string='*',
+    ['dvcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dvcname_has_any']:dynamic=dynamic([]),
+    ['hashes_has_any']:dynamic=dynamic([]),
+    ['eventtype']:string='*')
+{
+let Generic=(starttime:datetime=datetime(null), endtime:datetime=datetime(null), commandline_has_any:dynamic=dynamic([]), commandline_has_all:dynamic=dynamic([]), commandline_has_any_ip_prefix:dynamic=dynamic([]), actingprocess_has_any:dynamic=dynamic([]), targetprocess_has_any:dynamic=dynamic([]), parentprocess_has_any:dynamic=dynamic([]), actorusername:string='*', targetusername:string='*', dvcipaddr_has_any_prefix:dynamic=dynamic([]), dvcname_has_any:dynamic=dynamic([]), hashes_has_any:dynamic=dynamic([]), eventtype:string='*'){
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludeimProcess') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser);
+let imBuiltInDisabled=toscalar('ExcludevimProcessEventBuiltIn' in (DisabledParsers) or 'Any' in (DisabledParsers)); 
+union isfuzzy=true
+  vimProcessEmpty,
+  vimProcessEventMicrosoft365D (starttime=starttime, endtime=endtime, commandline_has_any=commandline_has_any, commandline_has_all=commandline_has_all, commandline_has_any_ip_prefix=commandline_has_any_ip_prefix, actingprocess_has_any=actingprocess_has_any, targetprocess_has_any=targetprocess_has_any, parentprocess_has_any=parentprocess_has_any, targetusername_has=targetusername, dvcipaddr_has_any_prefix=dvcipaddr_has_any_prefix, dvchostname_has_any=dvcname_has_any, eventtype=eventtype, hashes_has_any=hashes_has_any, (imBuiltInDisabled or('ExcludevimProcessEventMicrosoft365D'   in (DisabledParsers) ))),
+  vimProcessEventCreateMicrosoftSysmon (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, targetusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessEventCreateMicrosoftSysmonn'   in (DisabledParsers) ))),
+  vimProcessEventCreateMicrosoftSysmonWindowsEvent (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, targetusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessEventCreateMicrosoftSysmonWindowsEvent'   in (DisabledParsers) ))),
+  vimProcessTerminateMicrosoftSysmon (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, actorusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessTerminateMicrosoftSysmon'   in (DisabledParsers) ))),
+  vimProcessCreateMicrosoftSecurityEvents (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, targetusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessCreateMicrosoftSecurityEvents'   in (DisabledParsers) ))),
+  vimProcessTerminateMicrosoftSecurityEvents (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, actorusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessTerminateMicrosoftSecurityEvents'   in (DisabledParsers) ))),
+  vimProcessCreateLinuxSysmon (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, targetusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessCreateLinuxSysmon'   in (DisabledParsers) ))),
+  vimProcessTerminateLinuxSysmon (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, actorusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessTerminateLinuxSysmon'   in (DisabledParsers) ))),
+  vimProcessTerminateMicrosoftWindowsEvents (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, actorusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessTerminateMicrosoftWindowsEvents'   in (DisabledParsers) ))),
+  vimProcessCreateMicrosoftWindowsEvents (starttime=starttime, endtime=endtime, commandline_has_any=commandline_has_any, commandline_has_all=commandline_has_all, commandline_has_any_ip_prefix=commandline_has_any_ip_prefix, actingprocess_has_any=actingprocess_has_any, targetprocess_has_any=targetprocess_has_any, parentprocess_has_any=parentprocess_has_any, targetusername_has=targetusername, dvcipaddr_has_any_prefix=dvcipaddr_has_any_prefix, dvchostname_has_any=dvcname_has_any, eventtype=eventtype, hashes_has_any=hashes_has_any, (imBuiltInDisabled or('ExcludevimProcessCreateMicrosoftWindowsEvents'   in (DisabledParsers) ))),
+  vimProcessCreateSentinelOne (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, targetusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessCreateSentinelOne'   in (DisabledParsers) ))),
+  vimProcessCreateMD4IoT (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, targetusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessCreateMD4IoT'   in (DisabledParsers) ))),
+  vimProcessTerminateMD4IoT (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, actorusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessTerminateMD4IoT'   in (DisabledParsers) ))),
+  vimProcessEventNative (starttime=starttime, endtime=endtime, commandline_has_any=commandline_has_any, commandline_has_all=commandline_has_all, commandline_has_any_ip_prefix=commandline_has_any_ip_prefix, actingprocess_has_any=actingprocess_has_any, targetprocess_has_any=targetprocess_has_any, parentprocess_has_any=parentprocess_has_any, targetusername_has=targetusername, actorusername_has=actorusername, dvcipaddr_has_any_prefix=dvcipaddr_has_any_prefix, dvchostname_has_any=dvcname_has_any, eventtype=eventtype, hashes_has_any=hashes_has_any, (imBuiltInDisabled or('ExcludevimProcessEventNative'   in (DisabledParsers) ))),
+  vimProcessCreateSentinelOne            (starttime=starttime, endtime=endtime, commandline_has_any=commandline_has_any, commandline_has_all=commandline_has_all, commandline_has_any_ip_prefix=commandline_has_any_ip_prefix, actingprocess_has_any=actingprocess_has_any, targetprocess_has_any=targetprocess_has_any, parentprocess_has_any=parentprocess_has_any, targetusername_has=targetusername, dvcipaddr_has_any_prefix=dvcipaddr_has_any_prefix, dvchostname_has_any=dvcname_has_any, eventtype=eventtype, hashes_has_any=hashes_has_any, (imBuiltInDisabled or('ExcludevimProcessCreateSentinelOne'   in (DisabledParsers) ))),
+  vimProcessCreateVMwareCarbonBlackCloud (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, targetusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessCreateVMwareCarbonBlackCloud'   in (DisabledParsers) ))),
+  vimProcessTerminateVMwareCarbonBlackCloud (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, actorusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessTerminateVMwareCarbonBlackCloud'   in (DisabledParsers) )))
+    };
+Generic(starttime=starttime, endtime=endtime, commandline_has_any=commandline_has_any, commandline_has_all=commandline_has_all, commandline_has_any_ip_prefix=commandline_has_any_ip_prefix, actingprocess_has_any=actingprocess_has_any, targetprocess_has_any=targetprocess_has_any, parentprocess_has_any=parentprocess_has_any,actorusername=actorusername, targetusername=targetusername, dvcipaddr_has_any_prefix=dvcipaddr_has_any_prefix, dvcname_has_any=dvcname_has_any, hashes_has_any=hashes_has_any, eventtype=eventtype)
+}
+
+
+
+//
+// Function Name: imProcessTerminate
+// Description: This ASIM parser supports normalizing process terminate event logs from all supported sources to the ASIM ProcessEvent normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) imProcessTerminate(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['commandline_has_any']:dynamic=dynamic([]),
+    ['commandline_has_all']:dynamic=dynamic([]),
+    ['commandline_has_any_ip_prefix']:dynamic=dynamic([]),
+    ['actingprocess_has_any']:dynamic=dynamic([]),
+    ['targetprocess_has_any']:dynamic=dynamic([]),
+    ['parentprocess_has_any']:dynamic=dynamic([]),
+    ['actorusername']:string='*',
+    ['dvcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dvcname_has_any']:dynamic=dynamic([]),
+    ['eventtype']:string='*')
+{
+let Generic=(starttime:datetime=datetime(null), endtime:datetime=datetime(null), commandline_has_any:dynamic=dynamic([]), commandline_has_all:dynamic=dynamic([]), commandline_has_any_ip_prefix:dynamic=dynamic([]), actingprocess_has_any:dynamic=dynamic([]), targetprocess_has_any:dynamic=dynamic([]), parentprocess_has_any:dynamic=dynamic([]), actorusername:string='*', dvcipaddr_has_any_prefix:dynamic=dynamic([]), dvcname_has_any:dynamic=dynamic([]), eventtype:string='*'){
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludeimProcessTerminate') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser);
+let imBuiltInDisabled=toscalar('ExcludevimProcessTerminateBuiltIn' in (DisabledParsers) or 'Any' in (DisabledParsers)); 
+
+union isfuzzy=true
+  vimProcessEmpty,
+  vimProcessTerminateMicrosoftSysmon           (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, actorusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessTerminateMicrosoftSysmon'   in (DisabledParsers) ))),
+  vimProcessTerminateMicrosoftSecurityEvents        (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, actorusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessTerminateMicrosoftSecurityEvents'   in (DisabledParsers) ))),
+  vimProcessTerminateMicrosoftWindowsEvents  (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, actorusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessTerminateMicrosoftWindowsEvents'   in (DisabledParsers) ))),
+  vimProcessTerminateLinuxSysmon            (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, actorusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessTerminateLinuxSysmon'   in (DisabledParsers) ))),
+  vimProcessTerminateMD4IoT                  (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, actorusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessEventMD4IoT'   in (DisabledParsers) ))),
+  vimProcessEventNative (starttime=starttime, endtime=endtime, commandline_has_any=commandline_has_any, commandline_has_all=commandline_has_all, commandline_has_any_ip_prefix=commandline_has_any_ip_prefix, actingprocess_has_any=actingprocess_has_any, targetprocess_has_any=targetprocess_has_any, parentprocess_has_any=parentprocess_has_any, actorusername_has=actorusername, dvcipaddr_has_any_prefix=dvcipaddr_has_any_prefix, dvchostname_has_any=dvcname_has_any, eventtype=eventtype, disabled=(imBuiltInDisabled or('ExcludevimProcessEventNative'   in (DisabledParsers) ))),
+  vimProcessTerminateVMwareCarbonBlackCloud    (starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, actorusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype, (imBuiltInDisabled or('ExcludevimProcessTerminateVMwareCarbonBlackCloud'   in (DisabledParsers) )))
+};
+Generic(starttime, endtime, commandline_has_any, commandline_has_all, commandline_has_any_ip_prefix, actingprocess_has_any, targetprocess_has_any, parentprocess_has_any, actorusername, dvcipaddr_has_any_prefix, dvcname_has_any, eventtype)
+}
+
+
+
+//
+// Function Name: vimProcessCreateLinuxSysmon
+// Description: This ASIM parser supports filtering and normalizing Sysmon for Linux process create events (event 1) collected using the Syslog connector to the ASIM Process Event normalized schema. 
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimProcessCreateLinuxSysmon(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['commandline_has_any']:dynamic=dynamic([]),
+    ['commandline_has_all']:dynamic=dynamic([]),
+    ['commandline_has_any_ip_prefix']:dynamic=dynamic([]),
+    ['actingprocess_has_any']:dynamic=dynamic([]),
+    ['targetprocess_has_any']:dynamic=dynamic([]),
+    ['parentprocess_has_any']:dynamic=dynamic([]),
+    ['targetusername']:string='*',
+    ['dvcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dvcname_has_any']:dynamic=dynamic([]),
+    ['eventtype']:string='*',
+    ['disabled']:bool=false)
+{
+let ParsedProcessEvent=(){
+    Syslog
+    // --------------------------------------------------------------------------------------
+    | where
+    (isnull(starttime)   or TimeGenerated >= starttime )
+    and (isnull(endtime) or TimeGenerated <= endtime )
+    and not(disabled)
+    and (eventtype=='*' or eventtype=='ProcessCreated')
+    and (array_length(commandline_has_all)==0 or SyslogMessage has_all (commandline_has_all)) 
+    and (array_length(commandline_has_any)==0 or SyslogMessage has_any (commandline_has_any)) 
+    and (array_length(commandline_has_any_ip_prefix)==0 or has_any_ipv4_prefix(SyslogMessage, commandline_has_any_ip_prefix) ) 
+    and (array_length(actingprocess_has_any)==0 or SyslogMessage has_any (actingprocess_has_any)) 
+    and (array_length(targetprocess_has_any)==0 or SyslogMessage has_any (targetprocess_has_any)) 
+    and (array_length(parentprocess_has_any)==0)  /// ????
+    and (targetusername=='*' or SyslogMessage has targetusername)  
+    and (array_length(dvcipaddr_has_any_prefix)==0 or has_any_ipv4_prefix(HostIP,dvcipaddr_has_any_prefix) )
+    and (array_length(dvcname_has_any)==0 or SyslogMessage has_any (dvcname_has_any))   
+    // --------------------------------------------------------------------------------------
+    | where SyslogMessage has_all ('<Provider Name="Linux-Sysmon"', '<EventID>1</EventID>')
+    | parse SyslogMessage with 
+            *
+            '<EventRecordID>' EventRecordId:int '</EventRecordID>'
+            *
+            '<Computer>' SysmonComputer:string '</Computer>'
+            *
+            '<Data Name="RuleName">'RuleName // parsing the XML using the original fields name - for readability 
+            '</Data><Data Name="UtcTime">'UtcTime
+            '</Data><Data Name="ProcessGuid">{'ProcessGuid
+            '}</Data><Data Name="ProcessId">'ProcessId:string
+            '</Data><Data Name="Image">'Image
+            '</Data><Data Name="FileVersion">'FileVersion
+            '</Data><Data Name="Description">'Description
+            '</Data><Data Name="Product">'Product
+            '</Data><Data Name="Company">'Company'</Data>' *
+    // --------------------------------------------------------------------------------------
+    | where 
+        (array_length(dvcname_has_any)==0 or SysmonComputer has_any (dvcname_has_any))
+        and (array_length(targetprocess_has_any)==0 or Image has_any (targetprocess_has_any))
+    // --------------------------------------------------------------------------------------
+    | extend  OriginalFileName = extract (@'"OriginalFileName">([^<]+)<',1,SyslogMessage) // this field exists in sysmon version 10.42 and above - using extact to avoid parsing failure
+    | parse SyslogMessage with *
+            '<Data Name="CommandLine">'CommandLine'</Data>'
+            '<Data Name="CurrentDirectory">'CurrentDirectory
+            '</Data><Data Name="User">'User
+            '</Data><Data Name="LogonGuid">{'LogonGuid
+            '}</Data><Data Name="LogonId">'LogonId
+            '</Data><Data Name="TerminalSessionId">'TerminalSessionId
+            '</Data><Data Name="IntegrityLevel">'IntegrityLevel
+            '</Data><Data Name="Hashes">'Hashes
+            '</Data><Data Name="ParentProcessGuid">{'ParentProcessGuid
+            '}</Data><Data Name="ParentProcessId">'ParentProcessId:string
+            '</Data><Data Name="ParentImage">'ParentImage
+            '</Data><Data Name="ParentCommandLine">'ParentCommandLine '</Data>'*
+    // --------------------------------------------------------------------------------------
+    | where 
+        (array_length(commandline_has_all)==0 or CommandLine has_all (commandline_has_all))
+    and (array_length(commandline_has_any)==0 or CommandLine has_any (commandline_has_any)) // 
+    and (array_length(commandline_has_any_ip_prefix)==0 or has_any_ipv4_prefix(CommandLine, commandline_has_any_ip_prefix) )
+    and (array_length(actingprocess_has_any)==0 or ParentImage has_any (actingprocess_has_any))
+    and (targetusername=='*' or User has targetusername)
+    // --------------------------------------------------------------------------------------
+    | parse SyslogMessage with *'<Data Name="ParentUser">'ActorUsername '</Data>' *// this field appears in newer versions of Sysmon 
+    | extend    TargetProcessSHA1=extract(@'SHA1=(\w+)',1, tostring(Hashes)),
+                TargetProcessSHA256=extract(@'SHA256=(\w+)',1, tostring(Hashes)),
+                TargetProcessIMPHASH=extract(@'IMPHASH=(\w+)',1,tostring(Hashes)), // add to the empty schema + Excel file
+                TargetProcessMD5=extract(@'MD5=(\w+)',1, tostring(Hashes))
+    // End of XML parse
+    | project-away SyslogMessage, Hashes
+    | extend 
+                EventType = "ProcessCreated",
+                EventStartTime = TimeGenerated,
+                EventEndTime = TimeGenerated,
+                EventCount = int(1),
+                EventVendor = "Microsoft",
+                EventSchemaVersion = "0.1.0",
+                EventSchema = 'ProcessEvent',
+                EventProduct = "Sysmon for Linux",
+                EventResult = 'Success',
+                EventOriginalUid = tostring(EventRecordId),
+                DvcOs = "Linux",
+                TargetUserSessionId = tostring(LogonId)  ,           
+                TargetUsernameType = "Simple",
+                TargetUsername = User,
+                TargetProcessCommandLine = CommandLine,
+                TargetProcessCurrentDirectory = CurrentDirectory,
+                ActorUsernameType = "Simple",
+                EventOriginalType = '1' // Set with a constant value to avoid parsing
+    | project-rename 
+                // EventMessage = RenderedDescription, // field not available in Linux
+                DvcHostName = SysmonComputer, // Computer may be different than HostName, in which case HostIP may be incorrect. 
+                DvcIpAddr = HostIP, 
+                TargetUserSessionGuid = LogonGuid, 
+                TargetProcessId = ProcessId,
+                TargetProcessGuid = ProcessGuid,
+                TargetProcessName = Image,
+                TargetProcessIntegrityLevel = IntegrityLevel,
+                TargetProcessCompany = Company,
+                TargetProcessFileDescription = Description,
+                TargetProcessFileVersion = FileVersion,
+                TargetProcessFileProduct = Product,
+                ActingProcessId = ParentProcessId,
+                ActingProcessGuid = ParentProcessGuid,                          
+                ActingProcessCommandLine = ParentCommandLine,
+                ActingProcessName = ParentImage
+    | extend // aliases
+                User = ActorUsername,
+                Process = TargetProcessName,
+                Dvc = DvcHostName,
+                Hash = coalesce(TargetProcessSHA256, TargetProcessSHA1, TargetProcessMD5) // which appears first - will be aliases to "Hash"
+    | project-away
+                ProcessName, ProcessID
+}; ParsedProcessEvent
+}
+
+
+
+//
+// Function Name: vimProcessCreateMD4IoT
+// Description: This ASIM parser supports filtering and normalizing Microsoft Defender for IoT events to the ASIM Process Event normalized schema. 
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimProcessCreateMD4IoT(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['commandline_has_any']:dynamic=dynamic([]),
+    ['commandline_has_all']:dynamic=dynamic([]),
+    ['commandline_has_any_ip_prefix']:dynamic=dynamic([]),
+    ['actingprocess_has_any']:dynamic=dynamic([]),
+    ['targetprocess_has_any']:dynamic=dynamic([]),
+    ['parentprocess_has_any']:dynamic=dynamic([]),
+    ['targetusername']:string='*',
+    ['dvcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dvcname_has_any']:dynamic=dynamic([]),
+    ['eventtype']:string='*',
+    ['disabled']:bool=false)
+{
+let ProcessEvents_MD4IoT=()
+{
+  SecurityIoTRawEvent 
+  | where RawEventName == "Process" // TODO: exclude entries where segment EventType is "EXIT" by full segment structure
+  // --------------------------------------------------------------------------------------
+    | where
+    (isnull(starttime)   or TimeGenerated >= starttime )
+    and (isnull(endtime) or TimeGenerated <= endtime )
+    and not(disabled)
+    and (array_length(dvcipaddr_has_any_prefix)==0)
+    and (array_length(actingprocess_has_any)==0 ) 
+    and (array_length(parentprocess_has_any)==0)  
+    and (eventtype=='*' or eventtype=='ProcessCreated')
+    and (array_length(commandline_has_any)==0 or EventDetails has_any (commandline_has_any)) 
+    and (array_length(commandline_has_all)==0 or EventDetails has_all (commandline_has_all)) 
+    and (array_length(commandline_has_any_ip_prefix)==0 or has_any_ipv4_prefix(EventDetails, commandline_has_any_ip_prefix) ) 
+    and (array_length(targetprocess_has_any)==0 or EventDetails has_any (targetprocess_has_any)) 
+    and (targetusername=='*' or EventDetails has targetusername)  
+    and (array_length(dvcname_has_any)==0 or DeviceId has_any (dvcname_has_any))   
+  // --------------------------------------------------------------------------------------
+  | extend
+    EventDetails = todynamic(EventDetails)
+  | where EventDetails.EventType != 'EXIT' // TODO: move filter to prefiltering. see prev comment 
+  | extend // required for postfilterring
+    TargetProcessCommandLine = coalesce (tostring(EventDetails.Commandline), tostring(EventDetails.Executable)), 
+    TargetProcessName = coalesce (tostring(EventDetails.Executable), split(EventDetails.Commandline," ")[0]),
+    DvcOs = iif (EventDetails.MessageSource == "Linux", "Linux", "Windows") // Intermediate fix
+  | extend 
+    TargetUsername = iff (DvcOs == "Windows", tostring(EventDetails.UserName), "")
+  // --------------------------------------------------------------------------------------
+  | where (array_length(commandline_has_any)==0 or TargetProcessCommandLine has_any (commandline_has_any)) 
+    and (array_length(commandline_has_all)==0 or TargetProcessCommandLine has_all (commandline_has_all)) 
+    and (array_length(commandline_has_any_ip_prefix)==0 or has_any_ipv4_prefix(TargetProcessCommandLine, commandline_has_any_ip_prefix) ) 
+    and (array_length(targetprocess_has_any)==0 or TargetProcessName has_any (targetprocess_has_any)) 
+    and (targetusername=='*' or TargetUsername has targetusername)  
+  // --------------------------------------------------------------------------------------
+  | extend
+    EventOriginalUid = tostring(EventDetails.OriginalEventId), 
+    EventCount = toint(EventDetails.HitCount), 
+    EventProduct = 'Azure Defender for IoT', 
+    EventVendor = 'Microsoft', 
+    EventSchemaVersion = '0.1.0', 
+    EventSchema = 'ProcessEvent',
+    EventStartTime = todatetime(EventDetails.TimestampUTC), 
+    EventEndTime = todatetime(TimeGenerated), 
+    EventType = 'ProcessCreated', 
+    EventSubType = tostring(EventDetails.EventType),
+    EventResult = 'Success', 
+    TargetProcessId = tostring(EventDetails.ProcessId), 
+    TargetUsernameType = iif (DvcOs == "Windows", "Windows", "Simple"), 
+    ActingProcessId = iff (DvcOs == "Windows", tostring(EventDetails.ParentProcessId), "") 
+  | project-rename
+      DvcHostname = DeviceId,
+      EventProductVersion = AgentVersion, 
+    _ResourceId = AssociatedResourceId, 
+    _SubscriptionId = AzureSubscriptionId 
+  | extend 
+      // -- aliases
+    User = TargetUsername, 
+    CommandLine = TargetProcessCommandLine, 
+    Process = TargetProcessName, 
+    Dvc = DvcHostname 
+  };
+  ProcessEvents_MD4IoT
+}
+
+
+

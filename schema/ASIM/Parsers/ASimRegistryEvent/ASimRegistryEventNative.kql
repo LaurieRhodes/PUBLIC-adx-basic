@@ -1,0 +1,33 @@
+﻿//
+// Function Name: ASimRegistryEventNative
+// Description: This ASIM parser supports normalizing the native Registry Event table (ASimRegistryEventLogs) to the ASIM Registry Event normalized schema. While the native table is ASIM compliant, the parser is needed to add capabilities, such as aliases, available only at query time.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimRegistryEventNative(    ['disabled']:bool=false)
+{
+let parser=(disabled: bool=false) {
+  ASimRegistryEventLogs
+  | where not(disabled)
+  | project-rename
+      EventUid = _ItemId
+  | extend          
+      EventSchema = "RegistryEvent",
+      DvcScopeId = iff(isempty(DvcScopeId), _SubscriptionId, DvcScopeId)
+  //  -- Aliases
+  | extend
+      EventEndTime = iff (isnull(EventEndTime), TimeGenerated, EventEndTime),
+      EventStartTime = iff (isnull(EventEndTime), TimeGenerated, EventStartTime),
+      Dvc = coalesce (DvcFQDN, DvcHostname, DvcIpAddr, DvcId, _ResourceId),
+      User =  ActorUsername,
+      Rule = coalesce(RuleName, tostring(RuleNumber)),
+      Process =  ActingProcessName
+  | project-away
+      TenantId,
+      SourceSystem,
+      _SubscriptionId,
+      _ResourceId
+};
+parser (disabled=disabled)
+}

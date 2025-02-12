@@ -1,0 +1,33 @@
+﻿//
+// Function Name: _ASIM_GetUserType
+// Description: Deprecated function, please use _ASIM_GetWindowsUserType instead. This ASIM tabular function is intended for use in ASIM parsers and sets the UserType in Windows systems based on the username and sid
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) _ASIM_GetUserType(    ['username']:string,
+    ['sid']:string)
+{
+let ASIM_GetUserType = (username:string, sid:string) { 
+    case ( 
+        sid startswith "S-1-5-80", "Service",
+        sid startswith "S-1-5-21", case (
+              sid endswith "-500", "Admin",
+              sid endswith "-501", "Guest",
+              sid endswith "-502", "Service", // A user account that's used by the Key Distribution Center (KDC) service. The account exists only on domain controllers.
+              username contains "admin", "Admin",
+              username endswith "$", "Machine",
+              "Regular"),
+        username endswith "$", "Machine",
+        sid == "S-1-5-113", "Other", // Local account
+        sid == "S-1-5-7", "Anonymous", 
+        sid == "S-1-5-17", "Service", // An account that's used by the default Internet Information Services (IIS) user
+        sid == "S-1-5-18", "System", 
+        sid == "S-1-5-19", "Service", 
+        sid == "S-1-5-20", "Service" ,
+        isempty(username), "",
+        "Other"
+    )
+};
+ASIM_GetUserType(username,sid)
+}

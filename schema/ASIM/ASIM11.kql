@@ -1,0 +1,2672 @@
+//
+// Function Name: ASimFileEvent
+// Description: This ASIM parser supports normalizing File activity logs from all supported sources to the ASIM File Event normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimFileEvent(    ['pack']:bool=False)
+{
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludeASimFile') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser| where isnotempty(SourceSpecificParser));
+let ASimBuiltInDisabled=toscalar('ExcludeASimFileEventBuiltIn' in (DisabledParsers) or 'Any' in (DisabledParsers));
+let parser=(pack:bool=false){
+union isfuzzy=true
+  vimFileEventEmpty,
+  ASimFileEventLinuxSysmonFileCreated(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventLinuxSysmonFileCreated' in (DisabledParsers) ))),
+  ASimFileEventLinuxSysmonFileDeleted(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventLinuxSysmonFileDeleted' in (DisabledParsers) ))),
+  ASimFileEventAzureBlobStorage(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventAzureBlobStorage' in (DisabledParsers) ))),
+  ASimFileEventMicrosoft365D(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventMicrosoft365D' in (DisabledParsers) ))),
+  ASimFileEventAzureFileStorage(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventAzureFileStorage' in (DisabledParsers) ))),
+  ASimFileEventAzureQueueStorage(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventAzureQueueStorage' in (DisabledParsers) ))),
+  ASimFileEventMicrosoftSharePoint(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventMicrosoftSharePoint' in (DisabledParsers) ))),
+  ASimFileEventMicrosoftSysmon(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventMicrosoftSysmon' in (DisabledParsers) ))),
+  ASimFileEventMicrosoftSysmonWindowsEvent(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventMicrosoftSysmonWindowsEvent' in (DisabledParsers) ))),
+  ASimFileEventAzureTableStorage(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventAzureTableStorage' in (DisabledParsers) ))),
+  ASimFileEventMicrosoftWindowsEvents(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventMicrosoftWindowsEvents' in (DisabledParsers) ))),
+  ASimFileEventMicrosoftSecurityEvents(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventMicrosoftSecurityEvents' in (DisabledParsers) ))),
+  ASimFileEventNative(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventNative' in (DisabledParsers) ))),
+  ASimFileEventSentinelOne(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventSentinelOne' in (DisabledParsers) ))),
+  ASimFileEventVMwareCarbonBlackCloud(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventVMwareCarbonBlackCloud' in (DisabledParsers) ))),
+  ASimFileEventGoogleWorkspace(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventGoogleWorkspace' in (DisabledParsers) )))
+  };
+  parser (pack=pack)
+}
+
+
+
+//
+// Function Name: ASimFileEventAzureBlobStorage
+// Description: This ASIM parser supports normalizing Azure Blob Storage events, stored in the StorageBlobLogs table, to the ASIM file activity schema.
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimFileEventAzureBlobStorage(    ['disabled']:bool=False)
+{
+// https://docs.microsoft.comrest/api/storageservices/storage-analytics-logged-operations-and-status-messages
+let parser=(disabled: bool=false)
+{
+    let bloboperations=datatable(OperationName: string, EventType: string)
+[
+    "PutBlock", "FileCreated",
+    "PutBlob", "FileCreated",
+    "PutPage", "FileCreated",
+    "CreateContainer", "FolderCreated",
+    "CopyBlob", "FileCopied",
+    "QueryBlobContents", "FileAccessed",
+    "GetBlob", "FileAccessed",
+    "AppendBlock", "FileModified",
+    "ClearPage", "FileModified",
+    "PutBlockFromURL", "FileModified",
+    "DeleteBlob", "FileDeleted",
+    "DeleteContainer", "FolderDeleted"
+];
+    StorageBlobLogs
+    | where not(disabled)
+    // **** relevant data filtering;
+    | where OperationName in (bloboperations)
+    //
+    | lookup bloboperations on OperationName
+    | project-rename 
+        EventOriginalUid = CorrelationId
+        ,
+        EventOriginalType=OperationName
+        ,
+        HttpUserAgent=UserAgentHeader
+        ,
+        TargetUrl=Uri
+    | extend 
+        EventCount=int(1)
+        ,
+        EventStartTime=TimeGenerated
+        ,
+        EventEndTime=TimeGenerated
+        //	, EventType :string  ---> see lookup below
+        ,
+        EventResult=iff(StatusText == 'Success', 'Success', 'Failure') 
+        ,
+        EventProduct='Azure File Storage' 
+        ,
+        EventVendor='Microsoft'
+        ,
+        EventSchemaVersion='0.1.0'
+        ,
+        TargetFilePath=tostring(split(TargetUrl, '?')[0]) 
+        ,
+        TargetFilePathType='URL'
+        ,
+        SrcIpAddr=tostring(split(CallerIpAddress, ':')[0])
+        ,
+        SrcPortNumber=tostring(split(CallerIpAddress, ':')[1])
+    | extend TargetFileName=tostring(split(TargetFilePath, '/')[-1])
+    // Aliases
+    | extend 
+        FilePath=TargetFilePath
+};
+parser (disabled = disabled)
+}
+
+
+
+//
+// Function Name: ASimFileEventAzureFileStorage
+// Description: This ASIM parser supports normalizing Azure File Storage events, stored in the StorageFileLogs table, to the ASIM file activity schema.
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimFileEventAzureFileStorage(    ['disabled']:bool=False)
+{
+// https://docs.microsoft.comrest/api/storageservices/storage-analytics-logged-operations-and-status-messages
+let parser=(disabled:bool=false){
+let fileoperations=datatable(OperationName:string, EventType:string)[
+"DeleteFile", "FileDeleted"
+, "DeleteDirectory", "FolderDeleted"
+, "GetFile", "FileAccessed"
+, "CopyFile", "FileCopied"
+, "CreateFileSnapshot", "FileCreated"
+, "CreateDirectory", "FolderCreated"
+, "CreateFile", "FileCreated"
+, "CreateShare", "FolderCreated"
+, "DeleteShare", "FileDeleted"
+, "PutRange", "FileModified"
+, "CopyFileDestination", "FileCopied"
+, "CopyFileSource", "FileCopied"
+];
+StorageFileLogs
+| where not(disabled)
+// **** relevant data filtering;
+| where OperationName in (fileoperations)
+//
+| extend 
+      EventCount=int(1)
+    , EventStartTime=TimeGenerated
+    , EventEndTime=TimeGenerated
+//	, EventType :string  ---> see lookup below
+    , EventResult=iff(StatusText == 'Success', 'Success', 'Failure') 
+  	, EventOriginalUid = CorrelationId
+    , EventOriginalType=OperationName
+    , EventProduct='Azure File Storage' 
+    , EventVendor='Microsoft'
+    , EventSchemaVersion='0.1.0'
+	, TargetFilePath=tostring(split(Uri,'?')[0]) 
+	, TargetFilePathType='URL'
+  	, TargetUrl=Uri
+    ,  SrcIpAddr=tostring(split(CallerIpAddress,':')[0])
+    ,  SrcPortNumber=tostring(split(CallerIpAddress,':')[0])
+  	, HttpUserAgent=UserAgentHeader
+| extend TargetFileName=tostring(split(TargetFilePath,'/')[-1])
+| lookup fileoperations on OperationName
+// Aliases
+| extend 
+   FilePath=TargetFilePath
+   };
+parser (disabled = disabled)
+}
+
+
+
+//
+// Function Name: ASimFileEventAzureQueueStorage
+// Description: This ASIM parser supports normalizing Azure Queue Storage events, stored in the StorageQueueLogs table, to the ASIM file activity schema.
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimFileEventAzureQueueStorage(    ['disabled']:bool=False)
+{
+// https://docs.microsoft.comrest/api/storageservices/storage-analytics-logged-operations-and-status-messages
+let parser=(disabled: bool=false)
+{
+    let queueoperations=datatable(OperationName: string, EventType: string)
+[
+    "ClearMessages", "FileDeleted"
+        ,
+    "CreateQueue", "FileCreated"
+        ,
+    "DeleteQueue", "FileDeleted"
+        ,
+    "DeleteMessage", "FileDeleted"
+        ,
+    "GetQueue", "FileAccessed"
+        ,
+    "GetMessage", "FileAccessed"
+        ,
+    "GetMessages", "FileAccessed"
+        ,
+    "PeekMessage", "FileAccessed"
+        ,
+    "PeekMessages", "FileAccessed"
+        ,
+    "PutMessage", "FileCreated"
+        ,
+    "UpdateMessage", "FileModified" 
+];
+    StorageQueueLogs
+    | where not(disabled)
+    // **** relevant data filtering;
+    | where OperationName in (queueoperations)
+    //
+    | extend 
+        EventCount=int(1)
+        ,
+        EventStartTime=TimeGenerated
+        ,
+        EventEndTime=TimeGenerated
+        //	, EventType :string  ---> see lookup below
+        ,
+        EventResult=iff(StatusText == 'Success', 'Success', 'Failure') 
+        ,
+        EventOriginalUid = CorrelationId
+        ,
+        EventOriginalType=OperationName
+        ,
+        EventProduct='Azure File Storage' 
+        ,
+        EventVendor='Microsoft'
+        ,
+        EventSchemaVersion='0.1.0'
+        ,
+        TargetFilePath=tostring(split(Uri, '?')[0]) 
+        ,
+        TargetFilePathType='URL'
+        ,
+        TargetUrl=Uri
+        ,
+        SrcIpAddr=tostring(split(CallerIpAddress, ':')[0])
+        ,
+        SrcPortNumber=tostring(split(CallerIpAddress, ':')[0])
+        ,
+        HttpUserAgent=UserAgentHeader
+    | extend TargetFileName=tostring(split(TargetFilePath, '/')[-1])
+    | lookup queueoperations on OperationName
+    // Aliases
+    | extend 
+        FilePath=TargetFilePath
+};
+parser (disabled = disabled)
+}
+
+
+
+//
+// Function Name: ASimFileEventAzureTableStorage
+// Description: This ASIM parser supports normalizing Azure Table Storage events, stored in the StorageTableLogs table, to the ASIM file activity schema.
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimFileEventAzureTableStorage(    ['disabled']:bool=False)
+{
+// https://docs.microsoft.comrest/api/storageservices/storage-analytics-logged-operations-and-status-messages
+let parser=(disabled:bool=false){
+let tableoperations=datatable(OperationName:string, EventType:string)[
+, "CreateTable", "FileCreated"
+, "DeleteTable", "FileDeleted"
+, "DeleteEntity", "FileModified"
+, "InsertEntity", "FileModified"
+, "InsertOrMergeEntity", "FileModified"
+, "InsertOrReplaceEntity", "FileModified"
+, "QueryEntity", "FileAccessed"
+, "QueryEntities", "FileAccessed"
+, "QueryTable", "FileAccessed"
+, "QueryTables", "FileAccessed"
+, "UpdateEntity", "FileModified"
+, "MergeEntity", "FileModified"
+    ];
+    StorageTableLogs
+    | where not(disabled)
+    // **** relevant data filtering;
+    | where OperationName in (tableoperations)
+    //
+    | extend 
+          EventCount=int(1)
+        , EventStartTime=TimeGenerated
+        , EventEndTime=TimeGenerated
+    //	, EventType :string  ---> see lookup below
+        , EventResult=iff(StatusText == 'Success', 'Success', 'Failure') 
+        , EventOriginalUid = CorrelationId
+        , EventOriginalType=OperationName
+        , EventProduct='Azure File Storage' 
+        , EventVendor='Microsoft'
+        , EventSchemaVersion='0.1.0'
+      , TargetFilePath=tostring(split(Uri,'?')[0]) 
+      , TargetFilePathType='URL'
+        , TargetUrl=Uri
+        ,  SrcIpAddr=tostring(split(CallerIpAddress,':')[0])
+        ,  SrcPortNumber=tostring(split(CallerIpAddress,':')[0])
+        , HttpUserAgent=UserAgentHeader
+    | extend TargetFileName=tostring(split(TargetFilePath,'/')['-1'])
+    | lookup tableoperations on OperationName
+    // Aliases
+    | extend 
+       FilePath=TargetFilePath
+       };
+  parser (disabled = disabled)
+}
+
+
+
+//
+// Function Name: ASimFileEventGoogleWorkspace
+// Description: This ASIM parser supports normalizing the Google Workspace (Drive) logs ingested in GWorkspace_ReportsAPI_drive_CL table to the ASIM file activity normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimFileEventGoogleWorkspace(    ['disabled']:bool=False)
+{
+let parser = (
+  disabled: bool = false
+  ) {
+  let GoogleWorkspaceSchema = datatable (
+  event_name_s: string,
+  event_type_s: string,
+  id_uniqueQualifier_s: string,
+  actor_email_s: string,
+  actor_profileId_s: string,
+  IPAddress: string,
+  doc_type_s: string,
+  doc_title_s: string,
+  originating_app_id_s: string,
+  id_applicationName_s: string,
+  old_value_s: string,
+  new_value_s: string,
+  destination_folder_title_s: string,
+  source_folder_title_s: string,
+  copy_type_s: string,
+  target_user_s: string,
+  doc_id_s: string,
+  primary_event_b: bool,
+  billable_b: bool,
+  owner_s: string,
+  owner_is_shared_drive_b: bool,
+  is_encrypted_b: bool,
+  visibility_s: string,
+  shared_drive_id_s: string,
+  destination_folder_id_s: string,
+  source_folder_id_s: string,
+  TimeGenerated: datetime,
+  _ResourceId: string,
+  Computer: string,
+  MG: string,
+  ManagementGroupName: string,
+  RawData: string,
+  SourceSystem: string,
+  TenantId: string,
+  _ItemId: string
+)[];
+    let EventFieldsLookup = datatable (
+    EventOriginalSubType: string,
+    EventType: string,
+    EventSubType: string
+)
+        [
+    "download", "FileAccessed", "Download",
+    "edit", "FileModified", "Checkin",
+    "upload", "FileCreated", "Upload",
+    "create", "FileCreated", "Checkin",
+    "rename", "FileRenamed", "",
+    "view", "FileAccessed", "Preview",
+    "preview", "FileAccessed", "Preview",
+    "copy", "FileCopied", "",
+    "source_copy", "FileCopied", "",
+    "delete", "FileDeleted", "",
+    "trash", "FileDeleted", "Recycle",
+    "move", "FileMoved", "",
+    "untrash", "FileCreatedOrModified", "Checkin",
+    "deny_access_request", "FileAccessed", "Preview",
+    "expire_access_request", "FileAccessed", "Preview",
+    "request_access", "FileAccessed", "Preview",
+    "add_to_folder", "FileCreated", "Checkin",
+    "approval_canceled", "FileAccessed", "",
+    "approval_comment_added", "FileAccessed", "",
+    "approval_completed", "FileAccessed", "Preview",
+    "approval_decisions_reset", "FileAccessed", "",
+    "approval_due_time_change", "FileAccessed", "",
+    "approval_requested", "FileAccessed", "Preview",
+    "approval_reviewer_change", "FileAccessed", "",
+    "approval_reviewer_responded", "FileAccessed", "",
+    "create_comment", "FileModified", "Checkin",
+    "delete_comment", "FileModified", "Checkin",
+    "edit_comment", "FileModified", "Checkin",
+    "reassign_comment", "FileModified", "Checkin",
+    "reopen_comment", "FileModified", "Checkin",
+    "resolve_comment", "FileModified", "Checkin",
+    "add_lock", "FileModified", "",
+    "print", "FileAccessed", "Print",
+    "remove_from_folder", "FileDeleted", "",
+    "remove_lock", "FileModified", "",
+];
+    let SupportedEventNames = EventFieldsLookup
+        | project EventOriginalSubType;
+    union isfuzzy=true GoogleWorkspaceSchema, GWorkspace_ReportsAPI_drive_CL
+    | where not(disabled)
+    | where event_name_s in (SupportedEventNames)
+    | lookup EventFieldsLookup on $left.event_name_s == $right.EventOriginalSubType
+    | project-rename 
+        EventOriginalUid = id_uniqueQualifier_s,
+        ActorUsername = actor_email_s,
+        ActorUserId = actor_profileId_s,
+        SrcIpAddr = IPAddress,
+        TargetFileMimeType = doc_type_s,
+        TargetFilePath = doc_title_s,
+        ActingAppId = originating_app_id_s,
+        EventOriginalType=event_type_s
+    | extend
+        TargetAppName = iif(id_applicationName_s == 'drive', "Google Workspace - Drive", ""),
+        TargetAppType = iif(id_applicationName_s == 'drive', "SaaS application", ""),
+        ActorUserIdType = iif(isnotempty(ActorUserId), "GWorkspaceProfileID", ""),
+        SrcFilePath = iif(event_name_s has_any ('rename', 'copy', 'source_copy'), old_value_s, ""),
+        TargetFilePath = iif(event_name_s has ('source_copy'), new_value_s, TargetFilePath),
+        TargetFileDirectory = iif(event_name_s has_any ('move'), destination_folder_title_s, ""),
+        SrcFileDirectory = iif(event_name_s has_any ('move'), source_folder_title_s, ""),
+        EventType = case(
+                TargetFileMimeType == "folder" and event_name_s == "create",
+                "FolderCreated",
+                TargetFileMimeType == "folder" and event_name_s == "rename",
+                "FolderModified",
+                TargetFileMimeType == "folder" and event_name_s == "delete",
+                "FolderDeleted",
+                TargetFileMimeType == "folder" and event_name_s == "trash",
+                "FolderDeleted",
+                TargetFileMimeType == "folder" and event_name_s == "move",
+                "FolderMoved",
+                TargetFileMimeType == "folder" and event_name_s == "untrash",
+                "FolderCreated",
+                EventType
+            ),
+        EventSubType = case(
+                  TargetFileMimeType == "folder" and event_name_s == "create",
+                  "",
+                  TargetFileMimeType == "folder" and event_name_s == "trash",
+                  "",
+                  TargetFileMimeType == "folder" and event_name_s == "untrash",
+                  "",
+                  EventSubType
+              ),
+        EventMessage = case(
+                  event_name_s == 'download',
+                  strcat(ActorUsername, " deleted an item"),
+                  event_name_s == 'edit',
+                  strcat(ActorUsername, " edited an item"),
+                  event_name_s == 'upload',
+                  strcat(ActorUsername, " uploaded an item"),
+                  event_name_s == 'create',
+                  strcat(ActorUsername, " created an item"),
+                  event_name_s == 'rename',
+                  strcat(ActorUsername, " renamed ", old_value_s, " to ", TargetFilePath),
+                  event_name_s == 'view',
+                  strcat(ActorUsername, " viewed an item"),
+                  event_name_s == 'preview',
+                  strcat(ActorUsername, " previewed an item"),
+                  event_name_s == 'copy',
+                  strcat(ActorUsername, " created a copy of original document ", old_value_s),
+                  event_name_s == 'delete',
+                  strcat(ActorUsername, " deleted an item"),
+                  event_name_s == 'trash',
+                  strcat(ActorUsername, " trashed an item"),
+                  event_name_s == 'move',
+                  strcat(ActorUsername, " moved an item from ", source_folder_title_s, " to ", destination_folder_title_s),
+                  event_name_s == 'untrash',
+                  strcat(ActorUsername, " restored an item"),
+                  event_name_s == 'source_copy',
+                  strcat(ActorUsername, " copied this item, creating a new item ", copy_type_s, " your organication ", new_value_s),
+                  event_name_s == 'deny_access_request',
+                  strcat(ActorUsername, " denied an access request for ", target_user_s),
+                  event_name_s == 'expire_access_request',
+                  strcat("An access request for ", target_user_s, " expired "),
+                  event_name_s == 'request_access',
+                  strcat(ActorUsername, " requested access to an item for ", target_user_s),
+                  event_name_s == 'add_to_folder',
+                  strcat(ActorUsername, " added an item to ", destination_folder_title_s),
+                  event_name_s == 'approval_canceled',
+                  strcat(ActorUsername, " canceled an approval on an item"),
+                  event_name_s == 'approval_comment_added',
+                  strcat(ActorUsername, " added a comment on an approval on an item"),
+                  event_name_s == 'approval_completed',
+                  "An approval was completed",
+                  event_name_s == 'approval_decisions_reset',
+                  "Approval decisions were reset",
+                  event_name_s == 'approval_due_time_change',
+                  strcat(ActorUsername, " requested a due time change on an approval"),
+                  event_name_s == 'approval_requested',
+                  strcat(ActorUsername, " requested approval on an item"),
+                  event_name_s == 'approval_reviewer_change',
+                  strcat(ActorUsername, " requested a reviewer change on an approval"),
+                  event_name_s == 'approval_reviewer_responded',
+                  strcat(ActorUsername, " reviewed an approval on an item"),
+                  event_name_s == 'create_comment',
+                  strcat(ActorUsername, " created a comment"),
+                  event_name_s == 'delete_comment',
+                  strcat(ActorUsername, " deleted a comment"),
+                  event_name_s == 'edit_comment',
+                  strcat(ActorUsername, " edited a comment"),
+                  event_name_s == 'reassign_comment',
+                  strcat(ActorUsername, " reassigned a comment"),
+                  event_name_s == 'reopen_comment',
+                  strcat(ActorUsername, " reopened a comment"),
+                  event_name_s == 'resolve_comment',
+                  strcat(ActorUsername, " resolved a comment"),
+                  event_name_s == 'add_lock',
+                  strcat(ActorUsername, " locked an item"),
+                  event_name_s == 'print',
+                  strcat(ActorUsername, " printed an item"),
+                  event_name_s == 'remove_from_folder',
+                  strcat(ActorUsername, " removed an item from from ", source_folder_title_s),
+                  event_name_s == 'remove_lock',
+                  strcat(ActorUsername, " unlocked an item"),
+                  ""
+              ),
+        AdditionalFields = bag_pack(
+                      "Doc_Id",
+                      doc_id_s,
+                      "Primary_Event",
+                      primary_event_b,
+                      "Billable",
+                      billable_b,
+                      "Owner",
+                      owner_s,
+                      "Owner_Is_Shared_Drive",
+                      owner_is_shared_drive_b,
+                      "Is_Encrypted",
+                      is_encrypted_b,
+                      "Visibility",
+                      visibility_s,
+                      "Copy_Type",
+                      copy_type_s,
+                      "Shared_Drive_Id",
+                      shared_drive_id_s,
+                      "Destination_Folder_Id",
+                      destination_folder_id_s,
+                      "Source_Folder_Id",
+                      source_folder_id_s
+                  )
+    | extend
+        EventOriginalSubType = event_name_s,
+        Application = TargetAppName,
+        ActorUsernameType = _ASIM_GetUsernameType(ActorUsername),
+        IpAddr = SrcIpAddr,
+        Src = SrcIpAddr,
+        TargetFileName=TargetFilePath,
+        FilePath = TargetFilePath,
+        TargetFilePathType = iif(isnotempty(TargetFilePath), "FileNameOnly", ""),
+        SrcFilePathType = iif(isnotempty(SrcFilePath), "FileNameOnly", ""),
+        FileName = TargetFilePath,
+        SrcFileName = SrcFilePath,
+        User = ActorUsername,
+        EventStartTime = TimeGenerated,
+        EventEndTime = TimeGenerated,
+        EventProduct = "Workspace",
+        EventVendor = "Google",
+        EventResult = "Success",
+        EventSchemaVersion = "0.2.1",
+        EventSchema = "FileEvent",
+        EventUid = _ItemId,
+        Dvc = "Workspace"
+    | project-away 
+        *_s,
+        *_b,
+        _ResourceId,
+        Computer,
+        MG,
+        ManagementGroupName,
+        RawData,
+        SourceSystem,
+        TenantId
+};
+parser (disabled = disabled)
+}
+
+
+
+//
+// Function Name: ASimFileEventLinuxSysmonFileCreated
+// Description: This ASIM parser supports normalizing Sysmon for Linux event 11, stored in the Syslog table, to the ASIM file activity schema file create event.
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimFileEventLinuxSysmonFileCreated(    ['disabled']:bool=False)
+{
+let parser = (
+  disabled: bool=false
+)
+{
+Syslog
+| where not(disabled)
+| where SyslogMessage has_all ('<Provider Name="Linux-Sysmon"', '<EventID>11</EventID>')
+| parse SyslogMessage with  *
+  '<EventRecordID>'msgEventRecordID:string'</EventRecordID>'
+  *
+  //'<Computer>'msgComputer:string'</Computer>'
+  '<Security UserId="'msgUserId:string '"/>'
+  * 
+  '<Data Name="ProcessGuid">'msgProcessGuid:string'</Data>'
+  '<Data Name="ProcessId">'msgProcessId:string'</Data>'
+  '<Data Name="Image">'msgImage:string'</Data>'
+  '<Data Name="TargetFilename">'msgTargetFileName:string'</Data>'
+  '<Data Name="CreationUtcTime">'msgCreationUtcTime:datetime'</Data>'*
+| parse SyslogMessage with *'<Data Name="User">'ActorUsername '</Data>'*
+| extend
+    EventCount=int(1)
+  , EventStartTime =TimeGenerated 
+  , EventEndTime=TimeGenerated
+  , EventType = 'FileCreated'
+  , EventResult ='Success'
+  , EventOriginalType ='11' 
+  , EventProduct='Sysmon for Linux'
+  , EventProductVersion='v13.22'
+  , EventVendor ='Microsoft'
+  , EventSchemaVersion ='0.1.0'
+  , DvcOs = 'Linux'
+  , TargetFilePathType='Unix'
+  , ActorUserType = iff(isnotempty(ActorUsername),'Simple', '') // make sure user type is okay
+| project-rename
+    DvcHostname=Computer
+  , EventOriginalUid=msgEventRecordID
+  , ActingProcessName =msgImage
+  , ActingProcessId=msgProcessId
+  , ActingProcessGuid=msgProcessGuid
+  , TargetFilePath =msgTargetFileName
+  , TargetFileCreationTime =msgCreationUtcTime
+  // ------  Alias
+| extend
+    Process=ActingProcessName
+    , FilePath=TargetFilePath
+    , Dvc = DvcHostname
+    , User = ActorUsername
+| project-away SyslogMessage
+};
+parser (disabled = disabled)
+}
+
+
+
+//
+// Function Name: ASimFileEventLinuxSysmonFileDeleted
+// Description: This ASIM parser supports normalizing Sysmon for Linux events 23 and 26, stored in the Syslog table, to the ASIM file activity schema file delete event.
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimFileEventLinuxSysmonFileDeleted(    ['disabled']:bool=False)
+{
+let parser = (
+  disabled: bool=false
+  ) {
+  Syslog
+  | where not(disabled)
+  | where SyslogMessage has ('<Provider Name="Linux-Sysmon"') and SyslogMessage has_any('<EventID>23</EventID>', '<EventID>26</EventID>')	
+  | parse SyslogMessage with  
+      '<Event><System><Provider Name="Linux-Sysmon" Guid="{ff032593-a8d3-4f13-b0d6-01fc615a0f97}"/><EventID>'msgEventId: string'</EventID>'
+      *
+      '<EventRecordID>'msgEventRecordID: string'</EventRecordID>'
+      *
+      '<Computer>'msgComputer: string'</Computer>'
+      '<Security UserId="'msgUserId: string'"/>'
+      *
+      '<Data Name="ProcessGuid">{'msgProcessGuid: string'}</Data>'
+      '<Data Name="ProcessId">'msgProcessId: string'</Data>'
+      '<Data Name="User">'msgUser: string'</Data>'
+      '<Data Name="Image">'msgImage: string'</Data>'
+      '<Data Name="TargetFilename">'msgTargetFilename: string'</Data>'
+      '<Data Name="Hashes">'msgHashes: string'</Data>' *	
+  | extend
+      EventCount=int(1)
+      ,
+      EventStartTime =TimeGenerated
+      ,
+      EventEndTime=TimeGenerated
+      ,
+      EventType = 'FileDeleted'
+      ,
+      EventResult ='Success' 
+      ,
+      EventProduct='Sysmon for Linux'
+      ,
+      EventProductVersion='v13.22' 
+      ,
+      EventVendor ='Microsoft'
+      ,
+      EventSchemaVersion ='0.1.0'
+      ,
+      DvcOs = 'Linux'
+      ,
+      TargetFilePathType='Unix'
+      ,
+      ActorUsernameType='Simple'
+  | project-rename
+      DvcHostname=Computer
+      ,
+      EventOriginalUid=msgEventRecordID
+      ,
+      EventOriginalType =msgEventId 
+      ,
+      ActorUsername=msgUser
+      ,
+      ActingProcessName =msgImage
+      ,
+      ActingProcessId=msgProcessId
+      ,
+      ActingProcessGuid=msgProcessGuid
+      ,
+      TargetFilePath =msgTargetFilename
+  // ------  Alias
+  | extend
+      Process=ActingProcessName
+      ,
+      FilePath=TargetFilePath
+      ,
+      Dvc =DvcHostname
+      ,
+      User=ActorUsername
+  | project-away SyslogMessage
+};
+parser (disabled = disabled)
+}
+
+
+
+//
+// Function Name: ASimFileEventMicrosoft365D
+// Description: This ASIM parser supports normalizing M365 Defender, stored in the DeviceFileEvents table, for Endpoint events to the ASIM file activity schema.
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimFileEventMicrosoft365D(    ['disabled']:bool=False)
+{
+let protocols = dynamic(['smb']);
+let parser=(disabled:bool=false){
+  let remote_events = 
+      DeviceFileEvents
+      | where not(disabled)
+      | where isnotempty(RequestAccountName)
+      | project-rename    
+          SrcIpAddr = RequestSourceIP,
+          ActorUserSid = RequestAccountSid,
+          TargetUserSid = InitiatingProcessAccountSid,
+          TargetUserAadId = InitiatingProcessAccountObjectId,
+          TargetUserUpn = InitiatingProcessAccountUpn
+      | extend
+          ActorWindowsUsername = strcat(RequestAccountDomain,'\\', RequestAccountName),
+          TargetWindowsUsername = strcat(InitiatingProcessAccountDomain,'\\', InitiatingProcessAccountName),
+          ActorUserUpn = "",
+          ActorUserAadId = ""
+      | extend
+          ActorUserType = _ASIM_GetWindowsUserType(ActorWindowsUsername, ActorUserSid),
+          TargetUserType = _ASIM_GetWindowsUserType(TargetWindowsUsername, TargetUserSid)
+      | extend
+          SrcPortNumber = toint(RequestSourcePort),
+          TargetUsername = coalesce(TargetUserUpn, TargetWindowsUsername),
+          TargetUsernameType = iff(isempty(TargetUserUpn), 'Windows', 'UPN'),
+          TargetUserId = coalesce(TargetUserAadId, TargetUserSid), 
+          TargetUserIdType = iff(isempty(TargetUserSid),'AADID','SID'),
+          IpAddr = SrcIpAddr,
+          Src = SrcIpAddr
+  ;
+  let local_events = 
+     DeviceFileEvents
+      | where not(disabled)
+      | where isempty(RequestAccountName)    
+      | project-rename
+          ActorUserSid = InitiatingProcessAccountSid,
+          ActorUserAadId = InitiatingProcessAccountObjectId,
+          ActorUserUpn = InitiatingProcessAccountUpn
+      | extend 
+          ActorWindowsUsername = strcat(InitiatingProcessAccountDomain,'\\', InitiatingProcessAccountName) 
+      | extend
+          ActorUserType = _ASIM_GetWindowsUserType(ActorWindowsUsername, ActorUserSid)
+      | project-away RequestAccountSid, RequestSourceIP
+  ;
+  union 
+      remote_events
+      , 
+      local_events
+  | project-rename
+     EventType = ActionType,
+     DvcId = DeviceId,
+     TargetFileMD5 = MD5,
+     TargetFileSHA1 = SHA1,
+     TargetFileSHA256 = SHA256,
+     ActingProcessCommandLine = InitiatingProcessCommandLine,
+     ActingProcessName =InitiatingProcessFolderPath,
+     ActingProcessMD5 = InitiatingProcessMD5,
+     ActingProcessSHA1 = InitiatingProcessSHA1,
+     ActingProcessSHA256 = InitiatingProcessSHA256,
+     ActingProcessParentFileName = InitiatingProcessParentFileName,
+     ActingProcessCreationTime = InitiatingProcessCreationTime,
+     ActingProcessParentCreationTime = InitiatingProcessParentCreationTime,
+     TargetFileName = FileName,
+     SrcFileName = PreviousFileName
+  | extend
+     DvcOs = iff(FolderPath startswith "/", "Linux", "Windows"),
+    TargetFileSize = tolong(FileSize)
+  | extend
+     EventCount = int(1),
+     EventOriginalUid = tostring(ReportId),
+     ActingProcessId = tostring(InitiatingProcessId),
+     EventStartTime = Timestamp, 
+     EventEndTime= Timestamp,
+     EventResult = 'Success',
+     EventProduct = 'M365 Defender for Endpoint',
+     EventSchema = 'FileEvent',
+     EventVendor = 'Microsoft',
+     EventSeverity = 'Informational',
+     EventSchemaVersion = '0.2.1',
+     DvcIdType = "MDEid",
+     ActorUsername = coalesce(ActorUserUpn, ActorWindowsUsername),
+     ActorUsernameType = iff(isempty(ActorUserUpn), 'Windows', 'UPN'),
+     ActorUserId = coalesce(ActorUserAadId, ActorUserSid), 
+     ActorUserIdType = iff(isempty(ActorUserSid),'AADID','SID'),
+     TargetFilePath = strcat(FolderPath, iff(DvcOs == "Linux", "/", "\\"), TargetFileName),
+     TargetFilePathType = iff(DvcOs == "Linux", "Unix", "Windows Local"),
+     SrcFilePath = strcat(PreviousFolderPath, iff(DvcOs == "Linux", "/", "\\"), SrcFileName),
+     SrcFilePathType = iff(DvcOs == "Linux", "Unix", "Windows Local"),
+     Hash=coalesce(TargetFileSHA256, TargetFileSHA1, TargetFileMD5),
+     NetworkApplicationProtocol = iff (RequestProtocol in (protocols), toupper(RequestProtocol), "")
+   | invoke _ASIM_ResolveDvcFQDN ('DeviceName')
+   | project-away DeviceName
+   | extend
+       HashType = tostring(dynamic(["SHA256", "SHA1", "MD5"])[array_index_of(pack_array(TargetFileSHA256, TargetFileSHA1, TargetFileMD5),Hash)])     
+   //  ****** Aliases
+   | extend 
+      User = ActorUsername,
+      Dvc = coalesce(DvcFQDN, DvcHostname),
+      FilePath = TargetFilePath,
+      Process = ActingProcessName,
+      CommandLine = ActingProcessCommandLine,
+      DvcMDEid = DvcId,
+      FileName = TargetFileName
+  | project-away MachineGroup, ReportId, SourceSystem, Initiating*, Timestamp, TenantId, Request*, PreviousFolderPath, FolderPath, AppGuardContainerId
+  | project-away ShareName, IsAzureInfoProtectionApplied, FileOrigin*, Sensitivity*
+  };
+  parser (disabled = disabled)
+}
+
+
+
+//
+// Function Name: ASimFileEventMicrosoftSecurityEvents
+// Description: This ASIM parser supports normalizing Microsoft Windows Events (WindowsEvent and SecurityEvent tables) logs ingested in 'SecurityEvent' table to the ASIM File Event normalized schema. Event IDs which are parsed as part of this parser: 4663
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimFileEventMicrosoftSecurityEvents(    ['disabled']:bool=False)
+{
+let Parser=(disabled:bool=false)
+{
+let EventTypeLookup = datatable (AccessMask:string,EventType:string)
+[
+    "0x1", "ObjectAccessed"
+    , "0x10", "MetadataModified"
+    , "0x100", "MetadataModified"
+    , "0x10000", "ObjectDeleted"
+    , "0x2", "ObjectModified"
+    , "0x20000", "MetadataAccessed"
+    , "0x4", "ObjectModified"
+    , "0x40", "ObjectDeleted"
+    , "0x40000", "MetadataModified"
+    , "0x6", "ObjectModified"
+    , "0x8", "MetadataAccessed"
+    , "0x80", "MetadataAccessed"
+    , "0x80000", "MetadataModified"
+];
+let UserTypeLookup = datatable (AccountType:string, ActorUserType:string)
+[
+  'User', 'Regular',
+  'Machine', 'Machine'
+];    
+let KnownSIDs = datatable (sid:string, username:string, type:string)
+[
+  'S-1-5-18', 'Local System', 'Simple',
+  'S-1-0-0', 'Nobody', 'Simple'
+];
+SecurityEvent
+| where not(disabled)
+| where EventID == 4663 
+  and ObjectType == "File"
+  and ObjectName !startswith @"\Device\"
+| project TimeGenerated, EventID, AccessMask, ProcessName, SubjectUserSid, AccountType, Computer, ObjectName, ProcessId, SubjectUserName, SubjectAccount, SubjectLogonId, HandleId,Type
+| lookup EventTypeLookup on AccessMask
+| lookup UserTypeLookup on AccountType
+| lookup KnownSIDs on $left.SubjectUserSid == $right.sid
+| extend ActingProcessName = ProcessName
+  , ActorUsername = iff (SubjectUserName == "-", username, SubjectAccount)
+  , ActorUsernameType = iff(SubjectUserName == '-',type, 'Windows')
+  , EventStartTime = TimeGenerated
+  , EventEndTime = TimeGenerated
+  , TargetFilePath = ObjectName
+  , TargetFilePathFormat = "Windows Local"
+  , ActingProcessId = tostring(toint(ProcessId))
+  , EventOriginalType = tostring(EventID)
+  , ActorUserIdType="SID"
+  , TargetFilePathType="Windows Local"
+| project-away EventID, ProcessId, AccountType, username
+| project-rename ActorUserId = SubjectUserSid
+  , DvcHostname = Computer
+  , Process = ProcessName
+  , FilePath = ObjectName
+  , ActorSessionId = SubjectLogonId
+  , FileSessionId = HandleId
+| extend EventSchema = "FileEvent"
+  , EventSchemaVersion = "0.1.1"
+  , EventResult = "Success"
+  , EventCount = int(1)
+  , EventVendor = 'Microsoft'
+  , EventProduct = 'Security Events'
+  , Dvc = DvcHostname
+  , ActorWindowsUsername = ActorUsername
+  , User = ActorUsername
+  , ActorUserSid = ActorUserId
+  | project-away AccessMask,ActorWindowsUsername,FileSessionId,SubjectAccount,SubjectUserName,TargetFilePathFormat,type
+};
+Parser (disabled = disabled)
+}
+
+
+
+//
+// Function Name: ASimFileEventMicrosoftSharePoint
+// Description: This ASIM parser supports normalizing Sharepoint and OneDrive for business events, stored in the OfficeActivity table, to the ASIM file activity schema.
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimFileEventMicrosoftSharePoint(    ['disabled']:bool=False)
+{
+let _ASIM_ResolveActorUsername = (T:(*), UsernameField: string) { 
+    T
+    | extend ActorUsername = column_ifexists(UsernameField,"")
+    | extend windows = ActorUsername has '\\'
+    | extend 
+        ActorUsernameType = iff (windows, "Windows", "UPN"),
+        ActorUserUpn =  iff (windows, "", ActorUsername),
+        ActorWindowsUsername = iff (windows, ActorUsername, "")
+};
+  let operations = datatable (Operation:string, EventType:string, EventSubType:string) [
+    "FileUploaded", "FileCreated", "Upload",
+    "FileAccessedExtended", "FileAccessed", "Extended",
+    "FileRecycled", "FileDeleted", "Recycle",
+    "FileDeleted", "FileDeleted", "",
+    "FileAccessed", "FileAccessed", "",
+    "FolderCreated", "FolderCreated", "",
+    "FilePreviewed", "FileAccessed", "Preview",
+    "FileDownloaded", "FileAccessed", "Download",
+    "FileSyncDownloadedFull", "FileAccessed", "Download",
+    "FolderModified", "FolderModified", "",
+    "FileModifiedExtended", "FolderModified", "Extended",
+    "FileModified", "FolderModified", "",
+    "FileVersionsAllDeleted", "FolderDeleted", "Versions",
+    "FileSyncUploadedFull", "FileCreated", "Upload",
+    "FileSensitivityLabelApplied", "FileAttributesUpdated", "",
+    "FileSensitivityLabelChanged", "FileAttributesUpdated", "",
+    "FileSensitivityLabelRemoved", "FileAttributesUpdated", "",
+    "SiteDeleted", "FolderDeleted", "Site",
+    "FileRenamed", "FileRenamed", "",
+    "FileMoved", "FileMoved", "",
+    "FileCopied", "FileCopied", "",
+    "FolderCopied", "FolderCopied", "",
+    "FolderMoved", "FolderMoved", "",
+    "FolderRenamed", "FolderRenamed", "",
+    "FolderRecycled", "FolderDeleted", "Recycle",
+    "FolderDeleted", "FolderDeleted", "",
+    "FileCheckedIn", "FileCreatedOrModified", "Checkin",
+    "FileCheckedOut", "FileAccessed", "Checkout"
+  ];
+  let multiple_file_operations = dynamic([
+    "FileRenamed",
+    "FileMoved",
+    "FileCopied",
+    "FolderCopied",
+    "FolderMoved",
+    "FolderRenamed"
+  ]);
+  let parser=(disabled:bool=false){
+    let OfficeActivityProjected = 
+        OfficeActivity
+        | where not(disabled)
+        | where RecordType == "SharePointFileOperation" and Operation != "FileMalwareDetected"
+        | project Operation, OrganizationId, OrganizationName, SourceRecordId, OfficeWorkload, UserId, ClientIP, UserAgent, Start_Time, TimeGenerated, Type, OfficeObjectId, SourceFileName, SourceFileExtension, DestinationFileName, DestinationFileExtension, Site_Url, DestinationRelativeUrl, UserKey, MachineDomainInfo, MachineId; // ,_ItemId 
+    let SingleFileOperationEvents = 
+        OfficeActivityProjected
+        | where Operation !in (multiple_file_operations)
+        | project-rename 
+            TargetFilePath = OfficeObjectId,
+            TargetFileName = SourceFileName,
+            TargetFileExtension = SourceFileExtension
+        | extend 
+            TargetFilePathType = "URL"
+        | project-away DestinationFileName, DestinationFileExtension, DestinationRelativeUrl
+    ;
+    // single in dest: SiteDeleted
+    let MultipleFileOperationsEvents = 
+        OfficeActivityProjected
+        | where Operation in (multiple_file_operations)
+        | project-rename 
+            SrcFilePath = OfficeObjectId,
+            TargetFileName = DestinationFileName,
+            TargetFileExtension = DestinationFileExtension,
+            SrcFileName = SourceFileName,
+            SrcFileExtension = SourceFileExtension
+        | extend 
+            TargetFilePath = strcat (Site_Url, DestinationRelativeUrl, "/", TargetFileName),
+            TargetFilePathType = "URL",
+            SrcFilePathType = "URL"
+        | project-away DestinationRelativeUrl
+    ;
+    union SingleFileOperationEvents, MultipleFileOperationsEvents
+    | lookup operations on Operation
+    | invoke _ASIM_ResolveActorUsername('UserId')
+    | project-away UserId
+    | project-rename 
+        EventOriginalType = Operation,
+        ActorScopeId = OrganizationId,
+        ActorScope = OrganizationName,
+        EventOriginalUid = SourceRecordId,
+        EventProduct = OfficeWorkload,
+        ActorUserId = UserKey,
+        HttpUserAgent = UserAgent,
+        SrcIpAddr = ClientIP,
+        EventStartTime = Start_Time,
+        // EvetUid = _ItemId,
+        TargetUrl = Site_Url,
+        SrcDvcId = MachineId,
+        SrcDvcScopeId = MachineDomainInfo
+    | extend
+        EventCount = int(1),
+        EventStartTime = TimeGenerated, 
+        EventEndTime = TimeGenerated,
+        EventResult = "Success",
+        EventVendor = 'Microsoft',
+        EventSchemaVersion = '0.2.1',
+        EventSchema = "FileEvent",
+        ActorUserIdType = 'Other',
+        SrcDvcIdType = 'Other',
+        TargetAppName = EventProduct,
+        TargetAppType = 'SaaS application',
+        Dvc = strcat ('Microsoft ', EventProduct)
+    // Aliases
+    | extend 
+        User = ActorUsername,
+        FilePath = TargetFilePath,
+        FileName = TargetFileName,
+        Src = SrcIpAddr,
+        IpAddr = SrcIpAddr,
+        Url = TargetUrl,
+        Dvc = EventProduct,
+        Application = EventProduct
+};
+parser (disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimFileEventMicrosoftSysmon
+// Description: This ASIM parser supports normalizing Sysmon logs ingested in 'Event' table to the ASIM file event schema.
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimFileEventMicrosoftSysmon(    ['disabled']:bool=False)
+{
+let parser = (disabled:bool=false) {
+   // -- Event parser
+   let EventParser = () {
+       Event
+       | where not(disabled)
+       | project EventID, EventData, Computer, TimeGenerated, _ResourceId, _SubscriptionId, Source, Type , _ItemId 
+       | where Source == "Microsoft-Windows-Sysmon" and EventID in (11,23,26)
+       | project-away Source
+       | parse-kv EventData as (
+             RuleName:string,
+             UtcTime:datetime, 
+             ProcessGuid:string,
+             ProcessId:string,
+             Image:string,
+             User:string,
+             TargetFilename:string,
+             Hashes:string,
+             CreationUtcTime:datetime
+         )
+         with (regex=@'<Data Name="(\w+)">{?([^<]*?)}?</Data>')
+       | project-rename 
+             ActingProcessGuid = ProcessGuid,
+             ActingProcessId = ProcessId,
+             ActorUsername = User,
+             ActingProcessName = Image,
+             TargetFileCreationTime=CreationUtcTime,
+             TargetFilePath=TargetFilename,
+             EventStartTime=UtcTime
+       | project-away EventData
+    };
+    EventParser 
+    | project-rename
+        DvcHostname = Computer,
+        DvcScopeId = _SubscriptionId,
+        DvcId = _ResourceId
+    | extend
+        EventType=iff (EventID == 11, 'FileCreated', 'FileDeleted'),
+        EventProduct = 'Sysmon',
+        EventVendor = 'Microsoft',
+        EventSchema = 'FileEvent',
+        EventSchemaVersion = '0.2.1',
+        EventResult = 'Success',
+        EventSeverity = 'Informational',
+        DvcOs='Windows',
+        TargetFilePathType = 'Windows',
+        DvcIdType = iff (DvcId != "", "AzureResourceId", ""),
+        EventCount = int(1),
+        EventEndTime = EventStartTime,
+        EventOriginalType = tostring(EventID),
+        TargetFileName = tostring(split(TargetFilePath,'\\')[-1]),
+        ActorUsernameType = iff(isnotempty(ActorUsername),'Windows', ''),
+        RuleName = iff (RuleName == "-", "", RuleName),
+        EventUid = _ItemId
+     | parse-kv Hashes as (
+         MD5:string,
+         SHA1:string,
+         IMPHASH:string,
+         SHA256:string
+     )
+     | project-rename
+         TargetFileMD5 = MD5,
+         TargetFileSHA1 = SHA1,
+         TargetFileIMPHASH = IMPHASH,
+         TargetFileSHA256 = SHA256
+     | extend
+        Hash=coalesce(TargetFileSHA256, TargetFileSHA1, TargetFileMD5, TargetFileIMPHASH)
+     | extend
+        HashType = tostring(dynamic(["SHA256", "SHA1", "MD5", "IMPHASH"])[array_index_of(pack_array(TargetFileSHA256, TargetFileSHA1, TargetFileMD5,TargetFileIMPHASH),Hash)])
+     // -- Typed entity identifiers
+     | extend
+        ActorWindowsUsername = ActorUsername
+     // -- Aliases
+     | extend
+        Process = ActingProcessName,
+        Dvc = DvcHostname,
+        FilePath = TargetFilePath,
+        FileName = TargetFileName,
+        User = ActorUsername
+     | project-away EventID, Hashes,ActorWindowsUsername,TargetFileIMPHASH
+ };
+ parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimFileEventMicrosoftSysmonWindowsEvent
+// Description: This ASIM parser supports normalizing Sysmon logs ingested in 'WindowsEvent' table to the ASIM file event schema.
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimFileEventMicrosoftSysmonWindowsEvent(    ['disabled']:bool=False)
+{
+let parser = (disabled:bool=false) {
+    //
+    // -- WindowsEvent parser
+    let WindowsEventParser=(){
+      WindowsEvent 
+      | where not(disabled)
+      | project EventID, EventData, Computer, TimeGenerated, _ResourceId, _SubscriptionId, Provider, Type , _ItemId 
+      | where Provider == "Microsoft-Windows-Sysmon" and EventID in (11,23,26)
+      | project-away Provider
+      | extend 
+          TargetFileCreationTime=todatetime(EventData.CreationUtcTime),
+          TargetFilePath=tostring(EventData.TargetFilename),
+          ActingProcessName = tostring(EventData.Image),
+          ActingProcessId = tostring(EventData.ProcessId),
+          ActingProcessGuid = tostring(EventData.ProcessGuid),
+          ActorUsername = tostring(EventData.User),
+          EventStartTime = todatetime(EventData.UtcTime),
+          RuleName = tostring(EventData.RuleName),
+          Hashes = tostring(EventData.Hashes)
+       | parse ActingProcessGuid with "{" ActingProcessGuid "}"
+       | project-away EventData
+    };
+    WindowsEventParser
+    | project-rename
+        DvcHostname = Computer,
+        DvcScopeId = _SubscriptionId,
+        DvcId = _ResourceId
+    | extend
+        EventType=iff (EventID == 11, 'FileCreated', 'FileDeleted'),
+        EventProduct = 'Sysmon',
+        EventVendor = 'Microsoft',
+        EventSchema = 'FileEvent',
+        EventSchemaVersion = '0.2.1',
+        EventResult = 'Success',
+        EventSeverity = 'Informational',
+        DvcOs='Windows',
+        TargetFilePathType = 'Windows',
+        DvcIdType = iff (DvcId != "", "AzureResourceId", ""),
+        EventCount = int(1),
+        EventEndTime = EventStartTime,
+        EventOriginalType = tostring(EventID),
+        TargetFileName = tostring(split(TargetFilePath,'\\')[-1]),
+        ActorUsernameType = iff(isnotempty(ActorUsername),'Windows', ''),
+        RuleName = iff (RuleName == "-", "", RuleName),
+        EventUid = _ItemId
+     | parse-kv Hashes as (
+         MD5:string,
+         SHA1:string,
+         IMPHASH:string,
+         SHA256:string
+     )
+     | project-rename
+         TargetFileMD5 = MD5,
+         TargetFileSHA1 = SHA1,
+         TargetFileIMPHASH = IMPHASH,
+         TargetFileSHA256 = SHA256
+     | extend
+        Hash=coalesce(TargetFileSHA256, TargetFileSHA1, TargetFileMD5, TargetFileIMPHASH)
+     | extend
+        HashType = tostring(dynamic(["SHA256", "SHA1", "MD5", "IMPHASH"])[array_index_of(pack_array(TargetFileSHA256, TargetFileSHA1, TargetFileMD5,TargetFileIMPHASH),Hash)])
+     // -- Typed entity identifiers
+     | extend
+        ActorWindowsUsername = ActorUsername
+     // -- Aliases
+     | extend
+        Process = ActingProcessName,
+        Dvc = DvcHostname,
+        FilePath = TargetFilePath,
+        FileName = TargetFileName,
+        User = ActorUsername
+     | project-away EventID, Hashes,ActorWindowsUsername,TargetFileIMPHASH
+ }; 
+ parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimFileEventMicrosoftWindowsEvents
+// Description: This ASIM parser supports normalizing Microsoft Windows Events (WindowsEvent and SecurityEvent tables) logs ingested in 'WindowsEvent' table to the ASIM File Event normalized schema. Event IDs which are parsed as part of this parser: 4663
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimFileEventMicrosoftWindowsEvents(    ['disabled']:bool=False)
+{
+let Parser=(disabled:bool=false)
+{
+let EventTypeLookup = datatable (AccessMask:string,EventType:string)
+[
+    "0x1", "ObjectAccessed"
+    , "0x10", "MetadataModified"
+    , "0x100", "MetadataModified"
+    , "0x10000", "ObjectDeleted"
+    , "0x2", "ObjectModified"
+    , "0x20000", "MetadataAccessed"
+    , "0x4", "ObjectModified"
+    , "0x40", "ObjectDeleted"
+    , "0x40000", "MetadataModified"
+    , "0x6", "ObjectModified"
+    , "0x8", "MetadataAccessed"
+    , "0x80", "MetadataAccessed"
+    , "0x80000", "MetadataModified"
+];
+let UserTypeLookup = datatable (AccountType:string, ActorUserType:string)
+[
+  'User', 'Regular',
+  'Machine', 'Machine'
+];    
+let KnownSIDs = datatable (sid:string, username:string, type:string)
+[
+  'S-1-5-18', 'Local System', 'Simple',
+  'S-1-0-0', 'Nobody', 'Simple'
+];
+WindowsEvent
+| where EventID == 4663 
+  and EventData.ObjectType == "File"
+  and EventData.ObjectName !startswith @"\Device\"
+| project TimeGenerated
+  , EventID, AccessMask = tostring(EventData.AccessMask)
+  , ProcessName = tostring(EventData.ProcessName)
+  , SubjectUserSid = tostring(EventData.SubjectUserSid)
+  , AccountType = tostring(EventData.AccountType)
+  , Computer = tostring(EventData.Computer)
+  , ObjectName = tostring(EventData.ObjectName)
+  , ProcessId = tostring(EventData.ProcessId)
+  , SubjectUserName = tostring(EventData.SubjectUserName)
+  , SubjectAccount = tostring(EventData.SubjectAccount)
+  , SubjectLogonId = tostring(EventData.SubjectLogonId)
+  , HandleId = tostring(EventData.HandleId)
+  , Type
+| extend ActorUserIdType="SID", TargetFilePathType="Windows Local"
+| lookup EventTypeLookup on AccessMask
+| lookup UserTypeLookup on AccountType
+| lookup KnownSIDs on $left.SubjectUserSid == $right.sid
+| extend ActingProcessName = ProcessName
+  , ActorUsername = iff (SubjectUserName == "-", username, SubjectAccount)
+  , ActorUsernameType = iff(SubjectUserName == '-',type, 'Windows')
+  , EventStartTime = TimeGenerated
+  , EventEndTime = TimeGenerated
+  , TargetFilePath = ObjectName
+  , TargetFilePathFormat = "Windows Local"
+  , ActingProcessId = tostring(toint(ProcessId))
+  , EventOriginalType = tostring(EventID)
+| project-away EventID, ProcessId, AccountType, type, username
+| project-rename ActorUserId = SubjectUserSid
+  , DvcHostname = Computer
+  , Process = ProcessName
+  , FilePath = ObjectName
+  , ActorSessionId = SubjectLogonId
+  , FileSessionId = HandleId
+| extend EventSchema = "FileEvent"
+  , EventSchemaVersion = "0.1.1"
+  , EventResult = "Success"
+  , EventCount = int(1)
+  , EventVendor = 'Microsoft'
+  , EventProduct = 'Security Events'
+  , Dvc = DvcHostname
+  , ActorWindowsUsername = ActorUsername
+  , User = ActorUsername
+  , ActorUserSid = ActorUserId
+| project-away AccessMask,ActorWindowsUsername,FileSessionId,SubjectAccount,SubjectUserName,TargetFilePathFormat
+};
+Parser (disabled = disabled)
+}
+
+
+
+//
+// Function Name: ASimFileEventNative
+// Description: This ASIM parser supports normalizing the native File Event table (ASimFileEventLogs) to the ASIM File Event normalized schema. While the native table is ASIM compliant, the parser is needed to add capabilities, such as aliases, available only at query time.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimFileEventNative(    ['disabled']:bool=False)
+{
+let parser=(disabled: bool=false) {
+  ASimFileEventLogs
+  | where not(disabled)
+  | project-rename
+      EventUid = _ItemId
+  | extend          
+      EventSchema = "FileEvent",
+      DvcScopeId = iff(isempty(DvcScopeId), _SubscriptionId, DvcScopeId)
+  //  -- Aliases
+  | extend
+      EventEndTime = iff (isnull(EventEndTime), TimeGenerated, EventEndTime),
+      EventStartTime = iff (isnull(EventEndTime), TimeGenerated, EventStartTime),
+      Dvc = coalesce (DvcFQDN, DvcHostname, DvcIpAddr, DvcId, _ResourceId),
+      Src = SrcIpAddr,
+      IpAddr = SrcIpAddr,
+      Rule = coalesce(RuleName, tostring(RuleNumber)),
+      User = ActorUsername,
+      FileName = TargetFileName,
+      FilePath = TargetFilePath,
+      Process = ActingProcessName,
+      Url = TargetUrl,
+      Application = TargetAppName
+  | project-away
+      TenantId,
+      SourceSystem,
+      _SubscriptionId,
+      _ResourceId
+};
+parser (disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimFileEventSentinelOne
+// Description: This ASIM parser supports normalizing SentinelOne logs to the ASIM File Event normalized schema. SentinelOne events are captured through SentinelOne data connector which ingests SentinelOne server objects such as Threats, Agents, Applications, Activities, Policies, Groups, and more events into Microsoft Sentinel through the REST API.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimFileEventSentinelOne(    ['disabled']:bool=False)
+{
+let GetWindowsFilenamePart = (path: string) { tostring(split(path, @'\')[-1]) };
+let GetLinuxFilenamePart = (path: string) { tostring(split(path, @'/')[-1]) };
+let EventTypeLookup = datatable (alertInfo_eventType_s: string, EventType: string)
+    [
+    "FILECREATION", "FileCreated",
+    "FILEMODIFICATION", "FileModified",
+    "FILEDELETION", "FileDeleted",
+    "FILERENAME", "FileRenamed"
+];
+let ThreatConfidenceLookup_undefined = datatable(
+    alertInfo_analystVerdict_s: string,
+    ThreatConfidence_undefined: int
+)
+    [
+    "FALSE_POSITIVE", 5,
+    "Undefined", 15,
+    "SUSPICIOUS", 25,
+    "TRUE_POSITIVE", 33 
+];
+let ThreatConfidenceLookup_suspicious = datatable(
+    alertInfo_analystVerdict_s: string,
+    ThreatConfidence_suspicious: int
+)
+    [
+    "FALSE_POSITIVE", 40,
+    "Undefined", 50,
+    "SUSPICIOUS", 60,
+    "TRUE_POSITIVE", 67 
+];
+let ThreatConfidenceLookup_malicious = datatable(
+    alertInfo_analystVerdict_s: string,
+    ThreatConfidence_malicious: int
+)
+    [
+    "FALSE_POSITIVE", 75,
+    "Undefined", 80,
+    "SUSPICIOUS", 90,
+    "TRUE_POSITIVE", 100 
+];
+let parser = (disabled: bool=false) {
+    let allFileData = SentinelOne_CL
+        | where not(disabled)
+            and event_name_s == "Alerts."
+            and alertInfo_eventType_s in ('FILECREATION', 'FILEMODIFICATION', 'FILEDELETION', 'FILERENAME');
+    let windowsFileData = allFileData
+        | where agentDetectionInfo_osFamily_s == "windows"
+        | extend
+            TargetFilePathType = "Windows Local",
+            TargetFileName = GetWindowsFilenamePart(targetProcessInfo_tgtFilePath_s),
+            SrcFileName = GetWindowsFilenamePart(targetProcessInfo_tgtFileOldPath_s);
+    let otherFileData = allFileData
+        | where agentDetectionInfo_osFamily_s != "windows"
+        | extend
+            TargetFilePathType = "Unix",
+            TargetFileName = GetLinuxFilenamePart(targetProcessInfo_tgtFilePath_s),
+            SrcFileName = GetLinuxFilenamePart(targetProcessInfo_tgtFileOldPath_s);
+    let parseddata = union windowsFileData, otherFileData
+        | lookup EventTypeLookup on alertInfo_eventType_s;
+    let undefineddata = parseddata
+        | where ruleInfo_treatAsThreat_s == "UNDEFINED"
+        | lookup ThreatConfidenceLookup_undefined on alertInfo_analystVerdict_s;
+    let suspiciousdata = parseddata
+        | where ruleInfo_treatAsThreat_s == "Suspicious"
+        | lookup ThreatConfidenceLookup_suspicious on alertInfo_analystVerdict_s;
+    let maaliciousdata = parseddata
+        | where ruleInfo_treatAsThreat_s == "Malicious"
+        | lookup ThreatConfidenceLookup_malicious on alertInfo_analystVerdict_s;
+    union undefineddata, suspiciousdata, maaliciousdata
+    | extend
+        ThreatConfidence = coalesce(ThreatConfidence_undefined, ThreatConfidence_suspicious, ThreatConfidence_malicious),
+        EventSeverity = iff(ruleInfo_severity_s == "Critical", "High", ruleInfo_severity_s),
+        EventVendor = "SentinelOne",
+        EventProduct = "SentinelOne",
+        EventResult = "Success",
+        EventSchema = "FileEvent",
+        EventSchemaVersion = "0.2.1",
+        EventCount = toint(1),
+        DvcAction = "Allowed",
+        ActorUsername = sourceProcessInfo_user_s
+    | project-rename
+        EventStartTime = sourceProcessInfo_pidStarttime_t,
+        EventOriginalSeverity = ruleInfo_severity_s,
+        EventUid = _ItemId,
+        ActingProcessCommandLine = sourceProcessInfo_commandline_s,
+        ActingProcessGuid = sourceProcessInfo_uniqueId_g,
+        ActingProcessId = sourceProcessInfo_pid_s,
+        ActingProcessName = sourceProcessInfo_name_s,
+        DvcId = agentDetectionInfo_uuid_g,
+        DvcOs = agentDetectionInfo_osName_s,
+        DvcOsVersion = agentDetectionInfo_osRevision_s,
+        EventOriginalType = alertInfo_eventType_s,
+        EventOriginalUid = alertInfo_dvEventId_s,
+        RuleName = ruleInfo_name_s,
+        TargetFileCreationTime = targetProcessInfo_tgtFileCreatedAt_t,
+        SrcFilePath = targetProcessInfo_tgtFileOldPath_s,
+        TargetFilePath = targetProcessInfo_tgtFilePath_s,
+        TargetFileSHA1 = targetProcessInfo_tgtFileHashSha1_s,
+        TargetFileSHA256 = targetProcessInfo_tgtFileHashSha256_s,
+        ThreatOriginalConfidence = ruleInfo_treatAsThreat_s
+    | invoke _ASIM_ResolveDvcFQDN('agentDetectionInfo_name_s')
+    | extend
+        Dvc = coalesce(DvcHostname, DvcId, EventProduct),
+        EventEndTime = EventStartTime,
+        Rule = RuleName,
+        FileName = TargetFileName,
+        FilePath = TargetFilePath,
+        Process = ActingProcessName,
+        User = ActorUsername,
+        Hash = coalesce(TargetFileSHA256, TargetFileSHA1)
+    | extend
+        ActorUsernameType = _ASIM_GetUsernameType(ActorUsername),
+        ActorUserType = _ASIM_GetUserType(ActorUsername, ""),
+        DvcIdType = iff(isnotempty(DvcId), "Other", ""),
+        HashType = case(
+              isnotempty(Hash) and isnotempty(TargetFileSHA256),
+              "TargetFileSHA256",
+              isnotempty(Hash) and isnotempty(TargetFileSHA1),
+              "TargetFileSHA1",
+              ""
+          ) 
+    | project-away 
+        *_d,
+        *_s,
+        *_g,
+        *_t,
+        *_b,
+        _ResourceId,
+        Computer,
+        MG,
+        ManagementGroupName,
+        RawData,
+        SourceSystem,
+        TenantId,
+        ThreatConfidence_*
+};
+parser(disabled = disabled)
+}
+
+
+
+//
+// Function Name: ASimFileEventVMwareCarbonBlackCloud
+// Description: This ASIM parser supports normalizing VMware Carbon Black Cloud logs to the ASIM File Event normalized schema. VMware Carbon Black Cloud events are captured through VMware Carbon Black Cloud data connector which ingests Carbon Black Audit, Notification and Event data into Microsoft Sentinel through the REST API.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimFileEventVMwareCarbonBlackCloud(    ['disabled']:bool=False)
+{
+let EventFieldsLookup = datatable(
+    sensor_action_s: string,
+    DvcAction: string,
+    EventResult: string
+)[
+    "ACTION_ALLOW", "Allow", "Success",
+    "ACTION_BLOCK", "Block", "Failure",
+    "ACTION_TERMINATE", "Terminate", "Failure",
+    "ACTION_BREAK", "Break", "Failure",
+    "ACTION_SUSPEND", "Suspend", "Failure",
+    "", "", "Success"
+];
+let EventTypeLookup = datatable(action_s: string, EventType: string)[
+    "ACTION_FILE_CREATE", "FileCreated",
+    "ACTION_FILE_DELETE", "FileDeleted",
+    "ACTION_FILE_LAST_WRITE", "FileModified",
+    "ACTION_FILE_LINK", "FileModified",
+    "ACTION_FILE_READ", "FileAccessed",
+    "ACTION_FILE_RENAME", "FileRenamed",
+    "ACTION_FILE_WRITE", "FileModified",
+    "ACTION_FILE_OPEN_DELETE", "FileDeleted",
+    "ACTION_FILE_OPEN_EXECUTE", "FileAccessed",
+    "ACTION_FILE_OPEN_SET_ATTRIBUTES", "FileAttributesUpdated",
+    "ACTION_FILE_OPEN_SET_SECURITY", "FileAttributesUpdated",
+    "ACTION_FILE_SET_SECURITY", "FileAttributesUpdated",
+    "ACTION_FILE_TRUNCATE", "FileModified",
+    "ACTION_FILE_OPEN_WRITE", "FileModified",
+    "ACTION_FILE_MOD_OPEN", "FileAccessed",
+    "ACTION_FILE_OPEN_READ", "FileAccessed"
+];
+let parser = (disabled: bool=false) {
+    CarbonBlackEvents_CL
+    | where not(disabled)
+    | where eventType_s == "endpoint.event.filemod" and isnotempty(filemod_name_s)
+    | where action_s !in ("ACTION_INVALID", "ACTION_FILE_UNDELETE")
+    | parse filemod_hash_s with * '["' TargetFileMD5: string '","' TargetFileSHA256: string '"]'
+    | lookup EventFieldsLookup on sensor_action_s
+    | extend temp_action = iff(action_s has "|", action_s, "")
+    | lookup EventTypeLookup on action_s
+    | extend EventType = case(
+                        isnotempty(EventType), EventType,
+                        temp_action has "delete", "FileDeleted",
+                        temp_action has "link", "FileModified",
+                        temp_action has "rename", "FileRenamed",
+                        temp_action has "execute", "FileAccessed",
+                        temp_action has_any ("attributes", "security"), "FileAttributesUpdated",
+                        temp_action has "truncate", "FileModified",
+                        temp_action has "write", "FileModified",
+                        temp_action has_any ("read", "open"), "FileAccessed",
+                        temp_action has "create", "FileCreated",
+                        ""
+                    )
+    | extend
+        EventStartTime = todatetime(split(createTime_s, '+')[0]),
+        TargetFilePathType = case(
+                        device_os_s == "WINDOWS" and filemod_name_s startswith "\\", "Windows Share",
+                        device_os_s == "WINDOWS", "Windows Local",
+                        device_os_s in ("MAC", "LINUX"), "Unix",
+                        ""
+                    ),
+        ActingProcessId = tostring(toint(process_pid_d)),
+        TargetFileName = tostring(split(filemod_name_s, '\\')[-1]),
+        AdditionalFields = bag_pack(
+                      "org_key", org_key_s,
+                      "process_publisher", process_publisher_s,
+                      "process_reputation", process_reputation_s,
+                      "process_guid", process_guid_s
+                  )
+    | invoke _ASIM_ResolveDvcFQDN('device_name_s')
+    | project-rename
+        ActorUsername = process_username_s,
+        DvcIpAddr = device_external_ip_s,
+        EventUid = _ItemId,
+        DvcScope = device_group_s,
+        ActingProcessCommandLine = process_cmdline_s,
+        ActingProcessName = process_path_s,
+        DvcId = device_id_s,
+        DvcOriginalAction = sensor_action_s,
+        DvcOs = device_os_s,
+        EventMessage = event_description_s,
+        EventOriginalType = action_s,
+        EventOriginalUid = event_id_g,
+        EventOwner = event_origin_s,
+        TargetFilePath = filemod_name_s
+    | extend 
+        EventProduct = "Carbon Black Cloud",
+        EventSchema = "FileEvent",
+        EventSchemaVersion = "0.2.1",
+        EventVendor = "VMware",
+        EventCount = int(1),
+        SrcIpAddr = DvcIpAddr
+    | extend
+        EventEndTime = EventStartTime,
+        IpAddr = SrcIpAddr,
+        Src = SrcIpAddr,
+        Dvc = coalesce(DvcFQDN, DvcId, DvcHostname, DvcIpAddr),
+        FileName = TargetFileName,
+        FilePath = TargetFilePath,
+        Process = ActingProcessName,
+        User = ActorUsername,
+        Hash = coalesce(TargetFileSHA256, TargetFileMD5)
+    | extend
+        ActorUsernameType = _ASIM_GetUsernameType(ActorUsername),
+        ActorUserType = _ASIM_GetUserType(ActorUsername, ""),
+        DvcIdType = iff(isnotempty(DvcId), "Other", ""),
+        HashType = case(
+              isnotempty(TargetFileSHA256),
+              "TargetFileSHA256",
+              isnotempty(TargetFileMD5),
+              "TargetFileMD5",
+              ""
+          )
+    | project-away
+        *_s,
+        *_d,
+        *_g,
+        *_b,
+        _ResourceId,
+        Computer,
+        MG,
+        ManagementGroupName,
+        RawData,
+        SourceSystem,
+        TenantId,
+        temp_action
+};
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: imFileEvent
+// Description: This ASIM parser supports normalizing File activity logs from all supported sources to the ASIM File Event normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) imFileEvent(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['targetfilepath_has_any']:dynamic=dynamic([]),
+    ['srcfilepath_has_any']:dynamic=dynamic([]),
+    ['hashes_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=False,
+    ['pack']:bool=False)
+{
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers')
+| where SearchKey in ('Any', 'ExcludevimFile')
+| extend SourceSpecificParser=column_ifexists('SourceSpecificParser', '')
+| distinct SourceSpecificParser
+| where isnotempty(SourceSpecificParser));
+let vimBuiltInDisabled=toscalar('ExcludevimFileEventBuiltIn' in (DisabledParsers) or 'Any' in (DisabledParsers));
+let parser=(
+    starttime: datetime=datetime(null),
+    endtime: datetime=datetime(null),
+    eventtype_in: dynamic=dynamic([]),
+    srcipaddr_has_any_prefix: dynamic=dynamic([]),
+    actorusername_has_any: dynamic=dynamic([]),
+    targetfilepath_has_any: dynamic=dynamic([]),
+    srcfilepath_has_any: dynamic=dynamic([]),
+    hashes_has_any: dynamic=dynamic([]),
+    dvchostname_has_any: dynamic=dynamic([]),
+    pack: bool=false
+    ) {
+    union isfuzzy=true
+        vimFileEventEmpty,
+        vimFileEventLinuxSysmonFileCreated(starttime=starttime, endtime=endtime, eventtype_in=eventtype_in, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, actorusername_has_any=actorusername_has_any, targetfilepath_has_any=targetfilepath_has_any, srcfilepath_has_any=srcfilepath_has_any, hashes_has_any=hashes_has_any, dvchostname_has_any=dvchostname_has_any, disabled=(vimBuiltInDisabled or ('ExcludevimFileEventLinuxSysmonFileCreated' in (DisabledParsers)))),
+        vimFileEventLinuxSysmonFileDeleted(starttime=starttime, endtime=endtime, eventtype_in=eventtype_in, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, actorusername_has_any=actorusername_has_any, targetfilepath_has_any=targetfilepath_has_any, srcfilepath_has_any=srcfilepath_has_any, hashes_has_any=hashes_has_any, dvchostname_has_any=dvchostname_has_any, disabled=(vimBuiltInDisabled or ('ExcludevimFileEventLinuxSysmonFileDeleted' in (DisabledParsers)))),
+        vimFileEventAzureBlobStorage(starttime=starttime, endtime=endtime, eventtype_in=eventtype_in, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, actorusername_has_any=actorusername_has_any, targetfilepath_has_any=targetfilepath_has_any, srcfilepath_has_any=srcfilepath_has_any, hashes_has_any=hashes_has_any, dvchostname_has_any=dvchostname_has_any, disabled=(vimBuiltInDisabled or ('ExcludevimFileEventAzureBlobStorage' in (DisabledParsers)))),
+        vimFileEventMicrosoft365D(starttime=starttime, endtime=endtime, eventtype_in=eventtype_in, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, actorusername_has_any=actorusername_has_any, targetfilepath_has_any=targetfilepath_has_any, srcfilepath_has_any=srcfilepath_has_any, hashes_has_any=hashes_has_any, dvchostname_has_any=dvchostname_has_any, disabled=(vimBuiltInDisabled or ('ExcludevimFileEventMicrosoft365D' in (DisabledParsers)))),
+        vimFileEventAzureFileStorage(starttime=starttime, endtime=endtime, eventtype_in=eventtype_in, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, actorusername_has_any=actorusername_has_any, targetfilepath_has_any=targetfilepath_has_any, srcfilepath_has_any=srcfilepath_has_any, hashes_has_any=hashes_has_any, dvchostname_has_any=dvchostname_has_any, disabled=(vimBuiltInDisabled or ('ExcludevimFileEventAzureFileStorage' in (DisabledParsers)))),
+        vimFileEventAzureQueueStorage(starttime=starttime, endtime=endtime, eventtype_in=eventtype_in, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, actorusername_has_any=actorusername_has_any, targetfilepath_has_any=targetfilepath_has_any, srcfilepath_has_any=srcfilepath_has_any, hashes_has_any=hashes_has_any, dvchostname_has_any=dvchostname_has_any, disabled=(vimBuiltInDisabled or ('ExcludevimFileEventAzureQueueStorage' in (DisabledParsers)))),
+        vimFileEventMicrosoftSharePoint(starttime=starttime, endtime=endtime, eventtype_in=eventtype_in, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, actorusername_has_any=actorusername_has_any, targetfilepath_has_any=targetfilepath_has_any, srcfilepath_has_any=srcfilepath_has_any, hashes_has_any=hashes_has_any, dvchostname_has_any=dvchostname_has_any, disabled=(vimBuiltInDisabled or ('ExcludevimFileEventMicrosoftSharePoint' in (DisabledParsers)))),
+        vimFileEventMicrosoftSysmon(starttime=starttime, endtime=endtime, eventtype_in=eventtype_in, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, actorusername_has_any=actorusername_has_any, targetfilepath_has_any=targetfilepath_has_any, srcfilepath_has_any=srcfilepath_has_any, hashes_has_any=hashes_has_any, dvchostname_has_any=dvchostname_has_any, disabled=(vimBuiltInDisabled or ('ExcludevimFileEventMicrosoftSysmon' in (DisabledParsers)))),
+        vimFileEventMicrosoftSysmonWindowsEvent(starttime=starttime, endtime=endtime, eventtype_in=eventtype_in, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, actorusername_has_any=actorusername_has_any, targetfilepath_has_any=targetfilepath_has_any, srcfilepath_has_any=srcfilepath_has_any, hashes_has_any=hashes_has_any, dvchostname_has_any=dvchostname_has_any, disabled=(vimBuiltInDisabled or ('ExcludevimFileEventMicrosoftSysmonWindowsEvent' in (DisabledParsers)))),
+        vimFileEventAzureTableStorage(starttime=starttime, endtime=endtime, eventtype_in=eventtype_in, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, actorusername_has_any=actorusername_has_any, targetfilepath_has_any=targetfilepath_has_any, srcfilepath_has_any=srcfilepath_has_any, hashes_has_any=hashes_has_any, dvchostname_has_any=dvchostname_has_any, disabled=(vimBuiltInDisabled or ('ExcludevimFileEventAzureTableStorage' in (DisabledParsers)))),
+        vimFileEventMicrosoftWindowsEvents(starttime=starttime, endtime=endtime, eventtype_in=eventtype_in, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, actorusername_has_any=actorusername_has_any, targetfilepath_has_any=targetfilepath_has_any, srcfilepath_has_any=srcfilepath_has_any, hashes_has_any=hashes_has_any, dvchostname_has_any=dvchostname_has_any, disabled=(vimBuiltInDisabled or ('ExcludevimFileEventMicrosoftWindowsEvents' in (DisabledParsers)))),
+        vimFileEventMicrosoftSecurityEvents(starttime=starttime, endtime=endtime, eventtype_in=eventtype_in, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, actorusername_has_any=actorusername_has_any, targetfilepath_has_any=targetfilepath_has_any, srcfilepath_has_any=srcfilepath_has_any, hashes_has_any=hashes_has_any, dvchostname_has_any=dvchostname_has_any, disabled=(vimBuiltInDisabled or ('ExcludevimFileEventMicrosoftSecurityEvents' in (DisabledParsers)))),
+        vimFileEventNative(starttime=starttime, endtime=endtime, eventtype_in=eventtype_in, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, actorusername_has_any=actorusername_has_any, targetfilepath_has_any=targetfilepath_has_any, srcfilepath_has_any=srcfilepath_has_any, hashes_has_any=hashes_has_any, dvchostname_has_any=dvchostname_has_any, disabled=(vimBuiltInDisabled or ('ExcludevimFileEventNative' in (DisabledParsers)))),
+        vimFileEventSentinelOne(starttime=starttime, endtime=endtime, eventtype_in=eventtype_in, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, actorusername_has_any=actorusername_has_any, targetfilepath_has_any=targetfilepath_has_any, srcfilepath_has_any=srcfilepath_has_any, hashes_has_any=hashes_has_any, dvchostname_has_any=dvchostname_has_any, disabled=(vimBuiltInDisabled or ('vimFileEventSentinelOne' in (DisabledParsers)))),
+        vimFileEventVMwareCarbonBlackCloud(starttime=starttime, endtime=endtime, eventtype_in=eventtype_in, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, actorusername_has_any=actorusername_has_any, targetfilepath_has_any=targetfilepath_has_any, srcfilepath_has_any=srcfilepath_has_any, hashes_has_any=hashes_has_any, dvchostname_has_any=dvchostname_has_any, disabled=(vimBuiltInDisabled or ('vimFileEventVMwareCarbonBlackCloud' in (DisabledParsers)))),
+        vimFileEventGoogleWorkspace(starttime=starttime, endtime=endtime, eventtype_in=eventtype_in, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, actorusername_has_any=actorusername_has_any, targetfilepath_has_any=targetfilepath_has_any, srcfilepath_has_any=srcfilepath_has_any, hashes_has_any=hashes_has_any, dvchostname_has_any=dvchostname_has_any, disabled=(vimBuiltInDisabled or ('vimFileEventGoogleWorkspace' in (DisabledParsers))))
+};
+parser(starttime=starttime, endtime=endtime, eventtype_in=eventtype_in, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, actorusername_has_any=actorusername_has_any, targetfilepath_has_any=targetfilepath_has_any, srcfilepath_has_any=srcfilepath_has_any, hashes_has_any=hashes_has_any, dvchostname_has_any=dvchostname_has_any, pack=pack)
+}
+
+
+
+//
+// Function Name: vimFileEventAzureBlobStorage
+// Description: This ASIM parser supports normalizing Azure Blob Storage events, stored in the StorageBlobLogs table, to the ASIM file activity schema.
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimFileEventAzureBlobStorage(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['targetfilepath_has_any']:dynamic=dynamic([]),
+    ['srcfilepath_has_any']:dynamic=dynamic([]),
+    ['hashes_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=False)
+{
+// https://docs.microsoft.comrest/api/storageservices/storage-analytics-logged-operations-and-status-messages
+let parser=(
+    starttime: datetime=datetime(null),
+    endtime: datetime=datetime(null),
+    eventtype_in: dynamic=dynamic([]),
+    srcipaddr_has_any_prefix: dynamic=dynamic([]),
+    actorusername_has_any: dynamic=dynamic([]),
+    targetfilepath_has_any: dynamic=dynamic([]),
+    srcfilepath_has_any: dynamic=dynamic([]),
+    hashes_has_any: dynamic=dynamic([]),
+    dvchostname_has_any: dynamic=dynamic([]),
+    disabled: bool=false
+    )
+{
+    let bloboperations=datatable(OperationName: string, EventType: string)
+[
+    "PutBlock", "FileCreated",
+    "PutBlob", "FileCreated",
+    "PutPage", "FileCreated",
+    "CreateContainer", "FolderCreated",
+    "CopyBlob", "FileCopied",
+    "QueryBlobContents", "FileAccessed",
+    "GetBlob", "FileAccessed",
+    "AppendBlock", "FileModified",
+    "ClearPage", "FileModified",
+    "PutBlockFromURL", "FileModified",
+    "DeleteBlob", "FileDeleted",
+    "DeleteContainer", "FolderDeleted"
+];
+    StorageBlobLogs
+    | where not(disabled)
+    | where (isnull(starttime) or TimeGenerated >= starttime) 
+        and (isnull(endtime) or TimeGenerated <= endtime)
+    // **** relevant data filtering;
+    | where OperationName in (bloboperations)
+    | where ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(CallerIpAddress, srcipaddr_has_any_prefix))) and 
+        (array_length(actorusername_has_any) == 0) and
+        ((array_length(targetfilepath_has_any) == 0) or (Uri has_any (targetfilepath_has_any))) and 
+        (array_length(srcfilepath_has_any) == 0) and
+        (array_length(hashes_has_any) == 0) and 
+        (array_length(dvchostname_has_any) == 0)
+    //
+    | lookup bloboperations on OperationName
+    | where ((array_length(eventtype_in) == 0 or EventType in~ (eventtype_in))) 
+    | project-rename 
+        EventOriginalUid = CorrelationId
+        ,
+        EventOriginalType=OperationName
+        ,
+        HttpUserAgent=UserAgentHeader
+        ,
+        TargetUrl=Uri
+    | extend 
+        EventCount=int(1)
+        ,
+        EventStartTime=TimeGenerated
+        ,
+        EventEndTime=TimeGenerated
+        //	, EventType :string  ---> see lookup below
+        ,
+        EventResult=iff(StatusText == 'Success', 'Success', 'Failure') 
+        ,
+        EventProduct='Azure File Storage' 
+        ,
+        EventVendor='Microsoft'
+        ,
+        EventSchemaVersion='0.1.0'
+        ,
+        TargetFilePath=tostring(split(TargetUrl, '?')[0]) 
+        ,
+        TargetFilePathType='URL'
+        ,
+        SrcIpAddr=tostring(split(CallerIpAddress, ':')[0])
+        ,
+        SrcPortNumber=tostring(split(CallerIpAddress, ':')[1])
+    | extend TargetFileName=tostring(split(TargetFilePath, '/')[-1])
+    // Aliases
+    | extend 
+        FilePath=TargetFilePath
+};
+parser
+(
+    starttime=starttime, 
+    endtime=endtime, 
+    eventtype_in=eventtype_in,
+    srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+    actorusername_has_any=actorusername_has_any,
+    targetfilepath_has_any=targetfilepath_has_any,
+    srcfilepath_has_any=srcfilepath_has_any,
+    hashes_has_any=hashes_has_any,
+    dvchostname_has_any=dvchostname_has_any,
+    disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimFileEventAzureFileStorage
+// Description: This ASIM parser supports normalizing Azure File Storage events, stored in the StorageFileLogs table, to the ASIM file activity schema.
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimFileEventAzureFileStorage(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['targetfilepath_has_any']:dynamic=dynamic([]),
+    ['srcfilepath_has_any']:dynamic=dynamic([]),
+    ['hashes_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=False)
+{
+// https://docs.microsoft.comrest/api/storageservices/storage-analytics-logged-operations-and-status-messages
+let parser=(
+    starttime: datetime=datetime(null),
+    endtime: datetime=datetime(null),
+    eventtype_in: dynamic=dynamic([]),
+    srcipaddr_has_any_prefix: dynamic=dynamic([]),
+    actorusername_has_any: dynamic=dynamic([]),
+    targetfilepath_has_any: dynamic=dynamic([]),
+    srcfilepath_has_any: dynamic=dynamic([]),
+    hashes_has_any: dynamic=dynamic([]),
+    dvchostname_has_any: dynamic=dynamic([]),
+    disabled: bool=false
+    ) {
+    let fileoperations=datatable(OperationName: string, EventType: string)[
+    "DeleteFile", "FileDeleted"
+        ,
+    "DeleteDirectory", "FolderDeleted"
+        ,
+    "GetFile", "FileAccessed"
+        ,
+    "CopyFile", "FileCopied"
+        ,
+    "CreateFileSnapshot", "FileCreated"
+        ,
+    "CreateDirectory", "FolderCreated"
+        ,
+    "CreateFile", "FileCreated"
+        ,
+    "CreateShare", "FolderCreated"
+        ,
+    "DeleteShare", "FileDeleted"
+        ,
+    "PutRange", "FileModified"
+        ,
+    "CopyFileDestination", "FileCopied"
+        ,
+    "CopyFileSource", "FileCopied"
+];
+    StorageFileLogs
+    | where not(disabled)
+    | where (isnull(starttime) or TimeGenerated >= starttime) 
+        and (isnull(endtime) or TimeGenerated <= endtime)
+    // **** relevant data filtering;
+    | where OperationName in (fileoperations)
+    | where ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(CallerIpAddress, srcipaddr_has_any_prefix))) and 
+        (array_length(actorusername_has_any) == 0) and
+        ((array_length(targetfilepath_has_any) == 0) or (Uri has_any (targetfilepath_has_any))) and 
+        (array_length(srcfilepath_has_any) == 0) and
+        (array_length(hashes_has_any) == 0) and 
+        (array_length(dvchostname_has_any) == 0)
+    //
+    | extend 
+        EventCount=int(1)
+        ,
+        EventStartTime=TimeGenerated
+        ,
+        EventEndTime=TimeGenerated
+        //	, EventType :string  ---> see lookup below
+        ,
+        EventResult=iff(StatusText == 'Success', 'Success', 'Failure') 
+        ,
+        EventOriginalUid = CorrelationId
+        ,
+        EventOriginalType=OperationName
+        ,
+        EventProduct='Azure File Storage' 
+        ,
+        EventVendor='Microsoft'
+        ,
+        EventSchemaVersion='0.1.0'
+        ,
+        TargetFilePath=tostring(split(Uri, '?')[0]) 
+        ,
+        TargetFilePathType='URL'
+        ,
+        TargetUrl=Uri
+        ,
+        SrcIpAddr=tostring(split(CallerIpAddress, ':')[0])
+        ,
+        SrcPortNumber=tostring(split(CallerIpAddress, ':')[0])
+        ,
+        HttpUserAgent=UserAgentHeader
+    | extend TargetFileName=tostring(split(TargetFilePath, '/')[-1])
+    | lookup fileoperations on OperationName
+    | where ((array_length(eventtype_in) == 0 or EventType in~ (eventtype_in))) 
+    // Aliases
+    | extend 
+        FilePath=TargetFilePath
+};
+parser (
+    starttime=starttime, 
+    endtime=endtime, 
+    eventtype_in=eventtype_in,
+    srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+    actorusername_has_any=actorusername_has_any,
+    targetfilepath_has_any=targetfilepath_has_any,
+    srcfilepath_has_any=srcfilepath_has_any,
+    hashes_has_any=hashes_has_any,
+    dvchostname_has_any=dvchostname_has_any,
+    disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimFileEventAzureQueueStorage
+// Description: This ASIM parser supports normalizing Azure Queue Storage events, stored in the StorageQueueLogs table, to the ASIM file activity schema.
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimFileEventAzureQueueStorage(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['targetfilepath_has_any']:dynamic=dynamic([]),
+    ['srcfilepath_has_any']:dynamic=dynamic([]),
+    ['hashes_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=False)
+{
+// https://docs.microsoft.comrest/api/storageservices/storage-analytics-logged-operations-and-status-messages
+let parser=(
+    starttime: datetime=datetime(null),
+    endtime: datetime=datetime(null),
+    eventtype_in: dynamic=dynamic([]),
+    srcipaddr_has_any_prefix: dynamic=dynamic([]),
+    actorusername_has_any: dynamic=dynamic([]),
+    targetfilepath_has_any: dynamic=dynamic([]),
+    srcfilepath_has_any: dynamic=dynamic([]),
+    hashes_has_any: dynamic=dynamic([]),
+    dvchostname_has_any: dynamic=dynamic([]),
+    disabled: bool=false
+    )
+{
+    let queueoperations=datatable(OperationName: string, EventType: string)
+[
+    "ClearMessages", "FileDeleted"
+        ,
+    "CreateQueue", "FileCreated"
+        ,
+    "DeleteQueue", "FileDeleted"
+        ,
+    "DeleteMessage", "FileDeleted"
+        ,
+    "GetQueue", "FileAccessed"
+        ,
+    "GetMessage", "FileAccessed"
+        ,
+    "GetMessages", "FileAccessed"
+        ,
+    "PeekMessage", "FileAccessed"
+        ,
+    "PeekMessages", "FileAccessed"
+        ,
+    "PutMessage", "FileCreated"
+        ,
+    "UpdateMessage", "FileModified" 
+];
+    StorageQueueLogs
+    | where not(disabled)
+    | where (isnull(starttime) or TimeGenerated >= starttime) 
+        and (isnull(endtime) or TimeGenerated <= endtime)
+    // **** relevant data filtering;
+    | where OperationName in (queueoperations)
+    //
+    | where ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(CallerIpAddress, srcipaddr_has_any_prefix))) and 
+        (array_length(actorusername_has_any) == 0) and
+        ((array_length(targetfilepath_has_any) == 0) or (Uri has_any (targetfilepath_has_any))) and 
+        (array_length(srcfilepath_has_any) == 0) and
+        (array_length(hashes_has_any) == 0) and 
+        (array_length(dvchostname_has_any) == 0)
+    | extend 
+        EventCount=int(1)
+        ,
+        EventStartTime=TimeGenerated
+        ,
+        EventEndTime=TimeGenerated
+        //	, EventType :string  ---> see lookup below
+        ,
+        EventResult=iff(StatusText == 'Success', 'Success', 'Failure') 
+        ,
+        EventOriginalUid = CorrelationId
+        ,
+        EventOriginalType=OperationName
+        ,
+        EventProduct='Azure File Storage' 
+        ,
+        EventVendor='Microsoft'
+        ,
+        EventSchemaVersion='0.1.0'
+        ,
+        TargetFilePath=tostring(split(Uri, '?')[0]) 
+        ,
+        TargetFilePathType='URL'
+        ,
+        TargetUrl=Uri
+        ,
+        SrcIpAddr=tostring(split(CallerIpAddress, ':')[0])
+        ,
+        SrcPortNumber=tostring(split(CallerIpAddress, ':')[0])
+        ,
+        HttpUserAgent=UserAgentHeader
+    | extend TargetFileName=tostring(split(TargetFilePath, '/')[-1])
+    | lookup queueoperations on OperationName
+    | where ((array_length(eventtype_in) == 0 or EventType in~ (eventtype_in)))
+    // Aliases
+    | extend 
+        FilePath=TargetFilePath
+};
+parser
+(
+    starttime=datetime(null), 
+    endtime=datetime(null), 
+    eventtype_in=dynamic([]),
+    srcipaddr_has_any_prefix=dynamic([]),
+    actorusername_has_any=dynamic([]),
+    targetfilepath_has_any=dynamic([]),
+    srcfilepath_has_any=dynamic([]),
+    hashes_has_any=dynamic([]),
+    dvchostname_has_any=dynamic([]),
+    disabled=false
+)
+}
+
+
+
+//
+// Function Name: vimFileEventAzureTableStorage
+// Description: This ASIM parser supports normalizing Azure Table Storage events, stored in the StorageTableLogs table, to the ASIM file activity schema.
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimFileEventAzureTableStorage(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['targetfilepath_has_any']:dynamic=dynamic([]),
+    ['srcfilepath_has_any']:dynamic=dynamic([]),
+    ['hashes_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=False)
+{
+// https://docs.microsoft.comrest/api/storageservices/storage-analytics-logged-operations-and-status-messages
+let parser=(
+    starttime: datetime=datetime(null),
+    endtime: datetime=datetime(null),
+    eventtype_in: dynamic=dynamic([]),
+    srcipaddr_has_any_prefix: dynamic=dynamic([]),
+    actorusername_has_any: dynamic=dynamic([]),
+    targetfilepath_has_any: dynamic=dynamic([]),
+    srcfilepath_has_any: dynamic=dynamic([]),
+    hashes_has_any: dynamic=dynamic([]),
+    dvchostname_has_any: dynamic=dynamic([]),
+    disabled: bool=false
+    )
+{
+    let tableoperations=datatable(OperationName: string, EventType: string)
+[
+        ,
+    "CreateTable", "FileCreated"
+        ,
+    "DeleteTable", "FileDeleted"
+        ,
+    "DeleteEntity", "FileModified"
+        ,
+    "InsertEntity", "FileModified"
+        ,
+    "InsertOrMergeEntity", "FileModified"
+        ,
+    "InsertOrReplaceEntity", "FileModified"
+        ,
+    "QueryEntity", "FileAccessed"
+        ,
+    "QueryEntities", "FileAccessed"
+        ,
+    "QueryTable", "FileAccessed"
+        ,
+    "QueryTables", "FileAccessed"
+        ,
+    "UpdateEntity", "FileModified"
+        ,
+    "MergeEntity", "FileModified"
+];
+    StorageTableLogs
+    | where not(disabled)
+    | where (isnull(starttime) or TimeGenerated >= starttime) 
+        and (isnull(endtime) or TimeGenerated <= endtime)
+    // **** relevant data filtering;
+    | where OperationName in (tableoperations)
+    //
+    | where ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(CallerIpAddress, srcipaddr_has_any_prefix))) and 
+        (array_length(actorusername_has_any) == 0) and
+        ((array_length(targetfilepath_has_any) == 0) or (Uri has_any (targetfilepath_has_any))) and 
+        (array_length(srcfilepath_has_any) == 0) and
+        (array_length(hashes_has_any) == 0) and 
+        (array_length(dvchostname_has_any) == 0)
+    | extend 
+        EventCount=int(1)
+        ,
+        EventStartTime=TimeGenerated
+        ,
+        EventEndTime=TimeGenerated
+        //	, EventType :string  ---> see lookup below
+        ,
+        EventResult=iff(StatusText == 'Success', 'Success', 'Failure') 
+        ,
+        EventOriginalUid = CorrelationId
+        ,
+        EventOriginalType=OperationName
+        ,
+        EventProduct='Azure File Storage' 
+        ,
+        EventVendor='Microsoft'
+        ,
+        EventSchemaVersion='0.1.0'
+        ,
+        TargetFilePath=tostring(split(Uri, '?')[0]) 
+        ,
+        TargetFilePathType='URL'
+        ,
+        TargetUrl=Uri
+        ,
+        SrcIpAddr=tostring(split(CallerIpAddress, ':')[0])
+        ,
+        SrcPortNumber=tostring(split(CallerIpAddress, ':')[0])
+        ,
+        HttpUserAgent=UserAgentHeader
+    | extend TargetFileName=tostring(split(TargetFilePath, '/')[-1])
+    | lookup tableoperations on OperationName
+    | where ((array_length(eventtype_in) == 0 or EventType in~ (eventtype_in)))
+    // Aliases
+    | extend 
+        FilePath=TargetFilePath
+};
+parser
+(
+    starttime=starttime, 
+    endtime=endtime, 
+    eventtype_in=eventtype_in,
+    srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+    actorusername_has_any=actorusername_has_any,
+    targetfilepath_has_any=targetfilepath_has_any,
+    srcfilepath_has_any=srcfilepath_has_any,
+    hashes_has_any=hashes_has_any,
+    dvchostname_has_any=dvchostname_has_any,
+    disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimFileEventEmpty
+// Description: This function returns an empty ASIM File Event schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimFileEventEmpty
+{
+let FileEvent=datatable(
+    _ResourceId:string,
+    ActingProcessCommandLine:string,
+    ActingProcessGuid:string,
+    ActingProcessId:string,
+    ActingProcessName:string,
+    ActorOriginalUserType:string,
+    ActorScope:string,
+    ActorScopeId:string,
+    ActorSessionId:string,
+    ActorUserAadId:string,
+    ActorUserId:string,
+    ActorUserIdType:string,
+    ActorUsername:string,
+    ActorUsernameType:string,
+    ActorUserSid:string,
+    ActorUserType:string,
+    AdditionalFields:dynamic,
+    Application:string,
+    Dvc:string,
+    DvcAction:string,
+    DvcDescription:string,
+    DvcDomain:string,
+    DvcDomainType:string,
+    DvcFQDN:string,
+    DvcHostname:string,
+    DvcId:string,
+    DvcIdType:string,
+    DvcInterface:string,
+    DvcIpAddr:string,
+    DvcMacAddr:string,
+    DvcOriginalAction:string,
+    DvcOs:string,
+    DvcOsVersion:string,
+    DvcScopeId:string,
+    DvcScope:string,
+    DvcZone:string,
+    EventCount:int,
+    EventEndTime:datetime,
+    EventMessage:string,
+    EventOriginalResultDetails:string,
+    EventOriginalSeverity:string,
+    EventOriginalSubType:string,
+    EventOriginalType:string,
+    EventOriginalUid:string,
+    EventOwner:string,
+    EventProduct:string,
+    EventProductVersion:string,
+    EventReportUrl:string,
+    EventResult:string,
+    EventSchema:string,
+    EventSchemaVersion:string,
+    EventSeverity:string,
+    EventStartTime:datetime,
+    EventType:string,
+    EventUid:string,
+    EventVendor:string,
+    EventSubType:string,
+    EventResultDetails:string,
+    FileName:string,
+    FilePath:string,
+    Hash:string,
+    HashType:string,
+    HttpUserAgent:string,
+    IpAddr:string,
+    NetworkApplicationProtocol:string,
+    Process:string,
+    Rule:string,
+    RuleName:string,
+    RuleNumber:int,
+    Src:string,
+    SrcDescription:string,
+    SrcDeviceType:string,
+    SrcDomain:string,
+    SrcDomainType:string,
+    SrcDvcId:string,
+    SrcDvcIdType:string,
+    SrcDvcScope:string,
+    SrcDvcScopeId:string,
+    SrcFileCreationTime:datetime,
+    SrcFileDirectory:string,
+    SrcFileExtension:string,
+    SrcFileMD5:string,
+    SrcFileMimeType:string,
+    SrcFileName:string,
+    SrcFilePath:string,
+    SrcFilePathType:string,
+    SrcFileSHA1:string,
+    SrcFileSHA256:string,
+    SrcFileSHA512:string,
+    SrcFileSize:long,
+    SrcFQDN:string,
+    SrcGeoCity:string,
+    SrcGeoCountry:string,
+    SrcGeoLatitude:real,
+    SrcGeoLongitude:real,
+    SrcGeoRegion:string,
+    SrcHostname:string,
+    SrcIpAddr:string,
+    SrcPortNumber:int,
+    SrcMacAddr:string,
+    SrcRiskLevel:int,
+    SrcOriginalRiskLevel:string,
+    TargetAppId:string,
+    TargetAppName:string,
+    TargetAppType:string,
+    TargetOriginalAppType:string,
+    TargetFileCreationTime:datetime,
+    TargetFileDirectory:string,
+    TargetFileExtension:string,
+    TargetFileMD5:string,
+    TargetFileMimeType:string,
+    TargetFileName:string,
+    TargetFilePath:string,
+    TargetFilePathType:string,
+    TargetFileSHA1:string,
+    TargetFileSHA256:string,
+    TargetFileSHA512:string,
+    TargetFileSize:long,
+    TargetUrl:string,
+    ThreatCategory:string,
+    ThreatConfidence:int,
+    ThreatField:string,
+    ThreatFilePath:string,
+    ThreatFirstReportedTime:datetime,
+    ThreatId:string,
+    ThreatIpAddr:string,
+    ThreatIsActive:bool,
+    ThreatLastReportedTime:datetime,
+    ThreatName:string,
+    ThreatOriginalConfidence:string,
+    ThreatOriginalRiskLevel:string,
+    ThreatRiskLevel:int,
+    TimeGenerated:datetime,
+    Type:string,
+    Url:string,
+    User:string,
+    ActorUserPuid:string,
+    ActorUpn:string,
+    Dst:string
+)[];
+FileEvent
+}
+
+
+
+//
+// Function Name: vimFileEventGoogleWorkspace
+// Description: This ASIM parser supports normalizing the Google Workspace (Drive) logs ingested in GWorkspace_ReportsAPI_drive_CL table to the ASIM file activity normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimFileEventGoogleWorkspace(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['targetfilepath_has_any']:dynamic=dynamic([]),
+    ['srcfilepath_has_any']:dynamic=dynamic([]),
+    ['hashes_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=False)
+{
+let parser = (
+  starttime: datetime                 = datetime(null)
+  , endtime: datetime                 = datetime(null)
+  , eventtype_in: dynamic             = dynamic([])
+  , srcipaddr_has_any_prefix: dynamic = dynamic([])
+  , actorusername_has_any: dynamic    = dynamic([])
+  , targetfilepath_has_any: dynamic   = dynamic([])
+  , srcfilepath_has_any: dynamic      = dynamic([])
+  , hashes_has_any: dynamic           = dynamic([])
+  , dvchostname_has_any: dynamic      = dynamic([])
+  , disabled: bool                    = false
+  ) {
+  let GoogleWorkspaceSchema = datatable (
+  event_name_s: string,
+  event_type_s: string,
+  id_uniqueQualifier_s: string,
+  actor_email_s: string,
+  actor_profileId_s: string,
+  IPAddress: string,
+  doc_type_s: string,
+  doc_title_s: string,
+  originating_app_id_s: string,
+  id_applicationName_s: string,
+  old_value_s: string,
+  new_value_s: string,
+  destination_folder_title_s: string,
+  source_folder_title_s: string,
+  copy_type_s: string,
+  target_user_s: string,
+  doc_id_s: string,
+  primary_event_b: bool,
+  billable_b: bool,
+  owner_s: string,
+  owner_is_shared_drive_b: bool,
+  is_encrypted_b: bool,
+  visibility_s: string,
+  shared_drive_id_s: string,
+  destination_folder_id_s: string,
+  source_folder_id_s: string,
+  TimeGenerated: datetime,
+  _ResourceId: string,
+  Computer: string,
+  MG: string,
+  ManagementGroupName: string,
+  RawData: string,
+  SourceSystem: string,
+  TenantId: string,
+  _ItemId: string
+)[];
+    let EventFieldsLookup = datatable (
+    EventOriginalSubType: string,
+    EventType: string,
+    EventSubType: string
+)
+        [
+    "download", "FileAccessed", "Download",
+    "edit", "FileModified", "Checkin",
+    "upload", "FileCreated", "Upload",
+    "create", "FileCreated", "Checkin",
+    "rename", "FileRenamed", "",
+    "view", "FileAccessed", "Preview",
+    "preview", "FileAccessed", "Preview",
+    "copy", "FileCopied", "",
+    "source_copy", "FileCopied", "",
+    "delete", "FileDeleted", "",
+    "trash", "FileDeleted", "Recycle",
+    "move", "FileMoved", "",
+    "untrash", "FileCreatedOrModified", "Checkin",
+    "deny_access_request", "FileAccessed", "Preview",
+    "expire_access_request", "FileAccessed", "Preview",
+    "request_access", "FileAccessed", "Preview",
+    "add_to_folder", "FileCreated", "Checkin",
+    "approval_canceled", "FileAccessed", "",
+    "approval_comment_added", "FileAccessed", "",
+    "approval_completed", "FileAccessed", "Preview",
+    "approval_decisions_reset", "FileAccessed", "",
+    "approval_due_time_change", "FileAccessed", "",
+    "approval_requested", "FileAccessed", "Preview",
+    "approval_reviewer_change", "FileAccessed", "",
+    "approval_reviewer_responded", "FileAccessed", "",
+    "create_comment", "FileModified", "Checkin",
+    "delete_comment", "FileModified", "Checkin",
+    "edit_comment", "FileModified", "Checkin",
+    "reassign_comment", "FileModified", "Checkin",
+    "reopen_comment", "FileModified", "Checkin",
+    "resolve_comment", "FileModified", "Checkin",
+    "add_lock", "FileModified", "",
+    "print", "FileAccessed", "Print",
+    "remove_from_folder", "FileDeleted", "",
+    "remove_lock", "FileModified", "",
+];
+    let SupportedEventNames = EventFieldsLookup
+        | project EventOriginalSubType;
+    union isfuzzy=true GoogleWorkspaceSchema, GWorkspace_ReportsAPI_drive_CL
+    | where not(disabled)
+    //  -- Pre filtering
+    | where 
+        (isnull(starttime) or TimeGenerated >= starttime)
+        and (isnull(endtime) or TimeGenerated <= endtime)
+        and ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(IPAddress, srcipaddr_has_any_prefix)))
+        and ((array_length(actorusername_has_any) == 0) or (actor_email_s has_any (actorusername_has_any)))
+        and ((array_length(targetfilepath_has_any) == 0) or (doc_title_s has_any (targetfilepath_has_any)))
+        and (array_length(hashes_has_any) == 0)
+        and (array_length(dvchostname_has_any) == 0)
+        and event_name_s in (SupportedEventNames)
+    | lookup EventFieldsLookup on $left.event_name_s == $right.EventOriginalSubType
+    | where  ((array_length(eventtype_in) == 0) or (EventType in~ (eventtype_in)))
+    | project-rename 
+        EventOriginalUid = id_uniqueQualifier_s,
+        ActorUsername = actor_email_s,
+        ActorUserId = actor_profileId_s,
+        SrcIpAddr = IPAddress,
+        TargetFileMimeType = doc_type_s,
+        TargetFilePath = doc_title_s,
+        ActingAppId = originating_app_id_s,
+        EventOriginalType=event_type_s
+    | extend
+        TargetAppName = iif(id_applicationName_s == 'drive', "Google Workspace - Drive", ""),
+        TargetAppType = iif(id_applicationName_s == 'drive', "SaaS application", ""),
+        ActorUserIdType = iif(isnotempty(ActorUserId), "GWorkspaceProfileID", ""),
+        SrcFilePath = iif(event_name_s has_any ('rename', 'copy', 'source_copy'), old_value_s, ""),
+        TargetFilePath = iif(event_name_s has ('source_copy'), new_value_s, TargetFilePath),
+        TargetFileDirectory = iif(event_name_s has_any ('move'), destination_folder_title_s, ""),
+        SrcFileDirectory = iif(event_name_s has_any ('move'), source_folder_title_s, ""),
+        EventType = case(
+                TargetFileMimeType == "folder" and event_name_s == "create",
+                "FolderCreated",
+                TargetFileMimeType == "folder" and event_name_s == "rename",
+                "FolderModified",
+                TargetFileMimeType == "folder" and event_name_s == "delete",
+                "FolderDeleted",
+                TargetFileMimeType == "folder" and event_name_s == "trash",
+                "FolderDeleted",
+                TargetFileMimeType == "folder" and event_name_s == "move",
+                "FolderMoved",
+                TargetFileMimeType == "folder" and event_name_s == "untrash",
+                "FolderCreated",
+                EventType
+            ),
+        EventSubType = case(
+                  TargetFileMimeType == "folder" and event_name_s == "create",
+                  "",
+                  TargetFileMimeType == "folder" and event_name_s == "trash",
+                  "",
+                  TargetFileMimeType == "folder" and event_name_s == "untrash",
+                  "",
+                  EventSubType
+              ),
+        EventMessage = case(
+                  event_name_s == 'download',
+                  strcat(ActorUsername, " deleted an item"),
+                  event_name_s == 'edit',
+                  strcat(ActorUsername, " edited an item"),
+                  event_name_s == 'upload',
+                  strcat(ActorUsername, " uploaded an item"),
+                  event_name_s == 'create',
+                  strcat(ActorUsername, " created an item"),
+                  event_name_s == 'rename',
+                  strcat(ActorUsername, " renamed ", old_value_s, " to ", TargetFilePath),
+                  event_name_s == 'view',
+                  strcat(ActorUsername, " viewed an item"),
+                  event_name_s == 'preview',
+                  strcat(ActorUsername, " previewed an item"),
+                  event_name_s == 'copy',
+                  strcat(ActorUsername, " created a copy of original document ", old_value_s),
+                  event_name_s == 'delete',
+                  strcat(ActorUsername, " deleted an item"),
+                  event_name_s == 'trash',
+                  strcat(ActorUsername, " trashed an item"),
+                  event_name_s == 'move',
+                  strcat(ActorUsername, " moved an item from ", source_folder_title_s, " to ", destination_folder_title_s),
+                  event_name_s == 'untrash',
+                  strcat(ActorUsername, " restored an item"),
+                  event_name_s == 'source_copy',
+                  strcat(ActorUsername, " copied this item, creating a new item ", copy_type_s, " your organication ", new_value_s),
+                  event_name_s == 'deny_access_request',
+                  strcat(ActorUsername, " denied an access request for ", target_user_s),
+                  event_name_s == 'expire_access_request',
+                  strcat("An access request for ", target_user_s, " expired "),
+                  event_name_s == 'request_access',
+                  strcat(ActorUsername, " requested access to an item for ", target_user_s),
+                  event_name_s == 'add_to_folder',
+                  strcat(ActorUsername, " added an item to ", destination_folder_title_s),
+                  event_name_s == 'approval_canceled',
+                  strcat(ActorUsername, " canceled an approval on an item"),
+                  event_name_s == 'approval_comment_added',
+                  strcat(ActorUsername, " added a comment on an approval on an item"),
+                  event_name_s == 'approval_completed',
+                  "An approval was completed",
+                  event_name_s == 'approval_decisions_reset',
+                  "Approval decisions were reset",
+                  event_name_s == 'approval_due_time_change',
+                  strcat(ActorUsername, " requested a due time change on an approval"),
+                  event_name_s == 'approval_requested',
+                  strcat(ActorUsername, " requested approval on an item"),
+                  event_name_s == 'approval_reviewer_change',
+                  strcat(ActorUsername, " requested a reviewer change on an approval"),
+                  event_name_s == 'approval_reviewer_responded',
+                  strcat(ActorUsername, " reviewed an approval on an item"),
+                  event_name_s == 'create_comment',
+                  strcat(ActorUsername, " created a comment"),
+                  event_name_s == 'delete_comment',
+                  strcat(ActorUsername, " deleted a comment"),
+                  event_name_s == 'edit_comment',
+                  strcat(ActorUsername, " edited a comment"),
+                  event_name_s == 'reassign_comment',
+                  strcat(ActorUsername, " reassigned a comment"),
+                  event_name_s == 'reopen_comment',
+                  strcat(ActorUsername, " reopened a comment"),
+                  event_name_s == 'resolve_comment',
+                  strcat(ActorUsername, " resolved a comment"),
+                  event_name_s == 'add_lock',
+                  strcat(ActorUsername, " locked an item"),
+                  event_name_s == 'print',
+                  strcat(ActorUsername, " printed an item"),
+                  event_name_s == 'remove_from_folder',
+                  strcat(ActorUsername, " removed an item from from ", source_folder_title_s),
+                  event_name_s == 'remove_lock',
+                  strcat(ActorUsername, " unlocked an item"),
+                  ""
+              ),
+        AdditionalFields = bag_pack(
+                      "Doc_Id",
+                      doc_id_s,
+                      "Primary_Event",
+                      primary_event_b,
+                      "Billable",
+                      billable_b,
+                      "Owner",
+                      owner_s,
+                      "Owner_Is_Shared_Drive",
+                      owner_is_shared_drive_b,
+                      "Is_Encrypted",
+                      is_encrypted_b,
+                      "Visibility",
+                      visibility_s,
+                      "Copy_Type",
+                      copy_type_s,
+                      "Shared_Drive_Id",
+                      shared_drive_id_s,
+                      "Destination_Folder_Id",
+                      destination_folder_id_s,
+                      "Source_Folder_Id",
+                      source_folder_id_s
+                  )
+    | where ((array_length(srcfilepath_has_any) == 0) or (SrcFilePath has_any (srcfilepath_has_any)))
+    | extend
+        EventOriginalSubType = event_name_s,
+        Application = TargetAppName,
+        ActorUsernameType = _ASIM_GetUsernameType(ActorUsername),
+        IpAddr = SrcIpAddr,
+        Src = SrcIpAddr,
+        TargetFileName=TargetFilePath,
+        FilePath = TargetFilePath,
+        TargetFilePathType = iif(isnotempty(TargetFilePath), "FileNameOnly", ""),
+        SrcFilePathType = iif(isnotempty(SrcFilePath), "FileNameOnly", ""),
+        FileName = TargetFilePath,
+        SrcFileName = SrcFilePath,
+        User = ActorUsername,
+        EventStartTime = TimeGenerated,
+        EventEndTime = TimeGenerated,
+        EventProduct = "Workspace",
+        EventVendor = "Google",
+        EventResult = "Success",
+        EventSchemaVersion = "0.2.1",
+        EventSchema = "FileEvent",
+        EventUid = _ItemId,
+        Dvc = "Workspace"
+    | project-away 
+        *_s,
+        *_b,
+        _ResourceId,
+        Computer,
+        MG,
+        ManagementGroupName,
+        RawData,
+        SourceSystem,
+        TenantId
+};
+parser (
+    starttime = starttime,
+    endtime = endtime,
+    eventtype_in = eventtype_in,
+    srcipaddr_has_any_prefix = srcipaddr_has_any_prefix,
+    actorusername_has_any = actorusername_has_any,
+    targetfilepath_has_any = targetfilepath_has_any,
+    srcfilepath_has_any = srcfilepath_has_any,
+    hashes_has_any = hashes_has_any,
+    dvchostname_has_any = dvchostname_has_any,
+    disabled = disabled
+)
+}
+
+
+

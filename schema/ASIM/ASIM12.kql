@@ -1,0 +1,2861 @@
+//
+// Function Name: vimFileEventLinuxSysmonFileCreated
+// Description: This ASIM parser supports normalizing Sysmon for Linux event 11, stored in the Syslog table, to the ASIM file activity schema file create event.
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimFileEventLinuxSysmonFileCreated(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['targetfilepath_has_any']:dynamic=dynamic([]),
+    ['srcfilepath_has_any']:dynamic=dynamic([]),
+    ['hashes_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=False)
+{
+let parser=(
+  starttime: datetime=datetime(null),
+  endtime: datetime=datetime(null),
+  eventtype_in: dynamic=dynamic([]),
+  srcipaddr_has_any_prefix: dynamic=dynamic([]),
+  actorusername_has_any: dynamic=dynamic([]),
+  targetfilepath_has_any: dynamic=dynamic([]),
+  srcfilepath_has_any: dynamic=dynamic([]),
+  hashes_has_any: dynamic=dynamic([]),
+  dvchostname_has_any: dynamic=dynamic([]),
+  disabled: bool=false
+  ) {
+  Syslog
+  | where not(disabled)
+  | where (isnull(starttime) or TimeGenerated >= starttime) 
+      and (isnull(endtime) or TimeGenerated <= endtime)
+  | where SyslogMessage has_all ('<Provider Name="Linux-Sysmon"', '<EventID>11</EventID>')
+  // pre-filtering
+  | where ((array_length(eventtype_in) == 0) or ('FileCreated' in~ (eventtype_in))) and
+      (array_length(srcipaddr_has_any_prefix) == 0) and
+      ((array_length(actorusername_has_any) == 0) or (SyslogMessage has_any (actorusername_has_any))) and
+      ((array_length(targetfilepath_has_any) == 0) or (SyslogMessage has_any (targetfilepath_has_any))) and
+      ((array_length(srcfilepath_has_any) == 0)) and
+      (array_length(hashes_has_any) == 0) and 
+      (array_length(dvchostname_has_any) == 0 or Computer has_any (dvchostname_has_any)) 
+  | parse SyslogMessage with  *
+      '<EventRecordID>'msgEventRecordID: string'</EventRecordID>'
+      *
+      //'<Computer>'msgComputer:string'</Computer>'
+      '<Security UserId="'msgUserId: string '"/>'
+      * 
+      '<Data Name="ProcessGuid">'msgProcessGuid: string'</Data>'
+      '<Data Name="ProcessId">'msgProcessId: string'</Data>'
+      '<Data Name="Image">'msgImage: string'</Data>'
+      '<Data Name="TargetFilename">'msgTargetFileName: string'</Data>'
+      '<Data Name="CreationUtcTime">'msgCreationUtcTime: datetime'</Data>'*
+  | where ((array_length(targetfilepath_has_any) == 0) or (msgTargetFileName has_any (targetfilepath_has_any)))
+  | parse SyslogMessage with *'<Data Name="User">'ActorUsername '</Data>'*
+  | where ((array_length(actorusername_has_any) == 0) or (ActorUsername has_any (actorusername_has_any)))
+  | extend
+      EventCount=int(1)
+      ,
+      EventStartTime =TimeGenerated 
+      ,
+      EventEndTime=TimeGenerated
+      ,
+      EventType = 'FileCreated'
+      ,
+      EventResult ='Success'
+      ,
+      EventOriginalType ='11' 
+      ,
+      EventProduct='Sysmon for Linux'
+      ,
+      EventProductVersion='v13.22'
+      ,
+      EventVendor ='Microsoft'
+      ,
+      EventSchemaVersion ='0.1.0'
+      ,
+      DvcOs = 'Linux'
+      ,
+      TargetFilePathType='Unix'
+      ,
+      ActorUserType = iff(isnotempty(ActorUsername), 'Simple', '') // make sure user type is okay
+  | project-rename
+      DvcHostname=Computer
+      ,
+      EventOriginalUid=msgEventRecordID
+      ,
+      ActingProcessName =msgImage
+      ,
+      ActingProcessId=msgProcessId
+      ,
+      ActingProcessGuid=msgProcessGuid
+      ,
+      TargetFilePath =msgTargetFileName
+      ,
+      TargetFileCreationTime =msgCreationUtcTime
+  // ------  Alias
+  | extend
+      Process=ActingProcessName
+      ,
+      FilePath=TargetFilePath
+      ,
+      Dvc = DvcHostname
+      ,
+      User = ActorUsername
+  | project-away SyslogMessage
+};
+parser (
+    starttime=starttime, 
+    endtime=endtime, 
+    eventtype_in=eventtype_in,
+    srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+    actorusername_has_any=actorusername_has_any,
+    targetfilepath_has_any=targetfilepath_has_any,
+    srcfilepath_has_any=srcfilepath_has_any,
+    hashes_has_any=hashes_has_any,
+    dvchostname_has_any=dvchostname_has_any,
+    disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimFileEventLinuxSysmonFileDeleted
+// Description: This ASIM parser supports normalizing Sysmon for Linux events 23 and 26, stored in the Syslog table, to the ASIM file activity schema file delete event.
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimFileEventLinuxSysmonFileDeleted(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['targetfilepath_has_any']:dynamic=dynamic([]),
+    ['srcfilepath_has_any']:dynamic=dynamic([]),
+    ['hashes_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=False)
+{
+let parser=(
+  starttime: datetime=datetime(null),
+  endtime: datetime=datetime(null),
+  eventtype_in: dynamic=dynamic([]),
+  srcipaddr_has_any_prefix: dynamic=dynamic([]),
+  actorusername_has_any: dynamic=dynamic([]),
+  targetfilepath_has_any: dynamic=dynamic([]),
+  srcfilepath_has_any: dynamic=dynamic([]),
+  hashes_has_any: dynamic=dynamic([]),
+  dvchostname_has_any: dynamic=dynamic([]),
+  disabled: bool=false
+  ) {
+  Syslog
+  | where not(disabled)
+  | where (isnull(starttime) or TimeGenerated >= starttime) 
+      and (isnull(endtime) or TimeGenerated <= endtime)
+  | where SyslogMessage has ('<Provider Name="Linux-Sysmon"') and SyslogMessage has_any('<EventID>23</EventID>', '<EventID>26</EventID>')
+  // pre-filtering
+  | where ((array_length(eventtype_in) == 0) or ('FileDeleted' in~ (eventtype_in))) and
+      (array_length(srcipaddr_has_any_prefix) == 0) and
+      ((array_length(actorusername_has_any) == 0) or (SyslogMessage has_any (actorusername_has_any))) and
+      ((array_length(targetfilepath_has_any) == 0) or (SyslogMessage has_any (targetfilepath_has_any))) and
+      (array_length(srcfilepath_has_any) == 0) and
+      (array_length(hashes_has_any) == 0) and
+      (array_length(dvchostname_has_any) == 0 or Computer has_any (dvchostname_has_any))
+  | parse SyslogMessage with  
+      '<Event><System><Provider Name="Linux-Sysmon" Guid="{ff032593-a8d3-4f13-b0d6-01fc615a0f97}"/><EventID>'msgEventId: string'</EventID>'
+      *
+      '<EventRecordID>'msgEventRecordID: string'</EventRecordID>'
+      *
+      '<Computer>'msgComputer: string'</Computer>'
+      '<Security UserId="'msgUserId: string'"/>'
+      *
+      '<Data Name="ProcessGuid">{'msgProcessGuid: string'}</Data>'
+      '<Data Name="ProcessId">'msgProcessId: string'</Data>'
+      '<Data Name="User">'msgUser: string'</Data>'
+      '<Data Name="Image">'msgImage: string'</Data>'
+      '<Data Name="TargetFilename">'msgTargetFilename: string'</Data>'
+      '<Data Name="Hashes">'msgHashes: string'</Data>' *
+  // post-filtering
+  | where ((array_length(actorusername_has_any) == 0) or (msgUser has_any (actorusername_has_any))) and
+      ((array_length(targetfilepath_has_any) == 0) or (msgTargetFilename has_any (targetfilepath_has_any)))
+  | extend
+      EventCount=int(1)
+      ,
+      EventStartTime =TimeGenerated
+      ,
+      EventEndTime=TimeGenerated
+      ,
+      EventType = 'FileDeleted'
+      ,
+      EventResult ='Success' 
+      ,
+      EventProduct='Sysmon for Linux'
+      ,
+      EventProductVersion='v13.22' 
+      ,
+      EventVendor ='Microsoft'
+      ,
+      EventSchemaVersion ='0.1.0'
+      ,
+      DvcOs = 'Linux'
+      ,
+      TargetFilePathType='Unix'
+      ,
+      ActorUsernameType='Simple'
+  | project-rename
+      DvcHostname=Computer
+      ,
+      EventOriginalUid=msgEventRecordID
+      ,
+      EventOriginalType =msgEventId 
+      ,
+      ActorUsername=msgUser
+      ,
+      ActingProcessName =msgImage
+      ,
+      ActingProcessId=msgProcessId
+      ,
+      ActingProcessGuid=msgProcessGuid
+      ,
+      TargetFilePath =msgTargetFilename
+  // ------  Alias
+  | extend
+      Process=ActingProcessName
+      ,
+      FilePath=TargetFilePath
+      ,
+      Dvc =DvcHostname
+      ,
+      User=ActorUsername
+  | project-away SyslogMessage
+};
+parser (
+    starttime=starttime, 
+    endtime=endtime, 
+    eventtype_in=eventtype_in,
+    srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+    actorusername_has_any=actorusername_has_any,
+    targetfilepath_has_any=targetfilepath_has_any,
+    srcfilepath_has_any=srcfilepath_has_any,
+    hashes_has_any=hashes_has_any,
+    dvchostname_has_any=dvchostname_has_any,
+    disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimFileEventMicrosoft365D
+// Description: This ASIM parser supports normalizing M365 Defender, stored in the DeviceFileEvents table, for Endpoint events to the ASIM file activity schema.
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimFileEventMicrosoft365D(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['targetfilepath_has_any']:dynamic=dynamic([]),
+    ['srcfilepath_has_any']:dynamic=dynamic([]),
+    ['hashes_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=False)
+{
+let protocols = dynamic(['smb']);
+let parser=(
+    starttime: datetime=datetime(null),
+    endtime: datetime=datetime(null),
+    eventtype_in: dynamic=dynamic([]),
+    srcipaddr_has_any_prefix: dynamic=dynamic([]),
+    actorusername_has_any: dynamic=dynamic([]),
+    targetfilepath_has_any: dynamic=dynamic([]),
+    srcfilepath_has_any: dynamic=dynamic([]),
+    hashes_has_any: dynamic=dynamic([]),
+    dvchostname_has_any: dynamic=dynamic([]),
+    disabled: bool=false
+    ) {
+    let remote_events = 
+        DeviceFileEvents
+        | where not(disabled)
+        | where (isnull(starttime) or TimeGenerated >= starttime) 
+            and (isnull(endtime) or TimeGenerated <= endtime)
+        | where isnotempty(RequestAccountName)
+        | where ((array_length(eventtype_in) == 0 or ActionType in~ (eventtype_in))) and
+            ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(RequestSourceIP, srcipaddr_has_any_prefix))) and 
+            ((array_length(actorusername_has_any) == 0) or (RequestAccountName has_any (actorusername_has_any)) or (RequestAccountDomain has_any (actorusername_has_any)) or (strcat(RequestAccountDomain, '\\', RequestAccountName) has_any (actorusername_has_any))) and
+            ((array_length(targetfilepath_has_any) == 0) or (FileName has_any (targetfilepath_has_any)) or (FolderPath has_any (targetfilepath_has_any)) or (strcat(FolderPath, iff(FolderPath startswith "/", "/", "\\"), FileName) has_any (targetfilepath_has_any))) and 
+            ((array_length(srcfilepath_has_any) == 0) or (PreviousFileName has_any (srcfilepath_has_any)) or (PreviousFolderPath has_any (srcfilepath_has_any)) or (strcat(FolderPath, iff(PreviousFolderPath startswith "/", "/", "\\"), PreviousFileName) has_any (srcfilepath_has_any))) and
+            ((array_length(hashes_has_any) == 0) or (SHA256 in (hashes_has_any)) or (SHA1 in (hashes_has_any)) or (MD5 in (hashes_has_any))) and 
+            (array_length(dvchostname_has_any) == 0 or DeviceName has_any (dvchostname_has_any))
+        | project-rename    
+            SrcIpAddr = RequestSourceIP,
+            ActorUserSid = RequestAccountSid,
+            TargetUserSid = InitiatingProcessAccountSid,
+            TargetUserAadId = InitiatingProcessAccountObjectId,
+            TargetUserUpn = InitiatingProcessAccountUpn
+        | extend
+            ActorWindowsUsername = strcat(RequestAccountDomain, '\\', RequestAccountName),
+            TargetWindowsUsername = strcat(InitiatingProcessAccountDomain, '\\', InitiatingProcessAccountName),
+            ActorUserUpn = "",
+            ActorUserAadId = ""
+        | extend
+            ActorUserType = _ASIM_GetWindowsUserType(ActorWindowsUsername, ActorUserSid),
+            TargetUserType = _ASIM_GetWindowsUserType(TargetWindowsUsername, TargetUserSid)
+        | extend
+            SrcPortNumber = toint(RequestSourcePort),
+            TargetUsername = coalesce(TargetUserUpn, TargetWindowsUsername),
+            TargetUsernameType = iff(isempty(TargetUserUpn), 'Windows', 'UPN'),
+            TargetUserId = coalesce(TargetUserAadId, TargetUserSid), 
+            TargetUserIdType = iff(isempty(TargetUserSid), 'AADID', 'SID'),
+            IpAddr = SrcIpAddr,
+            Src = SrcIpAddr
+    ;
+    let local_events = 
+        DeviceFileEvents
+        | where not(disabled)
+        | where (isnull(starttime) or TimeGenerated >= starttime) 
+            and (isnull(endtime) or TimeGenerated <= endtime)
+        | where isempty(RequestAccountName)
+        | where ((array_length(eventtype_in) == 0 or ActionType in~ (eventtype_in))) and
+            ((array_length(srcipaddr_has_any_prefix) == 0)) and 
+            ((array_length(actorusername_has_any) == 0) or (InitiatingProcessAccountDomain has_any (actorusername_has_any)) or (InitiatingProcessAccountName has_any (actorusername_has_any)) or (strcat(InitiatingProcessAccountDomain, '\\', InitiatingProcessAccountName) has_any (actorusername_has_any)) or (InitiatingProcessAccountUpn has_any (actorusername_has_any))) and
+            ((array_length(targetfilepath_has_any) == 0) or (FileName has_any (targetfilepath_has_any)) or (FolderPath has_any (targetfilepath_has_any)) or (strcat(FolderPath, iff(FolderPath startswith "/", "/", "\\"), FileName) has_any (targetfilepath_has_any))) and 
+            ((array_length(srcfilepath_has_any) == 0) or (PreviousFileName has_any (srcfilepath_has_any)) or (PreviousFolderPath has_any (srcfilepath_has_any)) or (strcat(FolderPath, iff(PreviousFolderPath startswith "/", "/", "\\"), PreviousFileName) has_any (srcfilepath_has_any))) and
+            ((array_length(hashes_has_any) == 0) or (SHA256 in (hashes_has_any)) or (SHA1 in (hashes_has_any)) or (MD5 in (hashes_has_any))) and 
+            (array_length(dvchostname_has_any) == 0 or DeviceName has_any (dvchostname_has_any))  
+        | project-rename
+            ActorUserSid = InitiatingProcessAccountSid,
+            ActorUserAadId = InitiatingProcessAccountObjectId,
+            ActorUserUpn = InitiatingProcessAccountUpn
+        | extend 
+            ActorWindowsUsername = strcat(InitiatingProcessAccountDomain, '\\', InitiatingProcessAccountName) 
+        | extend
+            ActorUserType = _ASIM_GetWindowsUserType(ActorWindowsUsername, ActorUserSid)
+        | project-away RequestAccountSid, RequestSourceIP
+    ;
+    union 
+        remote_events
+        , 
+        local_events
+    | project-rename
+        EventType = ActionType,
+        DvcId = DeviceId,
+        TargetFileMD5 = MD5,
+        TargetFileSHA1 = SHA1,
+        TargetFileSHA256 = SHA256,
+        ActingProcessCommandLine = InitiatingProcessCommandLine,
+        ActingProcessName =InitiatingProcessFolderPath,
+        ActingProcessMD5 = InitiatingProcessMD5,
+        ActingProcessSHA1 = InitiatingProcessSHA1,
+        ActingProcessSHA256 = InitiatingProcessSHA256,
+        ActingProcessParentFileName = InitiatingProcessParentFileName,
+        ActingProcessCreationTime = InitiatingProcessCreationTime,
+        ActingProcessParentCreationTime = InitiatingProcessParentCreationTime,
+        TargetFileName = FileName,
+        SrcFileName = PreviousFileName
+    | extend
+        DvcOs = iff(FolderPath startswith "/", "Linux", "Windows"),
+        TargetFileSize = tolong(FileSize)
+    | extend
+        EventCount = int(1),
+        EventOriginalUid = tostring(ReportId),
+        ActingProcessId = tostring(InitiatingProcessId),
+        EventStartTime = Timestamp, 
+        EventEndTime= Timestamp,
+        EventResult = 'Success',
+        EventProduct = 'M365 Defender for Endpoint',
+        EventSchema = 'FileEvent',
+        EventVendor = 'Microsoft',
+        EventSeverity = 'Informational',
+        EventSchemaVersion = '0.2.1',
+        DvcIdType = "MDEid",
+        ActorUsername = coalesce(ActorUserUpn, ActorWindowsUsername),
+        ActorUsernameType = iff(isempty(ActorUserUpn), 'Windows', 'UPN'),
+        ActorUserId = coalesce(ActorUserAadId, ActorUserSid), 
+        ActorUserIdType = iff(isempty(ActorUserSid), 'AADID', 'SID'),
+        TargetFilePath = strcat(FolderPath, iff(DvcOs == "Linux", "/", "\\"), TargetFileName),
+        TargetFilePathType = iff(DvcOs == "Linux", "Unix", "Windows Local"),
+        SrcFilePath = strcat(PreviousFolderPath, iff(DvcOs == "Linux", "/", "\\"), SrcFileName),
+        SrcFilePathType = iff(DvcOs == "Linux", "Unix", "Windows Local"),
+        Hash=coalesce(TargetFileSHA256, TargetFileSHA1, TargetFileMD5),
+        NetworkApplicationProtocol = iff (RequestProtocol in (protocols), toupper(RequestProtocol), "")
+    | invoke _ASIM_ResolveDvcFQDN ('DeviceName')
+    | project-away DeviceName
+    | extend
+        HashType = tostring(dynamic(["SHA256", "SHA1", "MD5"])[array_index_of(pack_array(TargetFileSHA256, TargetFileSHA1, TargetFileMD5), Hash)])     
+    //  ****** Aliases
+    | extend 
+        User = ActorUsername,
+        Dvc = coalesce(DvcFQDN, DvcHostname),
+        FilePath = TargetFilePath,
+        Process = ActingProcessName,
+        CommandLine = ActingProcessCommandLine,
+        DvcMDEid = DvcId,
+        FileName = TargetFileName
+    | project-away
+        MachineGroup,
+        ReportId,
+        SourceSystem,
+        Initiating*,
+        Timestamp,
+        TenantId,
+        Request*,
+        PreviousFolderPath,
+        FolderPath,
+        AppGuardContainerId
+    | project-away ShareName, IsAzureInfoProtectionApplied, FileOrigin*, Sensitivity*
+};
+parser (
+    starttime=starttime, 
+    endtime=endtime, 
+    eventtype_in=eventtype_in,
+    srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+    actorusername_has_any=actorusername_has_any,
+    targetfilepath_has_any=targetfilepath_has_any,
+    srcfilepath_has_any=srcfilepath_has_any,
+    hashes_has_any=hashes_has_any,
+    dvchostname_has_any=dvchostname_has_any,
+    disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimFileEventMicrosoftSecurityEvents
+// Description: This ASIM parser supports normalizing Microsoft Windows Events (WindowsEvent and SecurityEvent tables) logs ingested in 'SecurityEvent' table to the ASIM File Event normalized schema. Event IDs which are parsed as part of this parser: 4663
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimFileEventMicrosoftSecurityEvents(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['targetfilepath_has_any']:dynamic=dynamic([]),
+    ['srcfilepath_has_any']:dynamic=dynamic([]),
+    ['hashes_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=False)
+{
+let Parser=(
+  starttime: datetime=datetime(null),
+  endtime: datetime=datetime(null),
+  eventtype_in: dynamic=dynamic([]),
+  srcipaddr_has_any_prefix: dynamic=dynamic([]),
+  actorusername_has_any: dynamic=dynamic([]),
+  targetfilepath_has_any: dynamic=dynamic([]),
+  srcfilepath_has_any: dynamic=dynamic([]),
+  hashes_has_any: dynamic=dynamic([]),
+  dvchostname_has_any: dynamic=dynamic([]),
+  disabled: bool=false
+  ) {
+  let EventTypeLookup = datatable (AccessMask: string, EventType: string)
+      [
+  "0x1", "ObjectAccessed",
+  "0x10", "MetadataModified",
+  "0x100", "MetadataModified",
+  "0x10000", "ObjectDeleted",
+  "0x2", "ObjectModified",
+  "0x20000", "MetadataAccessed",
+  "0x4", "ObjectModified",
+  "0x40", "ObjectDeleted",
+  "0x40000", "MetadataModified",
+  "0x6", "ObjectModified",
+  "0x8", "MetadataAccessed",
+  "0x80", "MetadataAccessed",
+  "0x80000", "MetadataModified"
+];
+    let UserTypeLookup = datatable (AccountType: string, ActorUserType: string)
+        [
+    'User', 'Regular',
+    'Machine', 'Machine'
+];    
+    let KnownSIDs = datatable (sid: string, username: string, type: string)
+        [
+    'S-1-5-18', 'Local System', 'Simple',
+    'S-1-0-0', 'Nobody', 'Simple'
+];
+    SecurityEvent
+        | where not(disabled)
+        | where (isnull(starttime) or TimeGenerated >= starttime) 
+            and (isnull(endtime) or TimeGenerated <= endtime)
+        | where EventID == 4663 
+            and ObjectType == "File"
+            and ObjectName !startswith @"\Device\"
+        | where (array_length(srcipaddr_has_any_prefix) == 0) and 
+            ((array_length(targetfilepath_has_any) == 0) or (ObjectName has_any (targetfilepath_has_any))) and 
+            (array_length(srcfilepath_has_any) == 0) and
+            (array_length(hashes_has_any) == 0) and 
+            (array_length(dvchostname_has_any) == 0 or Computer has_any (dvchostname_has_any))
+        | project
+            TimeGenerated,
+            EventID,
+            AccessMask,
+            ProcessName,
+            SubjectUserSid,
+            AccountType,
+            Computer,
+            ObjectName,
+            ProcessId,
+            SubjectUserName,
+            SubjectAccount,
+            SubjectLogonId,
+            HandleId,
+            Type
+    | lookup EventTypeLookup on AccessMask
+    | where ((array_length(eventtype_in) == 0 or EventType in~ (eventtype_in)))
+    | lookup UserTypeLookup on AccountType
+    | lookup KnownSIDs on $left.SubjectUserSid == $right.sid
+    | extend
+        ActingProcessName = ProcessName
+        ,
+        ActorUsername = iff (SubjectUserName == "-", username, SubjectAccount)
+        ,
+        ActorUsernameType = iff(SubjectUserName == '-', type, 'Windows')
+        ,
+        EventStartTime = TimeGenerated
+        ,
+        EventEndTime = TimeGenerated
+        ,
+        TargetFilePath = ObjectName
+        ,
+        TargetFilePathFormat = "Windows Local"
+        ,
+        ActingProcessId = tostring(toint(ProcessId))
+        ,
+        EventOriginalType = tostring(EventID)
+  | where (array_length(actorusername_has_any) == 0) or (ActorUsername has_any (actorusername_has_any))
+    | project-away EventID, ProcessId, AccountType, username
+    | project-rename
+        ActorUserId = SubjectUserSid
+        ,
+        DvcHostname = Computer
+        ,
+        Process = ProcessName
+        ,
+        FilePath = ObjectName
+        ,
+        ActorSessionId = SubjectLogonId
+        ,
+        FileSessionId = HandleId
+    | extend
+        EventSchema = "FileEvent"
+        ,
+        EventSchemaVersion = "0.1.1"
+        ,
+        EventResult = "Success"
+        ,
+        EventCount = int(1)
+        ,
+        EventVendor = 'Microsoft'
+        ,
+        EventProduct = 'Security Events'
+        ,
+        Dvc = DvcHostname
+        ,
+        ActorWindowsUsername = ActorUsername
+        ,
+        User = ActorUsername
+        ,
+        ActorUserSid = ActorUserId,
+        ActorUserIdType="SID", TargetFilePathType="Windows Local"
+        | project-away AccessMask,ActorWindowsUsername,FileSessionId,SubjectAccount,SubjectUserName,TargetFilePathFormat,type
+};
+Parser (
+    starttime=starttime, 
+    endtime=endtime, 
+    eventtype_in=eventtype_in,
+    srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+    actorusername_has_any=actorusername_has_any,
+    targetfilepath_has_any=targetfilepath_has_any,
+    srcfilepath_has_any=srcfilepath_has_any,
+    hashes_has_any=hashes_has_any,
+    dvchostname_has_any=dvchostname_has_any,
+    disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimFileEventMicrosoftSharePoint
+// Description: This ASIM parser supports normalizing Sharepoint and OneDrive for business events, stored in the OfficeActivity table, to the ASIM file activity schema.
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimFileEventMicrosoftSharePoint(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['targetfilepath_has_any']:dynamic=dynamic([]),
+    ['srcfilepath_has_any']:dynamic=dynamic([]),
+    ['hashes_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=False)
+{
+let _ASIM_ResolveActorUsername = (T: (*), UsernameField: string) { 
+  T
+  | extend ActorUsername = column_ifexists(UsernameField, "")
+  | extend windows = ActorUsername has '\\'
+  | extend 
+      ActorUsernameType = iff (windows, "Windows", "UPN"),
+      ActorUserUpn =  iff (windows, "", ActorUsername),
+      ActorWindowsUsername = iff (windows, ActorUsername, "")
+};
+let operations = datatable (Operation: string, EventType: string, EventSubType: string) [
+    "FileUploaded", "FileCreated", "Upload",
+    "FileAccessedExtended", "FileAccessed", "Extended",
+    "FileRecycled", "FileDeleted", "Recycle",
+    "FileDeleted", "FileDeleted", "",
+    "FileAccessed", "FileAccessed", "",
+    "FolderCreated", "FolderCreated", "",
+    "FilePreviewed", "FileAccessed", "Preview",
+    "FileDownloaded", "FileAccessed", "Download",
+    "FileSyncDownloadedFull", "FileAccessed", "Download",
+    "FolderModified", "FolderModified", "",
+    "FileModifiedExtended", "FolderModified", "Extended",
+    "FileModified", "FolderModified", "",
+    "FileVersionsAllDeleted", "FolderDeleted", "Versions",
+    "FileSyncUploadedFull", "FileCreated", "Upload",
+    "FileSensitivityLabelApplied", "FileAttributesUpdated", "",
+    "FileSensitivityLabelChanged", "FileAttributesUpdated", "",
+    "FileSensitivityLabelRemoved", "FileAttributesUpdated", "",
+    "SiteDeleted", "FolderDeleted", "Site",
+    "FileRenamed", "FileRenamed", "",
+    "FileMoved", "FileMoved", "",
+    "FileCopied", "FileCopied", "",
+    "FolderCopied", "FolderCopied", "",
+    "FolderMoved", "FolderMoved", "",
+    "FolderRenamed", "FolderRenamed", "",
+    "FolderRecycled", "FolderDeleted", "Recycle",
+    "FolderDeleted", "FolderDeleted", "",
+    "FileCheckedIn", "FileCreatedOrModified", "Checkin",
+    "FileCheckedOut", "FileAccessed", "Checkout"
+];
+let multiple_file_operations = dynamic([
+    "FileRenamed",
+    "FileMoved",
+    "FileCopied",
+    "FolderCopied",
+    "FolderMoved",
+    "FolderRenamed"
+    ]);
+let parser=(
+    starttime: datetime=datetime(null),
+    endtime: datetime=datetime(null),
+    eventtype_in: dynamic=dynamic([]),
+    srcipaddr_has_any_prefix: dynamic=dynamic([]),
+    actorusername_has_any: dynamic=dynamic([]),
+    targetfilepath_has_any: dynamic=dynamic([]),
+    srcfilepath_has_any: dynamic=dynamic([]),
+    hashes_has_any: dynamic=dynamic([]),
+    dvchostname_has_any: dynamic=dynamic([]),
+    disabled: bool=false
+    ) {
+    let OfficeActivityProjected = 
+        OfficeActivity
+        | where not(disabled)
+        | where (isnull(starttime) or TimeGenerated >= starttime) 
+            and (isnull(endtime) or TimeGenerated <= endtime)
+        | where RecordType == "SharePointFileOperation" and Operation != "FileMalwareDetected"
+        | where ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(ClientIP, srcipaddr_has_any_prefix))) and 
+            ((array_length(actorusername_has_any) == 0) or (UserId has_any (actorusername_has_any))) and
+            ((array_length(targetfilepath_has_any) == 0) or (OfficeObjectId has_any (targetfilepath_has_any)) or (strcat (Site_Url, DestinationRelativeUrl, "/", DestinationFileName) has_any (targetfilepath_has_any))) and
+            ((array_length(srcfilepath_has_any) == 0) or (OfficeObjectId has_any (srcfilepath_has_any))) and
+            (array_length(hashes_has_any) == 0) and
+            (array_length(dvchostname_has_any) == 0)
+        | project
+            Operation,
+            OrganizationId,
+            OrganizationName,
+            SourceRecordId,
+            OfficeWorkload,
+            UserId,
+            ClientIP,
+            UserAgent,
+            Start_Time,
+            TimeGenerated,
+            Type,
+            OfficeObjectId,
+            SourceFileName,
+            SourceFileExtension,
+            DestinationFileName,
+            DestinationFileExtension,
+            Site_Url,
+            DestinationRelativeUrl,
+            UserKey,
+            MachineDomainInfo,
+            MachineId; // ,_ItemId 
+    let SingleFileOperationEvents = 
+        OfficeActivityProjected
+        | where Operation !in (multiple_file_operations)
+        | project-rename 
+            TargetFilePath = OfficeObjectId,
+            TargetFileName = SourceFileName,
+            TargetFileExtension = SourceFileExtension
+        // Post-filtering
+        | where (array_length(srcfilepath_has_any) == 0) and
+            ((array_length(targetfilepath_has_any) == 0) or (TargetFilePath has_any (targetfilepath_has_any)))
+        | extend 
+            TargetFilePathType = "URL"
+        | project-away DestinationFileName, DestinationFileExtension, DestinationRelativeUrl
+    ;
+    // single in dest: SiteDeleted
+    let MultipleFileOperationsEvents = 
+        OfficeActivityProjected
+        | where Operation in (multiple_file_operations)
+        | project-rename 
+            SrcFilePath = OfficeObjectId,
+            TargetFileName = DestinationFileName,
+            TargetFileExtension = DestinationFileExtension,
+            SrcFileName = SourceFileName,
+            SrcFileExtension = SourceFileExtension
+        | extend 
+            TargetFilePath = strcat (Site_Url, DestinationRelativeUrl, "/", TargetFileName),
+            TargetFilePathType = "URL",
+            SrcFilePathType = "URL"
+        // Post-filtering
+        | where ((array_length(srcfilepath_has_any) == 0) or (SrcFilePath has_any (srcfilepath_has_any))) and
+            ((array_length(targetfilepath_has_any) == 0) or (TargetFilePath has_any (targetfilepath_has_any)))
+        | project-away DestinationRelativeUrl
+    ;
+    union SingleFileOperationEvents, MultipleFileOperationsEvents
+    | lookup operations on Operation
+    | where (array_length(eventtype_in) == 0 or EventType in~ (eventtype_in))
+    | invoke _ASIM_ResolveActorUsername('UserId')
+    | project-away UserId
+    | project-rename 
+        EventOriginalType = Operation,
+        ActorScopeId = OrganizationId,
+        ActorScope = OrganizationName,
+        EventOriginalUid = SourceRecordId,
+        EventProduct = OfficeWorkload,
+        ActorUserId = UserKey,
+        HttpUserAgent = UserAgent,
+        SrcIpAddr = ClientIP,
+        EventStartTime = Start_Time,
+        // EvetUid = _ItemId,
+        TargetUrl = Site_Url,
+        SrcDvcId = MachineId,
+        SrcDvcScopeId = MachineDomainInfo
+    | extend
+        EventCount = int(1),
+        EventStartTime = TimeGenerated, 
+        EventEndTime = TimeGenerated,
+        EventResult = "Success",
+        EventVendor = 'Microsoft',
+        EventSchemaVersion = '0.2.1',
+        EventSchema = "FileEvent",
+        ActorUserIdType = 'Other',
+        SrcDvcIdType = 'Other',
+        TargetAppName = EventProduct,
+        TargetAppType = 'SaaS application',
+        Dvc = strcat ('Microsoft ', EventProduct)
+    // Aliases
+    | extend 
+        User = ActorUsername,
+        FilePath = TargetFilePath,
+        FileName = TargetFileName,
+        Src = SrcIpAddr,
+        IpAddr = SrcIpAddr,
+        Url = TargetUrl,
+        Dvc = EventProduct,
+        Application = EventProduct
+};
+parser (
+    starttime=starttime, 
+    endtime=endtime, 
+    eventtype_in=eventtype_in,
+    srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+    actorusername_has_any=actorusername_has_any,
+    targetfilepath_has_any=targetfilepath_has_any,
+    srcfilepath_has_any=srcfilepath_has_any,
+    hashes_has_any=hashes_has_any,
+    dvchostname_has_any=dvchostname_has_any,
+    disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimFileEventMicrosoftSysmon
+// Description: This ASIM parser supports normalizing Sysmon logs ingested in 'Event' table to the ASIM file event schema.
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimFileEventMicrosoftSysmon(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['targetfilepath_has_any']:dynamic=dynamic([]),
+    ['srcfilepath_has_any']:dynamic=dynamic([]),
+    ['hashes_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=False)
+{
+let parser = (
+  starttime: datetime=datetime(null),
+  endtime: datetime=datetime(null),
+  eventtype_in: dynamic=dynamic([]),
+  srcipaddr_has_any_prefix: dynamic=dynamic([]),
+  actorusername_has_any: dynamic=dynamic([]),
+  targetfilepath_has_any: dynamic=dynamic([]),
+  srcfilepath_has_any: dynamic=dynamic([]),
+  hashes_has_any: dynamic=dynamic([]),
+  dvchostname_has_any: dynamic=dynamic([]),
+  disabled: bool=false
+  ) {
+  // -- Event parser
+  let EventParser = () {
+  Event
+      | where not(disabled)
+      | where (isnull(starttime) or TimeGenerated >= starttime) 
+          and (isnull(endtime) or TimeGenerated <= endtime)
+      | project
+          EventID,
+          EventData,
+          Computer,
+          TimeGenerated,
+          _ResourceId,
+          _SubscriptionId,
+          Source,
+          Type, 
+          _ItemId 
+      | where Source == "Microsoft-Windows-Sysmon" and EventID in (11, 23, 26)
+      | project-away Source
+      // pre-filtering
+      | where ((array_length(eventtype_in) == 0 or (iff (EventID == 11, 'FileCreated', 'FileDeleted') in~ (eventtype_in)))) and
+          (array_length(srcipaddr_has_any_prefix) == 0) and
+          ((array_length(srcfilepath_has_any) == 0)) and
+          ((array_length(dvchostname_has_any) == 0) or Computer has_any (dvchostname_has_any))
+      | parse-kv EventData as (
+          RuleName: string,
+          UtcTime: datetime, 
+          ProcessGuid: string,
+          ProcessId: string,
+          Image: string,
+          User: string,
+          TargetFilename: string,
+          Hashes: string,
+          CreationUtcTime: datetime
+          )
+          with (regex=@'<Data Name="(\w+)">{?([^<]*?)}?</Data>')
+      | project-rename 
+          ActingProcessGuid = ProcessGuid,
+          ActingProcessId = ProcessId,
+          ActorUsername = User,
+          ActingProcessName = Image,
+          TargetFileCreationTime=CreationUtcTime,
+          TargetFilePath=TargetFilename,
+          EventStartTime=UtcTime
+      // Filter for ActorUsername and TargetFilePath
+      | where ((array_length(actorusername_has_any) == 0) or (ActorUsername has_any (actorusername_has_any))) and 
+          ((array_length(targetfilepath_has_any) == 0) or (TargetFilePath has_any (targetfilepath_has_any)))
+      | project-away EventData
+};
+    EventParser 
+    | project-rename
+        DvcHostname = Computer,
+        DvcScopeId = _SubscriptionId,
+        DvcId = _ResourceId
+    | extend
+        EventType=iff (EventID == 11, 'FileCreated', 'FileDeleted'),
+        EventProduct = 'Sysmon',
+        EventVendor = 'Microsoft',
+        EventSchema = 'FileEvent',
+        EventSchemaVersion = '0.2.1',
+        EventResult = 'Success',
+        EventSeverity = 'Informational',
+        DvcOs='Windows',
+        TargetFilePathType = 'Windows',
+        DvcIdType = iff (DvcId != "", "AzureResourceId", ""),
+        EventCount = int(1),
+        EventEndTime = EventStartTime,
+        EventOriginalType = tostring(EventID),
+        TargetFileName = tostring(split(TargetFilePath, '\\')[-1]),
+        ActorUsernameType = iff(isnotempty(ActorUsername), 'Windows', ''),
+        RuleName = iff (RuleName == "-", "", RuleName),
+        EventUid = _ItemId
+    | parse-kv Hashes as (
+        MD5: string,
+        SHA1: string,
+        IMPHASH: string,
+        SHA256: string
+        )
+    | project-rename
+        TargetFileMD5 = MD5,
+        TargetFileSHA1 = SHA1,
+        TargetFileIMPHASH = IMPHASH,
+        TargetFileSHA256 = SHA256
+    // Filter for hash
+    | where (array_length(hashes_has_any) == 0)
+        or (TargetFileMD5 has_any (hashes_has_any))
+        or (TargetFileSHA1 has_any (hashes_has_any))
+        or (TargetFileIMPHASH has_any (hashes_has_any))
+        or (TargetFileSHA256 has_any (hashes_has_any))
+    | extend
+        Hash=coalesce(TargetFileSHA256, TargetFileSHA1, TargetFileMD5, TargetFileIMPHASH)
+    | extend
+        HashType = tostring(dynamic(["SHA256", "SHA1", "MD5", "IMPHASH"])[array_index_of(pack_array(TargetFileSHA256, TargetFileSHA1, TargetFileMD5, TargetFileIMPHASH), Hash)])
+    // -- Typed entity identifiers
+    | extend
+        ActorWindowsUsername = ActorUsername
+    // -- Aliases
+    | extend
+        Process = ActingProcessName,
+        Dvc = DvcHostname,
+        FilePath = TargetFilePath,
+        FileName = TargetFileName,
+        User = ActorUsername
+    | project-away EventID, Hashes,ActorWindowsUsername,TargetFileIMPHASH
+};
+parser (
+    starttime=starttime, 
+    endtime=endtime, 
+    eventtype_in=eventtype_in,
+    srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+    actorusername_has_any=actorusername_has_any,
+    targetfilepath_has_any=targetfilepath_has_any,
+    srcfilepath_has_any=srcfilepath_has_any,
+    hashes_has_any=hashes_has_any,
+    dvchostname_has_any=dvchostname_has_any,
+    disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimFileEventMicrosoftSysmonWindowsEvent
+// Description: This ASIM parser supports normalizing Sysmon logs ingested in 'WindowsEvent' table to the ASIM file event schema.
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimFileEventMicrosoftSysmonWindowsEvent(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['targetfilepath_has_any']:dynamic=dynamic([]),
+    ['srcfilepath_has_any']:dynamic=dynamic([]),
+    ['hashes_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=False)
+{
+let parser = (
+  starttime: datetime=datetime(null),
+  endtime: datetime=datetime(null),
+  eventtype_in: dynamic=dynamic([]),
+  srcipaddr_has_any_prefix: dynamic=dynamic([]),
+  actorusername_has_any: dynamic=dynamic([]),
+  targetfilepath_has_any: dynamic=dynamic([]),
+  srcfilepath_has_any: dynamic=dynamic([]),
+  hashes_has_any: dynamic=dynamic([]),
+  dvchostname_has_any: dynamic=dynamic([]),
+  disabled: bool=false
+  ) {
+    //
+    // -- WindowsEvent parser
+    let WindowsEventParser=() {
+    WindowsEvent 
+        | where not(disabled)
+        | where (isnull(starttime) or TimeGenerated >= starttime) 
+            and (isnull(endtime) or TimeGenerated <= endtime)
+        | project
+            EventID,
+            EventData,
+            Computer,
+            TimeGenerated,
+            _ResourceId,
+            _SubscriptionId,
+            Provider,
+            Type,
+            _ItemId 
+        | where Provider == "Microsoft-Windows-Sysmon" and EventID in (11, 23, 26)
+        | project-away Provider
+        // pre-filtering
+        | where ((array_length(eventtype_in) == 0 or (iff (EventID == 11, 'FileCreated', 'FileDeleted') in~ (eventtype_in)))) and
+            (array_length(srcipaddr_has_any_prefix) == 0) and
+            ((array_length(actorusername_has_any) == 0) or (tostring(EventData.User) has_any (actorusername_has_any))) and
+            ((array_length(targetfilepath_has_any) == 0) or (tostring(EventData.TargetFilename) has_any (targetfilepath_has_any))) and
+            ((array_length(srcfilepath_has_any) == 0)) and
+            ((array_length(dvchostname_has_any) == 0) or Computer has_any (dvchostname_has_any))
+        | extend 
+            TargetFileCreationTime=todatetime(EventData.CreationUtcTime),
+            TargetFilePath=tostring(EventData.TargetFilename),
+            ActingProcessName = tostring(EventData.Image),
+            ActingProcessId = tostring(EventData.ProcessId),
+            ActingProcessGuid = tostring(EventData.ProcessGuid),
+            ActorUsername = tostring(EventData.User),
+            EventStartTime = todatetime(EventData.UtcTime),
+            RuleName = tostring(EventData.RuleName),
+            Hashes = tostring(EventData.Hashes)
+        | parse ActingProcessGuid with "{" ActingProcessGuid "}"
+        | project-away EventData
+};
+    WindowsEventParser 
+    | project-rename
+        DvcHostname = Computer,
+        DvcScopeId = _SubscriptionId,
+        DvcId = _ResourceId
+    | extend
+        EventType=iff (EventID == 11, 'FileCreated', 'FileDeleted'),
+        EventProduct = 'Sysmon',
+        EventVendor = 'Microsoft',
+        EventSchema = 'FileEvent',
+        EventSchemaVersion = '0.2.1',
+        EventResult = 'Success',
+        EventSeverity = 'Informational',
+        DvcOs='Windows',
+        TargetFilePathType = 'Windows',
+        DvcIdType = iff (DvcId != "", "AzureResourceId", ""),
+        EventCount = int(1),
+        EventEndTime = EventStartTime,
+        EventOriginalType = tostring(EventID),
+        TargetFileName = tostring(split(TargetFilePath, '\\')[-1]),
+        ActorUsernameType = iff(isnotempty(ActorUsername), 'Windows', ''),
+        RuleName = iff (RuleName == "-", "", RuleName),
+        EventUid = _ItemId
+    | parse-kv Hashes as (
+        MD5: string,
+        SHA1: string,
+        IMPHASH: string,
+        SHA256: string
+        )
+    | project-rename
+        TargetFileMD5 = MD5,
+        TargetFileSHA1 = SHA1,
+        TargetFileIMPHASH = IMPHASH,
+        TargetFileSHA256 = SHA256
+    // Filter for hash
+    | where (array_length(hashes_has_any) == 0)
+        or (TargetFileMD5 has_any (hashes_has_any))
+        or (TargetFileSHA1 has_any (hashes_has_any))
+        or (TargetFileIMPHASH has_any (hashes_has_any))
+        or (TargetFileSHA256 has_any (hashes_has_any))
+    | extend
+        Hash=coalesce(TargetFileSHA256, TargetFileSHA1, TargetFileMD5, TargetFileIMPHASH)
+    | extend
+        HashType = tostring(dynamic(["SHA256", "SHA1", "MD5", "IMPHASH"])[array_index_of(pack_array(TargetFileSHA256, TargetFileSHA1, TargetFileMD5, TargetFileIMPHASH), Hash)])
+    // -- Typed entity identifiers
+    | extend
+        ActorWindowsUsername = ActorUsername
+    // -- Aliases
+    | extend
+        Process = ActingProcessName,
+        Dvc = DvcHostname,
+        FilePath = TargetFilePath,
+        FileName = TargetFileName,
+        User = ActorUsername
+    | project-away EventID, Hashes,ActorWindowsUsername,TargetFileIMPHASH
+};
+parser (
+    starttime=starttime, 
+    endtime=endtime, 
+    eventtype_in=eventtype_in,
+    srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+    actorusername_has_any=actorusername_has_any,
+    targetfilepath_has_any=targetfilepath_has_any,
+    srcfilepath_has_any=srcfilepath_has_any,
+    hashes_has_any=hashes_has_any,
+    dvchostname_has_any=dvchostname_has_any,
+    disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimFileEventMicrosoftWindowsEvents
+// Description: This ASIM parser supports normalizing Microsoft Windows Events (WindowsEvent and SecurityEvent tables) logs ingested in 'WindowsEvent' table to the ASIM File Event normalized schema. Event IDs which are parsed as part of this parser: 4663
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimFileEventMicrosoftWindowsEvents(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['targetfilepath_has_any']:dynamic=dynamic([]),
+    ['srcfilepath_has_any']:dynamic=dynamic([]),
+    ['hashes_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=False)
+{
+let Parser=(
+  starttime: datetime=datetime(null),
+  endtime: datetime=datetime(null),
+  eventtype_in: dynamic=dynamic([]),
+  srcipaddr_has_any_prefix: dynamic=dynamic([]),
+  actorusername_has_any: dynamic=dynamic([]),
+  targetfilepath_has_any: dynamic=dynamic([]),
+  srcfilepath_has_any: dynamic=dynamic([]),
+  hashes_has_any: dynamic=dynamic([]),
+  dvchostname_has_any: dynamic=dynamic([]),
+  disabled: bool=false
+  ) {
+  let EventTypeLookup = datatable (AccessMask: string, EventType: string)
+      [
+  "0x1", "ObjectAccessed"
+      ,
+  "0x10", "MetadataModified"
+      ,
+  "0x100", "MetadataModified"
+      ,
+  "0x10000", "ObjectDeleted"
+      ,
+  "0x2", "ObjectModified"
+      ,
+  "0x20000", "MetadataAccessed"
+      ,
+  "0x4", "ObjectModified"
+      ,
+  "0x40", "ObjectDeleted"
+      ,
+  "0x40000", "MetadataModified"
+      ,
+  "0x6", "ObjectModified"
+      ,
+  "0x8", "MetadataAccessed"
+      ,
+  "0x80", "MetadataAccessed"
+      ,
+  "0x80000", "MetadataModified"
+];
+    let UserTypeLookup = datatable (AccountType: string, ActorUserType: string)
+        [
+    'User', 'Regular',
+    'Machine', 'Machine'
+];    
+    let KnownSIDs = datatable (sid: string, username: string, type: string)
+        [
+    'S-1-5-18', 'Local System', 'Simple',
+    'S-1-0-0', 'Nobody', 'Simple'
+];
+    WindowsEvent
+        | where EventID == 4663 
+            and EventData.ObjectType == "File"
+            and EventData.ObjectName !startswith @"\Device\"
+        | extend ActorUserIdType="SID", TargetFilePathType="Windows Local"
+        | project
+            TimeGenerated
+            ,
+            EventID,
+            AccessMask = tostring(EventData.AccessMask)
+            ,
+            ProcessName = tostring(EventData.ProcessName)
+            ,
+            SubjectUserSid = tostring(EventData.SubjectUserSid)
+            ,
+            AccountType = tostring(EventData.AccountType)
+            ,
+            Computer = tostring(EventData.Computer)
+            ,
+            ObjectName = tostring(EventData.ObjectName)
+            ,
+            ProcessId = tostring(EventData.ProcessId)
+            ,
+            SubjectUserName = tostring(EventData.SubjectUserName)
+            ,
+            SubjectAccount = tostring(EventData.SubjectAccount)
+            ,
+            SubjectLogonId = tostring(EventData.SubjectLogonId)
+            ,
+            HandleId = tostring(EventData.HandleId)
+            ,
+            Type
+    | lookup EventTypeLookup on AccessMask
+    | where ((array_length(eventtype_in) == 0 or EventType in~ (eventtype_in)))
+    | lookup UserTypeLookup on AccountType
+    | lookup KnownSIDs on $left.SubjectUserSid == $right.sid
+    | extend
+        ActingProcessName = ProcessName
+        ,
+        ActorUsername = iff (SubjectUserName == "-", username, SubjectAccount)
+        ,
+        ActorUsernameType = iff(SubjectUserName == '-', type, 'Windows')
+        ,
+        EventStartTime = TimeGenerated
+        ,
+        EventEndTime = TimeGenerated
+        ,
+        TargetFilePath = ObjectName
+        ,
+        TargetFilePathFormat = "Windows Local"
+        ,
+        ActingProcessId = tostring(toint(ProcessId))
+        ,
+        EventOriginalType = tostring(EventID)
+  | where (array_length(actorusername_has_any) == 0) or (ActorUsername has_any (actorusername_has_any))
+    | project-away EventID, ProcessId, AccountType, username
+    | project-rename
+        ActorUserId = SubjectUserSid
+        ,
+        DvcHostname = Computer
+        ,
+        Process = ProcessName
+        ,
+        FilePath = ObjectName
+        ,
+        ActorSessionId = SubjectLogonId
+        ,
+        FileSessionId = HandleId
+    | extend
+        EventSchema = "FileEvent"
+        ,
+        EventSchemaVersion = "0.1.1"
+        ,
+        EventResult = "Success"
+        ,
+        EventCount = int(1)
+        ,
+        EventVendor = 'Microsoft'
+        ,
+        EventProduct = 'Security Events'
+        ,
+        Dvc = DvcHostname
+        ,
+        ActorWindowsUsername = ActorUsername
+        ,
+        User = ActorUsername
+        ,
+        ActorUserSid = ActorUserId
+        , ActorUserIdType="SID"
+        , TargetFilePathType="Windows Local"
+        | project-away AccessMask,ActorWindowsUsername,FileSessionId,SubjectAccount,SubjectUserName,TargetFilePathFormat,type
+};
+Parser (
+    starttime=starttime, 
+    endtime=endtime, 
+    eventtype_in=eventtype_in,
+    srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+    actorusername_has_any=actorusername_has_any,
+    targetfilepath_has_any=targetfilepath_has_any,
+    srcfilepath_has_any=srcfilepath_has_any,
+    hashes_has_any=hashes_has_any,
+    dvchostname_has_any=dvchostname_has_any,
+    disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimFileEventNative
+// Description: This ASIM parser supports normalizing the native File Event table (ASimFileEventLogs) to the ASIM File Event normalized schema. While the native table is ASIM compliant, the parser is needed to add capabilities, such as aliases, available only at query time.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimFileEventNative(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['targetfilepath_has_any']:dynamic=dynamic([]),
+    ['srcfilepath_has_any']:dynamic=dynamic([]),
+    ['hashes_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=False)
+{
+let parser=(
+  starttime: datetime=datetime(null),
+  endtime: datetime=datetime(null),
+  eventtype_in: dynamic=dynamic([]),
+  srcipaddr_has_any_prefix: dynamic=dynamic([]),
+  actorusername_has_any: dynamic=dynamic([]),
+  targetfilepath_has_any: dynamic=dynamic([]),
+  srcfilepath_has_any: dynamic=dynamic([]),
+  hashes_has_any: dynamic=dynamic([]),
+  dvchostname_has_any: dynamic=dynamic([]),
+  disabled: bool=false
+  ) {
+  ASimFileEventLogs
+  | where not(disabled)
+  | where (isnull(starttime) or TimeGenerated >= starttime)
+      and (isnull(endtime) or TimeGenerated <= endtime)
+  | where ((array_length(eventtype_in) == 0 or EventType in~ (eventtype_in))) and
+      ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(SrcIpAddr, srcipaddr_has_any_prefix))) and 
+      ((array_length(actorusername_has_any) == 0) or (ActorUsername has_any (actorusername_has_any))) and
+      ((array_length(targetfilepath_has_any) == 0) or (TargetFilePath has_any (targetfilepath_has_any))) and 
+      ((array_length(srcfilepath_has_any) == 0) or (SrcFilePath has_any (srcfilepath_has_any))) and
+      ((array_length(hashes_has_any) == 0) or (TargetFileMD5 in (hashes_has_any)) or (TargetFileSHA1 in (hashes_has_any)) or (TargetFileSHA256 in (hashes_has_any)) or (TargetFileSHA512 in (hashes_has_any))) and 
+      (array_length(dvchostname_has_any) == 0 or DvcHostname has_any (dvchostname_has_any))
+  | project-rename
+      EventUid = _ItemId
+  | extend          
+      EventSchema = "FileEvent",
+      DvcScopeId = iff(isempty(DvcScopeId), _SubscriptionId, DvcScopeId)
+  //  -- Aliases
+  | extend
+      EventEndTime = iff (isnull(EventEndTime), TimeGenerated, EventEndTime),
+      EventStartTime = iff (isnull(EventEndTime), TimeGenerated, EventStartTime),
+      Dvc = coalesce (DvcFQDN, DvcHostname, DvcIpAddr, DvcId, _ResourceId),
+      Src = SrcIpAddr,
+      IpAddr = SrcIpAddr,
+      Rule = coalesce(RuleName, tostring(RuleNumber)),
+      User = ActorUsername,
+      FileName = TargetFileName,
+      FilePath = TargetFilePath,
+      Process = ActingProcessName,
+      Url = TargetUrl,
+      Application = TargetAppName
+  | project-away
+      TenantId,
+      SourceSystem,
+      _SubscriptionId,
+      _ResourceId
+};
+parser (
+    starttime=starttime, 
+    endtime=endtime, 
+    eventtype_in=eventtype_in,
+    srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+    actorusername_has_any=actorusername_has_any,
+    targetfilepath_has_any=targetfilepath_has_any,
+    srcfilepath_has_any=srcfilepath_has_any,
+    hashes_has_any=hashes_has_any,
+    dvchostname_has_any=dvchostname_has_any,
+    disabled=disabled
+  )
+}
+
+
+
+//
+// Function Name: vimFileEventSentinelOne
+// Description: This ASIM parser supports normalizing SentinelOne logs to the ASIM File Event normalized schema. SentinelOne events are captured through SentinelOne data connector which ingests SentinelOne server objects such as Threats, Agents, Applications, Activities, Policies, Groups, and more events into Microsoft Sentinel through the REST API.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimFileEventSentinelOne(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['targetfilepath_has_any']:dynamic=dynamic([]),
+    ['srcfilepath_has_any']:dynamic=dynamic([]),
+    ['hashes_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=False)
+{
+let GetWindowsFilenamePart = (path: string) { tostring(split(path, @'\')[-1]) };
+let GetLinuxFilenamePart = (path: string) { tostring(split(path, @'/')[-1]) };
+let EventTypeLookup = datatable (alertInfo_eventType_s: string, EventType: string)
+    [
+    "FILECREATION", "FileCreated",
+    "FILEMODIFICATION", "FileModified",
+    "FILEDELETION", "FileDeleted",
+    "FILERENAME", "FileRenamed"
+];
+let ThreatConfidenceLookup_undefined = datatable(
+    alertInfo_analystVerdict_s: string,
+    ThreatConfidence_undefined: int
+)
+    [
+    "FALSE_POSITIVE", 5,
+    "Undefined", 15,
+    "SUSPICIOUS", 25,
+    "TRUE_POSITIVE", 33 
+];
+let ThreatConfidenceLookup_suspicious = datatable(
+    alertInfo_analystVerdict_s: string,
+    ThreatConfidence_suspicious: int
+)
+    [
+    "FALSE_POSITIVE", 40,
+    "Undefined", 50,
+    "SUSPICIOUS", 60,
+    "TRUE_POSITIVE", 67 
+];
+let ThreatConfidenceLookup_malicious = datatable(
+    alertInfo_analystVerdict_s: string,
+    ThreatConfidence_malicious: int
+)
+    [
+    "FALSE_POSITIVE", 75,
+    "Undefined", 80,
+    "SUSPICIOUS", 90,
+    "TRUE_POSITIVE", 100 
+];
+let parser = (
+    starttime: datetime=datetime(null),
+    endtime: datetime=datetime(null),
+    eventtype_in: dynamic=dynamic([]),
+    srcipaddr_has_any_prefix: dynamic=dynamic([]),
+    actorusername_has_any: dynamic=dynamic([]),
+    targetfilepath_has_any: dynamic=dynamic([]),
+    srcfilepath_has_any: dynamic=dynamic([]),
+    hashes_has_any: dynamic=dynamic([]),
+    dvchostname_has_any: dynamic=dynamic([]),
+    disabled: bool=false
+    ) {
+    let allFileData = SentinelOne_CL
+        | where not(disabled)
+        | where (isnull(starttime) or TimeGenerated >= starttime) 
+            and (isnull(endtime) or TimeGenerated <= endtime)
+            and (array_length(srcipaddr_has_any_prefix) == 0)
+            and ((array_length(actorusername_has_any) == 0) or (sourceProcessInfo_user_s has_any (actorusername_has_any)))
+            and ((array_length(targetfilepath_has_any) == 0) or (targetProcessInfo_tgtFilePath_s has_any (targetfilepath_has_any)))
+            and ((array_length(srcfilepath_has_any) == 0) or (targetProcessInfo_tgtFileOldPath_s has_any (srcfilepath_has_any)))
+            and ((array_length(hashes_has_any) == 0) or (targetProcessInfo_tgtFileHashSha1_s in (hashes_has_any)) or (targetProcessInfo_tgtFileHashSha256_s in (hashes_has_any)))
+            and (array_length(dvchostname_has_any) == 0 or agentDetectionInfo_name_s has_any (dvchostname_has_any))
+            and event_name_s == "Alerts."
+            and alertInfo_eventType_s in ('FILECREATION', 'FILEMODIFICATION', 'FILEDELETION', 'FILERENAME');
+    let windowsFileData = allFileData
+        | where agentDetectionInfo_osFamily_s == "windows"
+        | extend
+            TargetFilePathType = "Windows Local",
+            TargetFileName = GetWindowsFilenamePart(targetProcessInfo_tgtFilePath_s),
+            SrcFileName = GetWindowsFilenamePart(targetProcessInfo_tgtFileOldPath_s);
+    let otherFileData = allFileData
+        | where agentDetectionInfo_osFamily_s != "windows"
+        | extend
+            TargetFilePathType = "Unix",
+            TargetFileName = GetLinuxFilenamePart(targetProcessInfo_tgtFilePath_s),
+            SrcFileName = GetLinuxFilenamePart(targetProcessInfo_tgtFileOldPath_s);
+    let parseddata = union windowsFileData, otherFileData
+        | lookup EventTypeLookup on alertInfo_eventType_s
+        | where ((array_length(eventtype_in) == 0 or EventType in~ (eventtype_in)));
+    let undefineddata = parseddata
+        | where ruleInfo_treatAsThreat_s == "UNDEFINED"
+        | lookup ThreatConfidenceLookup_undefined on alertInfo_analystVerdict_s;
+    let suspiciousdata = parseddata
+        | where ruleInfo_treatAsThreat_s == "Suspicious"
+        | lookup ThreatConfidenceLookup_suspicious on alertInfo_analystVerdict_s;
+    let maaliciousdata = parseddata
+        | where ruleInfo_treatAsThreat_s == "Malicious"
+        | lookup ThreatConfidenceLookup_malicious on alertInfo_analystVerdict_s;
+    union undefineddata, suspiciousdata, maaliciousdata
+    | extend
+        ThreatConfidence = coalesce(ThreatConfidence_undefined, ThreatConfidence_suspicious, ThreatConfidence_malicious),
+        EventSeverity = iff(ruleInfo_severity_s == "Critical", "High", ruleInfo_severity_s),
+        EventVendor = "SentinelOne",
+        EventProduct = "SentinelOne",
+        EventResult = "Success",
+        EventSchema = "FileEvent",
+        EventSchemaVersion = "0.2.1",
+        EventCount = toint(1),
+        DvcAction = "Allowed",
+        ActorUsername = sourceProcessInfo_user_s
+    | project-rename
+        EventStartTime = sourceProcessInfo_pidStarttime_t,
+        EventOriginalSeverity = ruleInfo_severity_s,
+        EventUid = _ItemId,
+        ActingProcessCommandLine = sourceProcessInfo_commandline_s,
+        ActingProcessGuid = sourceProcessInfo_uniqueId_g,
+        ActingProcessId = sourceProcessInfo_pid_s,
+        ActingProcessName = sourceProcessInfo_name_s,
+        DvcId = agentDetectionInfo_uuid_g,
+        DvcOs = agentDetectionInfo_osName_s,
+        DvcOsVersion = agentDetectionInfo_osRevision_s,
+        EventOriginalType = alertInfo_eventType_s,
+        EventOriginalUid = alertInfo_dvEventId_s,
+        RuleName = ruleInfo_name_s,
+        TargetFileCreationTime = targetProcessInfo_tgtFileCreatedAt_t,
+        SrcFilePath = targetProcessInfo_tgtFileOldPath_s,
+        TargetFilePath = targetProcessInfo_tgtFilePath_s,
+        TargetFileSHA1 = targetProcessInfo_tgtFileHashSha1_s,
+        TargetFileSHA256 = targetProcessInfo_tgtFileHashSha256_s,
+        ThreatOriginalConfidence = ruleInfo_treatAsThreat_s
+    | invoke _ASIM_ResolveDvcFQDN('agentDetectionInfo_name_s')
+    | extend
+        Dvc = coalesce(DvcHostname, DvcId, EventProduct),
+        EventEndTime = EventStartTime,
+        Rule = RuleName,
+        FileName = TargetFileName,
+        FilePath = TargetFilePath,
+        Process = ActingProcessName,
+        User = ActorUsername,
+        Hash = coalesce(TargetFileSHA256, TargetFileSHA1)
+    | extend
+        ActorUsernameType = _ASIM_GetUsernameType(ActorUsername),
+        ActorUserType = _ASIM_GetUserType(ActorUsername, ""),
+        DvcIdType = iff(isnotempty(DvcId), "Other", ""),
+        HashType = case(
+            isnotempty(Hash) and isnotempty(TargetFileSHA256),
+            "TargetFileSHA256",
+            isnotempty(Hash) and isnotempty(TargetFileSHA1),
+            "TargetFileSHA1",
+            ""
+        ) 
+    | project-away 
+        *_d,
+        *_s,
+        *_g,
+        *_t,
+        *_b,
+        _ResourceId,
+        Computer,
+        MG,
+        ManagementGroupName,
+        RawData,
+        SourceSystem,
+        TenantId,
+        ThreatConfidence_*
+};
+parser (
+  starttime=starttime, 
+  endtime=endtime, 
+  eventtype_in=eventtype_in,
+  srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+  actorusername_has_any=actorusername_has_any,
+  targetfilepath_has_any=targetfilepath_has_any,
+  srcfilepath_has_any=srcfilepath_has_any,
+  hashes_has_any=hashes_has_any,
+  dvchostname_has_any=dvchostname_has_any,
+  disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimFileEventVMwareCarbonBlackCloud
+// Description: This ASIM parser supports normalizing VMware Carbon Black Cloud logs to the ASIM File Event normalized schema. VMware Carbon Black Cloud events are captured through VMware Carbon Black Cloud data connector which ingests Carbon Black Audit, Notification and Event data into Microsoft Sentinel through the REST API.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimFileEventVMwareCarbonBlackCloud(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['targetfilepath_has_any']:dynamic=dynamic([]),
+    ['srcfilepath_has_any']:dynamic=dynamic([]),
+    ['hashes_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=False)
+{
+let EventFieldsLookup = datatable(
+    sensor_action_s: string,
+    DvcAction: string,
+    EventResult: string
+)[
+    "ACTION_ALLOW", "Allow", "Success",
+    "ACTION_BLOCK", "Block", "Failure",
+    "ACTION_TERMINATE", "Terminate", "Failure",
+    "ACTION_BREAK", "Break", "Failure",
+    "ACTION_SUSPEND", "Suspend", "Failure",
+    "", "", "Success"
+];
+let EventTypeLookup = datatable(action_s: string, EventType: string)[
+    "ACTION_FILE_CREATE", "FileCreated",
+    "ACTION_FILE_DELETE", "FileDeleted",
+    "ACTION_FILE_LAST_WRITE", "FileModified",
+    "ACTION_FILE_LINK", "FileModified",
+    "ACTION_FILE_READ", "FileAccessed",
+    "ACTION_FILE_RENAME", "FileRenamed",
+    "ACTION_FILE_WRITE", "FileModified",
+    "ACTION_FILE_OPEN_DELETE", "FileDeleted",
+    "ACTION_FILE_OPEN_EXECUTE", "FileAccessed",
+    "ACTION_FILE_OPEN_SET_ATTRIBUTES", "FileAttributesUpdated",
+    "ACTION_FILE_OPEN_SET_SECURITY", "FileAttributesUpdated",
+    "ACTION_FILE_SET_SECURITY", "FileAttributesUpdated",
+    "ACTION_FILE_TRUNCATE", "FileModified",
+    "ACTION_FILE_OPEN_WRITE", "FileModified",
+    "ACTION_FILE_MOD_OPEN", "FileAccessed",
+    "ACTION_FILE_OPEN_READ", "FileAccessed"
+];
+let parser = (
+    starttime: datetime=datetime(null), 
+    endtime: datetime=datetime(null), 
+    eventtype_in: dynamic=dynamic([]), 
+    srcipaddr_has_any_prefix: dynamic=dynamic([]), 
+    actorusername_has_any: dynamic=dynamic([]), 
+    targetfilepath_has_any: dynamic=dynamic([]), 
+    srcfilepath_has_any: dynamic=dynamic([]), 
+    hashes_has_any: dynamic=dynamic([]), 
+    dvchostname_has_any: dynamic=dynamic([]), 
+    disabled: bool=false
+    ) {
+    CarbonBlackEvents_CL
+    | where not(disabled)
+    | where ((isnull(starttime) or TimeGenerated >= starttime) and (isnull(endtime) or TimeGenerated <= endtime)) 
+    | where eventType_s == "endpoint.event.filemod" and isnotempty(filemod_name_s)
+        and action_s !in ("ACTION_INVALID", "ACTION_FILE_UNDELETE")
+    | where array_length(srcfilepath_has_any) == 0
+        and (array_length(srcipaddr_has_any_prefix) == 0 or has_any_ipv4_prefix(device_external_ip_s, srcipaddr_has_any_prefix))
+        and (array_length(actorusername_has_any) == 0 or process_username_s has_any (actorusername_has_any))
+        and (array_length(targetfilepath_has_any) == 0 or filemod_name_s has_any (targetfilepath_has_any))
+        and (array_length(hashes_has_any) == 0 or filemod_hash_s has_any (hashes_has_any))
+        and (array_length(dvchostname_has_any) == 0 or device_name_s has_any (dvchostname_has_any))
+    | parse filemod_hash_s with * '["' TargetFileMD5: string '","' TargetFileSHA256: string '"]'
+    | lookup EventFieldsLookup on sensor_action_s
+    | extend temp_action = iff(action_s has "|", action_s, "")
+    | lookup EventTypeLookup on action_s
+    | extend EventType = case(
+                        isnotempty(EventType), EventType,
+                        temp_action has "delete", "FileDeleted",
+                        temp_action has "link", "FileModified",
+                        temp_action has "rename", "FileRenamed",
+                        temp_action has "execute", "FileAccessed",
+                        temp_action has_any ("attributes", "security"), "FileAttributesUpdated",
+                        temp_action has "truncate", "FileModified",
+                        temp_action has "write", "FileModified",
+                        temp_action has_any ("read", "open"), "FileAccessed",
+                        temp_action has "create", "FileCreated",
+                        ""
+                    )
+    | where (array_length(eventtype_in) == 0 or EventType has_any (eventtype_in))
+    | extend
+        EventStartTime = todatetime(split(createTime_s, '+')[0]),
+        TargetFilePathType = case(
+                        device_os_s == "WINDOWS" and filemod_name_s startswith "\\", "Windows Share",
+                        device_os_s == "WINDOWS", "Windows Local",
+                        device_os_s in ("MAC", "LINUX"), "Unix",
+                        ""
+                    ),
+        ActingProcessId = tostring(toint(process_pid_d)),
+        TargetFileName = tostring(split(filemod_name_s, '\\')[-1]),
+        AdditionalFields = bag_pack(
+                      "org_key", org_key_s,
+                      "process_publisher", process_publisher_s,
+                      "process_reputation", process_reputation_s,
+                      "process_guid", process_guid_s
+                  )
+    | invoke _ASIM_ResolveDvcFQDN('device_name_s')
+    | project-rename
+        ActorUsername = process_username_s,
+        DvcIpAddr = device_external_ip_s,
+        EventUid = _ItemId,
+        DvcScope = device_group_s,
+        ActingProcessCommandLine = process_cmdline_s,
+        ActingProcessName = process_path_s,
+        DvcId = device_id_s,
+        DvcOriginalAction = sensor_action_s,
+        DvcOs = device_os_s,
+        EventMessage = event_description_s,
+        EventOriginalType = action_s,
+        EventOriginalUid = event_id_g,
+        EventOwner = event_origin_s,
+        TargetFilePath = filemod_name_s
+    | extend 
+        EventProduct = "Carbon Black Cloud",
+        EventSchema = "FileEvent",
+        EventSchemaVersion = "0.2.1",
+        EventVendor = "VMware",
+        EventCount = int(1),
+        SrcIpAddr = DvcIpAddr
+    | extend
+        EventEndTime = EventStartTime,
+        IpAddr = SrcIpAddr,
+        Dvc = coalesce(DvcFQDN, DvcId, DvcHostname, DvcIpAddr),
+        Src = SrcIpAddr,
+        FileName = TargetFileName,
+        FilePath = TargetFilePath,
+        Process = ActingProcessName,
+        User = ActorUsername,
+        Hash = coalesce(TargetFileSHA256, TargetFileMD5)
+    | extend
+        ActorUsernameType = _ASIM_GetUsernameType(ActorUsername),
+        ActorUserType = _ASIM_GetUserType(ActorUsername, ""),
+        DvcIdType = iff(isnotempty(DvcId), "Other", ""),
+        HashType = case(
+              isnotempty(TargetFileSHA256),
+              "TargetFileSHA256",
+              isnotempty(TargetFileMD5),
+              "TargetFileMD5",
+              ""
+          )
+    | project-away
+        *_s,
+        *_d,
+        *_g,
+        *_b,
+        _ResourceId,
+        Computer,
+        MG,
+        ManagementGroupName,
+        RawData,
+        SourceSystem,
+        TenantId,
+        temp_action
+};
+parser(
+    starttime=starttime, 
+    endtime=endtime, 
+    eventtype_in=eventtype_in, 
+    srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, 
+    actorusername_has_any=actorusername_has_any, 
+    targetfilepath_has_any=targetfilepath_has_any, 
+    srcfilepath_has_any=srcfilepath_has_any, 
+    hashes_has_any=hashes_has_any, 
+    dvchostname_has_any=dvchostname_has_any, 
+    disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: ASimNetworkSession
+// Description: This ASIM parser supports normalizing Network Session logs from all supported sources to the ASIM Network Session normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimNetworkSession(    ['pack']:bool=false)
+{
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludeASimNetworkSession') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser);
+let ASimBuiltInDisabled=toscalar('ExcludeASimNetworkSession' in (DisabledParsers) or 'Any' in (DisabledParsers)); 
+let NetworkSessionsGeneric=(pack:bool=false){
+union isfuzzy=true
+  vimNetworkSessionEmpty
+  , ASimNetworkSessionLinuxSysmon                   (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionLinuxSysmon'      in (DisabledParsers) ))
+  , ASimNetworkSessionMicrosoft365Defender          (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionMicrosoft365Defender'      in (DisabledParsers) ))
+  , ASimNetworkSessionMD4IoTSensor                  (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionMD4IoTSSensor'      in (DisabledParsers) ))
+  , ASimNetworkSessionMD4IoTAgent                   (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionMD4IoTAgent'      in (DisabledParsers) ))
+  , ASimNetworkSessionMicrosoftWindowsEventFirewall (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionMicrosoftWindowsEventFirewall'      in (DisabledParsers) ))
+  , ASimNetworkSessionMicrosoftSecurityEventFirewall (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionMicrosoftSecurityEventFirewall'      in (DisabledParsers) ))
+  , ASimNetworkSessionPaloAltoCEF                   (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionPaloAltoCEF'      in (DisabledParsers) ))
+  , ASimNetworkSessionVMConnection                  (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionVMConnection'      in (DisabledParsers) ))
+  , ASimNetworkSessionAWSVPC                        (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionAWSVPC'      in (DisabledParsers) ))
+  , ASimNetworkSessionAzureFirewall                 (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionAzureFirewall'      in (DisabledParsers) ))
+  , ASimNetworkSessionAzureNSG                      (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionAzureNSG'      in (DisabledParsers) ))
+  , ASimNetworkSessionVectraAI                      (pack=pack, disabled=(ASimBuiltInDisabled or ('ExcludeASimNetworkSessionVectraAI' in (DisabledParsers) )))
+  , ASimNetworkSessionCiscoMeraki                   (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionCiscoMeraki'      in (DisabledParsers) ))
+  , ASimNetworkSessionCiscoMerakiSyslog                   (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionCiscoMerakiSyslog'      in (DisabledParsers) ))
+  , ASimNetworkSessionAppGateSDP                    (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionAppGateSDP'      in (DisabledParsers) ))
+  , ASimNetworkSessionFortinetFortiGate             (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionFortinetFortiGate'      in (DisabledParsers) ))
+  , ASimNetworkSessionCorelightZeek                 (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionCorelightZeek'      in (DisabledParsers) ))
+  , ASimNetworkSessionCheckPointFirewall            (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionCheckPointFirewall'      in (DisabledParsers) ))
+  , ASimNetworkSessionCiscoASA                      (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionCiscoASA'      in (DisabledParsers) ))
+  , ASimNetworkSessionWatchGuardFirewareOS          (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionWatchGuardFirewareOS'      in (DisabledParsers) ))
+  , ASimNetworkSessionMicrosoftSysmon               (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionMicrosoftSysmon'      in (DisabledParsers) ))
+  , ASimNetworkSessionMicrosoftSysmonWindowsEvent               (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionMicrosoftSysmonWindowsEvent'      in (DisabledParsers) ))
+  , ASimNetworkSessionForcePointFirewall            (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionForcePointFirewall'      in (DisabledParsers) ))
+  , ASimNetworkSessionNative                        (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionNative'      in (DisabledParsers) ))
+  , ASimNetworkSessionSentinelOne                   (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionSentinelOne'      in (DisabledParsers) ))
+  , ASimNetworkSessionCiscoMeraki                   (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionCiscoMeraki'      in (DisabledParsers) ))
+  , ASimNetworkSessionCiscoISE                      (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionCiscoISE'      in (DisabledParsers) ))
+  , ASimNetworkSessionBarracudaWAF                  (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionBarracudaWAF'      in (DisabledParsers) ))
+  , ASimNetworkSessionBarracudaCEF                  (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionBarracudaCEF'      in (DisabledParsers) ))
+  , ASimNetworkSessionCiscoFirepower                (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionCiscoFirepower'      in (DisabledParsers) ))
+  , ASimNetworkSessionCrowdStrikeFalconHost         (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionCrowdStrikeFalconHost'      in (DisabledParsers) ))
+  , ASimNetworkSessionVMwareCarbonBlackCloud        (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionVMwareCarbonBlackCloud'      in (DisabledParsers) ))
+  , ASimNetworkSessionPaloAltoCortexDataLake        (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionPaloAltoCortexDataLake'      in (DisabledParsers) ))
+  , ASimNetworkSessionSonicWallFirewall             (ASimBuiltInDisabled or ('ExcludeASimNetworkSessionSonicWallFirewall'      in (DisabledParsers) ))
+};
+NetworkSessionsGeneric (pack=pack)
+}
+
+
+
+//
+// Function Name: ASimNetworkSessionAppGateSDP
+// Description: This ASIM parser supports normalizing AppGate SDP logs to the ASIM Network Session normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimNetworkSessionAppGateSDP(    ['disabled']:bool=false)
+{
+let parser = (disabled:bool=false) 
+{
+  let DirectionLookup = datatable (direction:string, NetworkDirection:string) 
+  [
+    'up', 'Inbound',
+    'down', 'Outbound'
+  ];
+  let ActionLookup = datatable (DvcOriginalAction:string, DvcAction:string, EventSeverity:string, EventResult:string)
+  [
+    'allow', 'Allow', 'Informational', 'Success',
+    'drop', 'Drop', 'Low', 'Failure',
+    'reject', 'Deny', 'Low', 'Failure',
+    'block', 'Deny', 'Low', 'Failure',
+    'block_report', 'Deny', 'Low', 'Failure',
+    'allow_report', 'Allow', 'Informational', 'Success'
+  ];
+  let tcpupd_success = Syslog
+  | where 
+    ProcessName in ("cz-sessiond", "cz-vpnd")
+    and SyslogMessage has_all ("[AUDIT]","ip_access",'"rule_name"')
+    and SyslogMessage has_any ('"protocol":"UDP"','"protocol":"TCP"') 
+  | project TimeGenerated, SyslogMessage, Computer
+  | extend type = extract (@'"event_type"\:\"(.*?)\"', 1,  SyslogMessage)
+  | where type == "ip_access"
+  | parse-where SyslogMessage with 
+      *
+      '"action":"' DvcOriginalAction:string '",' * 
+      '"client_ip":"' SrcIpAddr:string '",' *
+      '"client_port":' SrcPortNumber:int ',' *
+      '"destination_ip":"' DstIpAddr:string '",' *
+      '"destination_port":' DstPortNumber:int ',' *
+      '"direction":"' direction:string '",' * 
+      '"distinguished_name_device_id":"' SrcDvcId:string '",' *
+      '"distinguished_name_user":"' SrcUsername:string '",' *
+      '"entitlement_token_id":"' NetworkSessionId:string '",' *
+      '"packet_size":' SrcBytes:long ',' *
+      '"protocol":"' NetworkProtocol:string '",' *          
+      '"rule_name":"' NetworkRuleName:string '",' *  
+      '"source_ip":"' SrcNatIpAddr:string '",' *
+      '"source_port":' SrcNatPortNumber:int ',' * 
+      '"version":' EventProductVersion:string '}' *
+  ;
+  let tcpupd_fail = 
+    Syslog
+    | where 
+      ProcessName in ("cz-sessiond", "cz-vpnd")
+      and SyslogMessage has_all ("[AUDIT]","ip_access",'"drop-reason"')
+      and SyslogMessage has_any ('"protocol":"UDP"','"protocol":"TCP"') 
+    | project TimeGenerated, SyslogMessage, Computer
+    | extend type = extract (@'"event_type"\:\"(.*?)\"', 1,  SyslogMessage)
+    | where type == "ip_access"
+    | parse-where SyslogMessage with 
+        *
+        '"action":"' DvcOriginalAction:string '",' * 
+        '"client_ip":"' SrcIpAddr:string '",' *
+        '"client_port":' SrcPortNumber:int ',' *
+        '"destination_ip":"' DstIpAddr:string '",' *
+        '"destination_port":' DstPortNumber:int ',' *
+        '"direction":"' direction:string '",' * 
+        '"distinguished_name_device_id":"' SrcDvcId:string '",' *
+        '"distinguished_name_user":"' SrcUsername:string '",' *
+        '"drop-reason":"' EventOriginalResultDetails:string '",' *
+        '"entitlement_token_id":"' NetworkSessionId:string '",' *
+        '"packet_size":' SrcBytes:long ',' *
+        '"protocol":"' NetworkProtocol:string '",' *
+        '"source_ip":"' SrcNatIpAddr:string '",' *
+        '"source_port":' SrcNatPortNumber:int ',' * 
+        '"version":' EventProductVersion:string '}' *
+     ;
+  let icmp_success = Syslog
+  | where 
+    ProcessName in ("cz-sessiond", "cz-vpnd")
+    and SyslogMessage has_all ("[AUDIT]","ip_access",'"protocol":"ICMP"') 
+  | project TimeGenerated, SyslogMessage, Computer
+  | extend type = extract (@'"event_type"\:\"(.*?)\"', 1,  SyslogMessage)
+  | where type == "ip_access"
+  | parse-where SyslogMessage with 
+      *
+      '"action":"' DvcOriginalAction:string '",' * 
+      '"client_ip":"' SrcIpAddr:string '",' *
+      '"client_port":' SrcPortNumber:int ',' *
+      '"destination_ip":"' DstIpAddr:string '",' *
+      '"direction":"' direction:string '",' * 
+      '"distinguished_name_device_id":"' SrcDvcId:string '",' *
+      '"distinguished_name_user":"' SrcUsername:string '",' *
+      '"entitlement_token_id":"' NetworkSessionId:string '",' *
+      '"icmp_code":' NetworkIcmpSubCode:int ',' *
+      '"icmp_type":' NetworkIcmpCode:int ',' *  
+      '"packet_size":' SrcBytes:long ',' *
+      '"protocol":"' NetworkProtocol:string '",' *          
+      '"rule_name":"' NetworkRuleName:string '",' *  
+      '"source_ip":"' SrcNatIpAddr:string '",' *
+      '"version":' EventProductVersion:string '}' *
+  ;
+  union  tcpupd_success, tcpupd_fail, icmp_success 
+  | parse SyslogMessage with 
+      *
+      '"country_name":"' SrcGeoCountry:string '",' *
+      '"lat":' SrcGeoLatitude:real ',' *        
+      '"lon":' SrcGeoLongitude:real '}' *
+  | parse SyslogMessage with 
+       *
+      '"city_name":"' SrcGeoCity:string '",' *
+      '"region_name":"' SrcGeoRegion:string '",' *
+  | extend 
+      SrcDvcIdType = 'AppGateId',
+      SrcUsernameType = 'UPN'
+  // -- Event fields
+  | project-rename 
+      DvcHostname = Computer
+  | extend 
+      EventCount = int(1),
+      EventEndTime = TimeGenerated,
+      EventStartTime = TimeGenerated,
+      EventSchema = 'NetworkSession',
+      EventSchemaVersion = '0.2.3',
+      EventVendor = 'AppGate',
+      EventProduct = 'SDP',
+      EventType = 'NetworkSession'
+  | lookup DirectionLookup on direction
+  | lookup ActionLookup on DvcOriginalAction
+  // -- Aliases
+  | extend 
+      Src = SrcIpAddr,
+      Dst = DstIpAddr,
+      Dvc = DvcHostname,
+      SessionId = NetworkSessionId,
+      IpAddr = SrcIpAddr,
+      Rule = NetworkRuleName,
+  // -- Entity identifier explicit aliases
+      SrcUserUpn = SrcUsername
+  | project-away 
+      SyslogMessage, type, direction
+};
+parser (disabled)
+}
+
+
+
+//
+// Function Name: ASimNetworkSessionAWSVPC
+// Description: This ASIM parser supports normalizing AWS VPC logs produced by the Microsoft Sentinel AWS S3 connector to the ASIM Network Session normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimNetworkSessionAWSVPC(    ['disabled']:bool=false)
+{
+let ProtocolLookup = datatable(Protocol:int, NetworkProtocol:string) [
+  0,"HOPOPT",
+  1,"ICMP",
+  2,"IGMP",
+  3,"GGP",
+  4,"IPv4",
+  5,"ST",
+  6,"TCP",
+  7,"CBT",
+  8,"EGP",
+  9,"IGP",
+  10,"BBN-RCC-MON",
+  11,"NVP-II",
+  12,"PUP",
+  13,"ARGUS (deprecated)",
+  14,"EMCON",
+  15,"XNET",
+  16,"CHAOS",
+  17,"UDP",
+  18,"MUX",
+  19,"DCN-MEAS",
+  20,"HMP",
+  21,"PRM",
+  22,"XNS-IDP",
+  23,"TRUNK-1",
+  24,"TRUNK-2",
+  25,"LEAF-1",
+  26,"LEAF-2",
+  27,"RDP",
+  28,"IRTP",
+  29,"ISO-TP4",
+  30,"NETBLT",
+  31,"MFE-NSP",
+  32,"MERIT-INP",
+  33,"DCCP",
+  34,"3PC",
+  35,"IDPR",
+  36,"XTP",
+  37,"DDP",
+  38,"IDPR-CMTP",
+  39,"TP++",
+  40,"IL",
+  41,"IPv6",
+  42,"SDRP",
+  43,"IPv6-Route",
+  44,"IPv6-Frag",
+  45,"IDRP",
+  46,"RSVP",
+  47,"GRE",
+  48,"DSR",
+  49,"BNA",
+  50,"ESP",
+  51,"AH",
+  52,"I-NLSP",
+  53,"SWIPE (deprecated)",
+  54,"NARP",
+  55,"MOBILE",
+  56,"TLSP",
+  57,"SKIP",
+  58,"IPv6-ICMP",
+  59,"IPv6-NoNxt",
+  60,"IPv6-Opts",
+  61,"",
+  62,"CFTP",
+  63,"",
+  64,"SAT-EXPAK",
+  65,"KRYPTOLAN",
+  66,"RVD",
+  67,"IPPC",
+  68,"",
+  69,"SAT-MON",
+  70,"VISA",
+  71,"IPCV",
+  72,"CPNX",
+  73,"CPHB",
+  74,"WSN",
+  75,"PVP",
+  76,"BR-SAT-MON",
+  77,"SUN-ND",
+  78,"WB-MON",
+  79,"WB-EXPAK",
+  80,"ISO-IP",
+  81,"VMTP",
+  82,"SECURE-VMTP",
+  83,"VINES",
+  84,"TTP",
+  84,"IPTM",
+  85,"NSFNET-IGP",
+  86,"DGP",
+  87,"TCF",
+  88,"EIGRP",
+  89,"OSPFIGP",
+  90,"Sprite-RPC",
+  91,"LARP",
+  92,"MTP",
+  93,"AX.25",
+  94,"IPIP",
+  95,"MICP (deprecated)",
+  96,"SCC-SP",
+  97,"ETHERIP",
+  98,"ENCAP",
+  99,"",
+  100,"GMTP",
+  101,"IFMP",
+  102,"PNNI",
+  103,"PIM",
+  104,"ARIS",
+  105,"SCPS",
+  106,"QNX",
+  107,"A/N",
+  108,"IPComp",
+  109,"SNP",
+  110,"Compaq-Peer",
+  111,"IPX-in-IP",
+  112,"VRRP",
+  113,"PGM",
+  114,"",
+  115,"L2TP",
+  116,"DDX",
+  117,"IATP",
+  118,"STP",
+  119,"SRP",
+  120,"UTI",
+  121,"SMP",
+  122,"SM (deprecated)",
+  123,"PTP",
+  124,"ISIS over IPv4",
+  125,"FIRE",
+  126,"CRTP",
+  127,"CRUDP",
+  128,"SSCOPMCE",
+  129,"IPLT",
+  130,"SPS",
+  131,"PIPE",
+  132,"SCTP",
+  133,"FC",
+  134,"RSVP-E2E-IGNORE",
+  135,"Mobility Header",
+  136,"UDPLite",
+  137,"MPLS-in-IP",
+  138,"manet",
+  139,"HIP",
+  140,"Shim6",
+  141,"WESP",
+  142,"ROHC",
+  143,"Ethernet",
+  253,"",
+  254,"",
+  255,"Reserved"
+];
+let DirectionLookup = datatable (FlowDirection:string, NetworkDirection:string)  [
+  'ingress', 'Inbound',
+  'egress', 'Outbound'
+];
+let ActionLookup = datatable (Action:string, DvcAction:string)  [
+  'ACCEPT', 'Allow',
+  'REJECT', 'Deny'
+];
+let parser = (disabled:bool=false){
+AWSVPCFlow | where not(disabled)
+| where LogStatus == "OK"
+| extend
+    EventVendor="AWS", 
+    EventProduct="VPC",
+    NetworkBytes = tolong(Bytes),
+    NetworkPackets = tolong(Packets),
+    EventProductVersion = tostring(Version),
+    EventType="NetworkSession",
+    EventCount=toint(1),
+    EventResult = iff (Action=="ACCEPT","Success","Failure"),
+    EventSeverity = iff (Action=="ACCEPT","Informational","Low"),
+    EventSchemaVersion="0.2.2",
+    EventSchema="NetworkSession",
+    SrcAppType = iff (PktSrcAwsService != "", "CloudService", ""),
+    DstAppType = iff (PktDstAwsService != "", "CloudService", ""),
+    DvcIdType = "AwsVpcId"
+| lookup ProtocolLookup on Protocol
+| lookup ActionLookup on Action
+| lookup DirectionLookup on FlowDirection
+| project-rename
+    DstIpAddr = DstAddr,  
+    DstPortNumber = DstPort, 
+    SrcNatIpAddr=PktSrcAddr, 
+    DstNatIpAddr=PktDstAddr, 
+    SrcPortNumber = SrcPort, 
+    SrcIpAddr = SrcAddr, 
+    EventEndTime = End, 
+    DvcInboundInterface = InterfaceId,
+    DvcSubscriptionId = AccountId,
+    DvcId = VpcId,
+    NetworkProtocolVersion = TrafficType,
+    EventOriginalResultDetails = LogStatus,
+    SrcAppName = PktSrcAwsService,
+    DstAppName = PktDstAwsService
+// -- Aliases
+| extend
+    IpAddr = SrcIpAddr,
+    Src = SrcIpAddr,
+    Dst = DstIpAddr,
+    Dvc = DvcId,
+    EventStartTime = TimeGenerated,
+    DvcInterface = DvcInboundInterface
+| project-away Action, AzId, Bytes, FlowDirection, InstanceId, Packets, Protocol, Region, SourceSystem, SublocationId, SublocationType, SubnetId, TcpFlags, TenantId, TrafficPath, Version
+};
+parser (disabled)
+}
+
+
+
+//
+// Function Name: ASimNetworkSessionAzureFirewall
+// Description: This ASIM parser supports normalizing Azure Firewall logs to the ASIM Network Session normalized schema. This parser is partially based on a work by [Koos Goossens](https://github.com/TheCloudScout).
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimNetworkSessionAzureFirewall(    ['disabled']:bool=false)
+{
+let parser = (disabled:bool=false) {
+    let AzureFirewallNetworkRuleLogs = 
+        AzureDiagnostics
+        | where not(disabled)
+        | where Category == "AzureFirewallNetworkRule"
+        | where isnotempty(msg_s)
+        | project msg_s, OperationName, SubscriptionId, ResourceId, TimeGenerated, Type, _ResourceId;
+    let AzureFirewallSessionLogs = 
+        AzureFirewallNetworkRuleLogs
+        | where OperationName in ("AzureFirewallNetworkRuleLog","AzureFirewallThreatIntelLog")
+        | parse-where
+            msg_s with           NetworkProtocol:string 
+            " request from "     SrcIpAddr:string
+            ":"                  SrcPortNumber:int
+            " to "               DstIpAddr:string
+            ":"                  DstPortNumber:int
+            ". Action: "         DvcAction:string
+            "."                  *
+        | project-away msg_s
+        | extend NetworkIcmpCode = iff(NetworkProtocol startswith "ICMP", toint(extract ("type=(\\d+)",1,NetworkProtocol)), int(null))
+        | extend NetworkIcmpType = iff(isnotnull(NetworkIcmpCode), _ASIM_LookupICMPType(NetworkIcmpCode), "")
+        | extend NetworkProtocol = iff(NetworkProtocol startswith "ICMP", "ICMP", NetworkProtocol)
+        | extend EventSeverity = case (
+            OperationName  == "AzureFirewallThreatIntelLog", "Medium",
+            DvcAction == "Deny", "Low",
+            "Informational")
+        | extend EventResult = iff(DvcAction == "Allow", "Success", "Failure")
+        ;
+    let AzureFirewallNATLogs = 
+        AzureFirewallNetworkRuleLogs
+        | where OperationName == "AzureFirewallNatRuleLog"
+        | parse-where
+            msg_s with           NetworkProtocol:string 
+            " request from "     SrcIpAddr:string
+            ":"                  SrcPortNumber:int
+            " to "               DstIpAddr:string
+            ":"                  DstPortNumber:int
+            " was DNAT'ed to "   DstNatIpAddr:string
+            ":"                  DstNatPortNumber:int
+        | project-away msg_s
+        | extend EventSeverity = "Informational"
+        | extend EventResult = "Success"
+        | extend DvcAction = "Allow"
+        ;
+    union AzureFirewallSessionLogs, AzureFirewallNATLogs
+    | extend
+        EventVendor="Microsoft",
+        EventProduct="Azure Firewall",
+        EventType="NetworkSession",
+        EventCount=toint(1),
+        EventSchemaVersion="0.2.2",
+        EventSchema="NetworkSession",
+        DvcIdType = "AzureResourceId"
+    | project-rename
+        DvcSubscriptionId = SubscriptionId,
+        DvcId = ResourceId
+    // -- Aliases
+    | extend
+        IpAddr = SrcIpAddr,
+        Src = SrcIpAddr,
+        Dst = DstIpAddr,
+        Dvc = DvcId,
+        EventStartTime = TimeGenerated,
+        EventEndTime = TimeGenerated
+    | project-keep
+        Src*,
+        Dst*,
+        Event*,
+        Dvc*,
+        Network*,
+        IpAddr,
+        Type,
+        _ResourceId,
+        TimeGenerated
+};
+parser (disabled)
+}
+
+
+
+//
+// Function Name: ASimNetworkSessionAzureNSG
+// Description: This ASIM parser supports normalizing Azure Network Security Groups (NSG) flows to the ASIM Network Session normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimNetworkSessionAzureNSG(    ['disabled']:bool=false)
+{
+let DvcActionLookup = datatable(FlowStatus_s:string, DvcAction:string, EventResult:string) [
+    'A', 'Allow', 'Success',
+    'D', 'Deny', 'Failure',
+];
+let NetworkDirectionLookup = datatable(FlowDirection_s:string, NetworkDirection:string, isOutBound:bool) [
+    'I', 'Inbound', false,
+    'O', 'Outbound', true
+];
+let NetworkProtocolLookup = datatable(L4Protocol_s:string, NetworkProtocol:string)[
+    'T', 'TCP',
+    'U', 'UDP'
+];
+let parser = (disabled:bool=false) 
+{
+  let AzureNetworkAnalytics = (FlowDirection: string) {
+    AzureNetworkAnalytics_CL
+    | where not(disabled) and isnotempty(FlowType_s)
+    | where FlowDirection == FlowDirection_s
+    | lookup NetworkDirectionLookup on FlowDirection_s
+  };
+  let AzureNetworkAnalyticsInbound =
+    AzureNetworkAnalytics ('I')
+    | where not(isOutBound)
+    | project-rename
+        DstMacAddr = MACAddress_s
+    | extend
+        DstBytes = tolong(OutboundBytes_d), // -- size fields seem not to be populated for inbound
+        DstPackets = tolong(OutboundPackets_d),
+        SrcBytes = tolong(InboundBytes_d),
+        SrcPackets = tolong(InboundPackets_d),
+        SrcInterfaceName = tostring(split(NIC_s, '/')[1]),
+        SrcGeoCountry = toupper(Country_s)
+    | extend hostelements=split(VM2_s,'/')
+    | extend 
+        DstFQDN = strcat(hostelements[0], @"\", hostelements[1]),
+        DstHostname = tostring(hostelements[1]),
+        DstDomain = tostring(hostelements[0]),
+        DstDomainType = "ResourceGroup"
+    | extend Hostname = DstHostname
+    | project-away hostelements, isOutBound
+  ;  
+  let AzureNetworkAnalyticsOutbound =
+    AzureNetworkAnalytics ('O')
+    | where isOutBound
+    | project-rename
+        SrcMacAddr = MACAddress_s
+    | extend
+        SrcBytes = tolong(OutboundBytes_d), 
+        SrcPackets = tolong(OutboundPackets_d),
+        DstBytes = tolong(InboundBytes_d),
+        DstPackets = tolong(InboundPackets_d),
+        DstInterfaceName = tostring(split(NIC_s, '/')[1]),
+        DstGeoCountry = toupper(Country_s)
+    | extend hostelements=split(VM1_s,'/')
+    | extend 
+        SrcFQDN = strcat(hostelements[0], @"\", hostelements[1]),
+        SrcHostname = tostring(hostelements[1]),
+        SrcDomain = tostring(hostelements[0]),
+        SrcDomainType = "ResourceGroup"
+    | extend Hostname = SrcHostname
+    | project-away hostelements, isOutBound
+  ;
+  union AzureNetworkAnalyticsInbound, AzureNetworkAnalyticsOutbound
+  | project-rename
+      Dvc = NSGList_s,
+      DvcSubscriptionId = Subscription_g,
+      EventEndTime = FlowEndTime_t,
+      EventStartTime = FlowStartTime_t,
+      NetworkApplicationProtocol = L7Protocol_s,
+      NetworkRuleName = NSGRule_s,
+      NetworkSessionId = ConnectionName_s,
+      EventOriginalSubType = FlowType_s
+  | extend
+      DstPortNumber = toint(DestPort_d),
+      EventProduct = 'NSGFlow',
+      EventSchema = 'NetworkSession',
+      EventSchemaVersion='0.2.2',
+      EventSeverity = 'Informational', //??
+      EventType = 'Flow',
+      EventVendor = 'Microsoft',
+      EventCount = toint(AllowedInFlows_d+DeniedInFlows_d+AllowedOutFlows_d+DeniedOutFlows_d),
+      NetworkDuration = toint((((EventEndTime - datetime(1970-01-01)) / 1s) - ((EventStartTime - datetime(1970-01-01)) / 1s )) * 1000),
+      Rule = NetworkRuleName,
+      SessionId = NetworkSessionId
+  | lookup DvcActionLookup on FlowStatus_s
+  | extend 
+      DstIpAddr = iff(isnotempty(DestIP_s),
+                      DestIP_s,
+                      split(DestPublicIPs_s, '|')[0]),
+      Duration = NetworkDuration,
+      NetworkBytes = tolong(DstBytes + SrcBytes),
+      NetworkPackets = tolong(DstPackets + SrcPackets),
+      SrcIpAddr = iff(isnotempty(SrcIP_s),
+                      SrcIP_s,
+                      split(SrcPublicIPs_s, '|')[0])
+  | extend
+      Dst = DstIpAddr,
+      IpAddr = SrcIpAddr,
+      Src = SrcIpAddr
+  | lookup NetworkProtocolLookup on L4Protocol_s
+  | project-keep
+      Src*,
+      Dst*,
+      Event*,
+      Dvc*,
+      Network*,
+      IpAddr,
+      Hostname,
+      Type,
+      Duration,
+      SessionId,
+      _ResourceId,
+      TimeGenerated
+  | project-away *_s
+  };
+parser (disabled)
+}
+
+
+
+//
+// Function Name: ASimNetworkSessionBarracudaCEF
+// Description: This ASIM parser supports normalizing Barracuda WAF logs ingested in 'CommonSecurityLog' table to the ASIM Web Session normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimNetworkSessionBarracudaCEF(    ['disabled']:bool=false)
+{
+let barracudaSchema = datatable(
+    UnitName_s: string,
+    DeviceReceiptTime_s: string,
+    ActionID_s: string,
+    DestinationIP_s: string,
+    SourceIP: string,
+    host_s: string,
+    HostIP_s: string,
+    Severity_s: string,
+    LogType_s: string,
+    DestinationPort_d: real,
+    SourcePort_d: real,
+    Protocol_s: string,
+    DeviceVersion_s: string,
+    TimeTaken_d: real,
+    _ResourceId: string,
+    RawData: string,
+    Message: string,
+    Computer: string,
+    MG: string,
+    ManagementGroupName: string,
+    TenantId: string,
+    SourceSystem: string
+)[];
+let ProtocolLookup = datatable(
+    Protocol_s: string,
+    NetworkProtocol: string,
+    NetworkProtocolVersion: string
+)[
+    "TCP", "TCP", "",
+    "TCP/ip", "TCP", "",
+    "UDP", "UDP", "",
+    "UDP/ip", "UDP", "",
+    "ICMP", "ICMP", "IPV4",
+    "ICMPv6", "ICMP", "IPV6",
+];
+let SeverityLookup = datatable (severity: int, EventSeverity: string)
+    [
+    0, "High",
+    1, "High",
+    2, "High",
+    3, "Medium",
+    4, "Low",
+    5, "Low",
+    6, "Informational",
+    7, "Informational"
+];
+let EventResultLookup = datatable (
+    ActionID_s: string,
+    EventResult: string,
+    DvcAction: string
+)
+    [
+    "ALLOW", "Success", "Allow",
+    "DENY", "Failure", "Deny"
+];
+let parser = (disabled: bool=false)
+{
+let BarracudaCEF = 
+    CommonSecurityLog
+    | where not(disabled) and DeviceVendor startswith "Barracuda" and (DeviceProduct == "WAF" or DeviceProduct == "WAAS")
+    | where DeviceEventCategory == "NF"
+    | extend
+        severity = toint(LogSeverity)
+    | lookup EventResultLookup on $left.DeviceAction == $right.ActionID_s
+    | lookup SeverityLookup on severity
+    | lookup ProtocolLookup on $left.Protocol == $right.Protocol_s
+    | extend
+        EventCount = toint(1),
+        EventProduct = "WAF",
+        EventSchema = "NetworkSession",
+        EventSchemaVersion = "0.2.6",
+        EventType = "NetworkSession",
+        EventVendor = "Barracuda"
+    | extend
+        Dvc =  DeviceName,
+        EventStartTime = iff(isnotempty(FlexNumber2), unixtime_milliseconds_todatetime(tolong(ReceiptTime)-tolong(FlexNumber2)), unixtime_milliseconds_todatetime(tolong(ReceiptTime))),
+        DstIpAddr = DestinationIP,
+        SrcIpAddr = SourceIP,
+        DvcHostname = DeviceName,
+        DvcIpAddr = DestinationIP,
+        DstPortNumber = toint(DestinationPort),
+        SrcPortNumber = toint(SourcePort),
+        EventUid = _ItemId,
+        EventProductVersion = DeviceVersion
+    | extend
+        IpAddr = SrcIpAddr,
+        Src = SrcIpAddr,
+        Dst = DstIpAddr,
+        EventEndTime = EventStartTime
+    | project-away
+        ThreatConfidence,
+        CommunicationDirection,
+        AdditionalExtensions,
+        Device*,
+        Source*,
+        Destination*,
+        Activity,
+        LogSeverity,
+        ApplicationProtocol,
+        ProcessID,
+        ExtID,
+        Protocol,
+        Reason,
+        ReceiptTime,
+        SimplifiedDeviceAction,
+        OriginalLogSeverity,
+        ProcessName,
+        EndTime,
+        ExternalID,
+        File*,
+        ReceivedBytes,
+        Message,
+        Old*,
+        EventOutcome,
+        Request*,
+        StartTime,
+        Field*,
+        Flex*,
+        Remote*,
+        Malicious*,
+        severity,
+        ThreatSeverity,
+        IndicatorThreatType,
+        ThreatDescription,
+        _ResourceId,
+        SentBytes,
+        ReportReferenceLink,
+        Computer,
+        TenantId,CollectorHostName;
+BarracudaCEF
+};
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimNetworkSessionBarracudaWAF
+// Description: This ASIM parser supports normalizing Barracuda WAF logs ingested in 'barracuda_CL' tablet o the ASIM Web Session normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimNetworkSessionBarracudaWAF(    ['disabled']:bool=false)
+{
+let barracudaSchema = datatable(
+    UnitName_s: string,
+    DeviceReceiptTime_s: string,
+    ActionID_s: string,
+    DestinationIP_s: string,
+    SourceIP: string,
+    host_s: string,
+    HostIP_s: string,
+    Severity_s: string,
+    LogType_s: string,
+    DestinationPort_d: real,
+    SourcePort_d: real,
+    Protocol_s: string,
+    DeviceVersion_s: string,
+    TimeTaken_d: real,
+    _ResourceId: string,
+    RawData: string,
+    Message: string,
+    Computer: string,
+    MG: string,
+    ManagementGroupName: string,
+    TenantId: string,
+    SourceSystem: string
+)[];
+let ProtocolLookup = datatable(
+    Protocol_s: string,
+    NetworkProtocol: string,
+    NetworkProtocolVersion: string
+)[
+    "TCP", "TCP", "",
+    "TCP/ip", "TCP", "",
+    "UDP", "UDP", "",
+    "UDP/ip", "UDP", "",
+    "ICMP", "ICMP", "IPV4",
+    "ICMPv6", "ICMP", "IPV6",
+];
+let SeverityLookup = datatable (severity: int, EventSeverity: string)
+    [
+    0, "High",
+    1, "High",
+    2, "High",
+    3, "Medium",
+    4, "Low",
+    5, "Low",
+    6, "Informational",
+    7, "Informational"
+];
+let EventResultLookup = datatable (
+    ActionID_s: string,
+    EventResult: string,
+    DvcAction: string
+)
+    [
+    "ALLOW", "Success", "Allow",
+    "DENY", "Failure", "Deny"
+];
+let parser = (disabled: bool=false)
+{
+let BarracudaCustom = 
+    union isfuzzy=true
+        barracudaSchema,
+        barracuda_CL
+    | where not(disabled) and LogType_s == "NF"
+    | extend
+        severity = toint(Severity_s)
+    | lookup EventResultLookup on ActionID_s
+    | lookup SeverityLookup on severity
+    | lookup ProtocolLookup on Protocol_s
+    | extend
+        EventCount = toint(1),
+        EventProduct = "WAF",
+        EventSchema = "NetworkSession",
+        EventSchemaVersion = "0.2.6",
+        EventType = "NetworkSession",
+        EventVendor = "Barracuda"
+    | extend
+        Dvc =  UnitName_s,
+        EventStartTime = iff(isnotempty(TimeTaken_d), unixtime_milliseconds_todatetime(tolong(DeviceReceiptTime_s)-tolong(TimeTaken_d)), unixtime_milliseconds_todatetime(tolong(DeviceReceiptTime_s))),
+        DstIpAddr = DestinationIP_s,
+        SrcIpAddr = SourceIP,
+        DvcHostname = host_s,
+        DvcIpAddr = HostIP_s,
+        DstPortNumber = toint(DestinationPort_d),
+        SrcPortNumber = toint(SourcePort_d),
+        EventUid = _ItemId,
+        EventProductVersion = DeviceVersion_s
+    | extend
+        IpAddr = SrcIpAddr,
+        Src = SrcIpAddr,
+        Dst = DstIpAddr,
+        EventEndTime = EventStartTime
+    | project-away
+        *_d,
+        *_s,
+        _ResourceId,
+        severity,
+        RawData,
+        SourceIP,
+        Message,
+        Computer,
+        MG,
+        ManagementGroupName,
+        TenantId,
+        SourceSystem;
+BarracudaCustom
+ };
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimNetworkSessionCheckPointFirewall
+// Description: This ASIM parser supports normalizing Check Point VPN-1 & Firewall-1 logs coming from CEF Data Connector to the ASIM Network Session normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimNetworkSessionCheckPointFirewall(    ['disabled']:bool=false)
+{
+let ProtocolLookup=datatable(Protocol:string,NetworkProtocol:string)
+    [
+        "0","HOPOPT"
+        , "1","ICMP"
+        , "2","IGMP"
+        , "3","GGP"
+        , "4","IPv4"
+        , "5","ST"
+        , "6","TCP"
+        , "7","CBT"
+        , "8","EGP"
+        , "9","IGP"
+        , "10","BBN-RCC-MON"
+        , "11","NVP-II"
+        , "12","PUP"
+        , "13","ARGUS (deprecated)"
+        , "14","EMCON"
+        , "15","XNET"
+        , "16","CHAOS"
+        , "17","UDP"
+        , "18","MUX"
+        , "19","DCN-MEAS"
+        , "20","HMP"
+        , "21","PRM"
+        , "22","XNS-IDP"
+        , "23","TRUNK-1"
+        , "24","TRUNK-2"
+        , "25","LEAF-1"
+        , "26","LEAF-2"
+        , "27","RDP"
+        , "28","IRTP"
+        , "29","ISO-TP4"
+        , "30","NETBLT"
+        , "31","MFE-NSP"
+        , "32","MERIT-INP"
+        , "33","DCCP"
+        , "34","3PC"
+        , "35","IDPR"
+        , "36","XTP"
+        , "37","DDP"
+        , "38","IDPR-CMTP"
+        , "39","TP++"
+        , "40","IL"
+        , "41","IPv6"
+        , "42","SDRP"
+        , "43","IPv6-Route"
+        , "44","IPv6-Frag"
+        , "45","IDRP"
+        , "46","RSVP"
+        , "47","GRE"
+        , "48","DSR"
+        , "49","BNA"
+        , "50","ESP"
+        , "51","AH"
+        , "52","I-NLSP"
+        , "53","SWIPE (deprecated)"
+        , "54","NARP"
+        , "55","MOBILE"
+        , "56","TLSP"
+        , "57","SKIP"
+        , "58","IPv6-ICMP"
+        , "59","IPv6-NoNxt"
+        , "60","IPv6-Opts"
+        , "61",""
+        , "62","CFTP"
+        , "63",""
+        , "64","SAT-EXPAK"
+        , "65","KRYPTOLAN"
+        , "66","RVD"
+        , "67","IPPC"
+        , "68",""
+        , "69","SAT-MON"
+        , "70","VISA"
+        , "71","IPCV"
+        , "72","CPNX"
+        , "73","CPHB"
+        , "74","WSN"
+        , "75","PVP"
+        , "76","BR-SAT-MON"
+        , "77","SUN-ND"
+        , "78","WB-MON"
+        , "79","WB-EXPAK"
+        , "80","ISO-IP"
+        , "81","VMTP"
+        , "82","SECURE-VMTP"
+        , "83","VINES"
+        , "84","TTP"
+        , "84","IPTM"
+        , "85","NSFNET-IGP"
+        , "86","DGP"
+        , "87","TCF"
+        , "88","EIGRP"
+        , "89","OSPFIGP"
+        , "90","Sprite-RPC"
+        , "91","LARP"
+        , "92","MTP"
+        , "93","AX.25"
+        , "94","IPIP"
+        , "95","MICP (deprecated)"
+        , "96","SCC-SP"
+        , "97","ETHERIP"
+        , "98","ENCAP"
+        , "99",""
+        , "100","GMTP"
+        , "101","IFMP"
+        , "102","PNNI"
+        , "103","PIM"
+        , "104","ARIS"
+        , "105","SCPS"
+        , "106","QNX"
+        , "107","A/N"
+        , "108","IPComp"
+        , "109","SNP"
+        , "110","Compaq-Peer"
+        , "111","IPX-in-IP"
+        , "112","VRRP"
+        , "113","PGM"
+        , "114",""
+        , "115","L2TP"
+        , "116","DDX"
+        , "117","IATP"
+        , "118","STP"
+        , "119","SRP"
+        , "120","UTI"
+        , "121","SMP"
+        , "122","SM (deprecated)"
+        , "123","PTP"
+        , "124","ISIS over IPv4"
+        , "125","FIRE"
+        , "126","CRTP"
+        , "127","CRUDP"
+        , "128","SSCOPMCE"
+        , "129","IPLT"
+        , "130","SPS"
+        , "131","PIPE"
+        , "132","SCTP"
+        , "133","FC"
+        , "134","RSVP-E2E-IGNORE"
+        , "135","Mobility Header"
+        , "136","UDPLite"
+        , "137","MPLS-in-IP"
+        , "138","manet"
+        , "139","HIP"
+        , "140","Shim6"
+        , "141","WESP"
+        , "142","ROHC"
+        , "143","Ethernet"
+        , "253",""
+        , "254",""
+        , "255","Reserved"];
+    let DirectionLookup=datatable(conn_direction:string,NetworkDirection:string)
+    [
+        "Incoming","Inbound", 
+        "Outgoing","Outbound", 
+        "Internal","Local"];
+    let ActionLookup=datatable(DeviceAction:string,DvcAction:string,EventResult:string,EventSeverity:string)
+    [
+        "Accept","Allow","Success","Informational",
+        "Allow","Allow","Success","Informational",
+        "Drop","Drop","Failure","Low",
+        "Reject","Deny","Failure","Low",
+        "Encrypt","Encrypt","Success","Informational",
+        "Decrypt","Decrypt","Success","Informational",
+        "Bypass","Allow","Success","Informational",
+        "Block","Deny","Failure","Low",
+        "","","NA","Informational"
+     ];
+      let NWParser=(disabled:bool=false)
+      {
+      CommonSecurityLog
+      | where not(disabled)
+      | where DeviceVendor=="Check Point" and DeviceProduct=="VPN-1 & FireWall-1"
+      | lookup ActionLookup on DeviceAction
+      | lookup ProtocolLookup on Protocol
+      | extend 
+              EventProduct = "Firewall",
+              EventCount = toint(1),
+              EventType = "NetworkSession",
+              EventSchema = "NetworkSession",
+              EventSchemaVersion = "0.2.4"
+      | parse-kv AdditionalExtensions as (
+                  rule_uid:string,
+                  loguid:string,
+                  origin:string,
+                  originsicname:string,
+                  inzone:string,
+                  outzone:string,
+                  conn_direction:string,
+                  alert:string,
+                  inspection_category:string,
+                  inspection_item:string
+              ) with (pair_delimiter=';', kv_delimiter='=')
+      | extend
+              ThreatCategory = coalesce(alert, inspection_category),
+              NetworkRuleName = coalesce(DeviceCustomString2, rule_uid, Activity),
+              EventStartTime = TimeGenerated
+      | parse originsicname with "CN\\=" DvcHostname "," *
+      | project-rename
+              Dvc = origin,                
+              EventOriginalUid = loguid,
+              ThreatName = inspection_item,
+              EventVendor = DeviceVendor,
+              DstPortNumber = DestinationPort,
+              DstIpAddr = DestinationIP,
+              SrcPortNumber = SourcePort,
+              SrcIpAddr = SourceIP,
+              DstNatIpAddr = DestinationTranslatedAddress,
+              DstNatPortNumber = DestinationTranslatedPort,
+              SrcNatIpAddr = SourceTranslatedAddress,
+              SrcNatPortNumber = SourceTranslatedPort,
+              EventProductVersion = DeviceVersion,
+              EventOriginalSeverity = LogSeverity,
+              Rule = NetworkRuleName,
+              DvcOriginalAction = DeviceAction,
+              DstAppName = Activity,
+              EventMessage = Message
+      | lookup DirectionLookup on conn_direction
+      | extend 
+              EventEndTime = EventStartTime,
+              IpAddr = SrcIpAddr,
+              Dst = DstIpAddr,
+              Src = SrcIpAddr,
+              NetworkDirection = case(
+                                  isnotempty(NetworkDirection), NetworkDirection,
+                                  inzone == "Internal" and (outzone == "Internal" or outzone == "Local"), "Local",
+                                  (inzone == "Internal" or inzone == "Local") and outzone == "External", "Outbound",
+                                  inzone == "External" and (outzone == "Internal" or outzone == "Local"), "Inbound",
+                                  CommunicationDirection == "0", "Inbound",
+                                  CommunicationDirection == "1", "Outbound",
+                                  ""
+                                  ),
+              EventSeverity = iif(isnotempty(ThreatCategory),"High",EventSeverity),
+              NetworkIcmpType = coalesce(
+                                      tostring(column_ifexists("FieldDeviceCustomNumber2", long(null))),
+                                      tostring(column_ifexists("DeviceCustomNumber2",long(null)))
+                                      ),
+              NetworkIcmpCode = coalesce(
+                                      toint(column_ifexists("FieldDeviceCustomNumber3", long(null))),
+                                      toint(column_ifexists("DeviceCustomNumber3",long(null)))
+                                      )
+      | project-away ApplicationProtocol, AdditionalExtensions, CommunicationDirection, Computer, Device*, Destination*, EndTime, ExternalID, File*, Flex*, IndicatorThreatType, Malicious*, Old*, OriginalLogSeverity, Process*, Protocol, ReceiptTime, ReceivedBytes, Remote*, ReportReferenceLink, Request*, Sent*, SimplifiedDeviceAction, Source*, StartTime, TenantId, ThreatConfidence, ThreatDescription, ThreatSeverity, rule_uid, originsicname, inzone, outzone, alert, conn_direction, inspection_category, ExtID, EventOutcome, FieldDevice*, Reason
+    };
+    NWParser (disabled=disabled)
+}
+
+
+

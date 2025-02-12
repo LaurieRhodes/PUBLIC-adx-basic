@@ -1,0 +1,2902 @@
+//
+// Function Name: ASimDnsSentinelOne
+// Description: This ASIM parser supports normalizing SentinelOne logs to the ASIM DNS normalized schema. SentinelOne events are captured through SentinelOne data connector which ingests SentinelOne server objects such as Threats, Agents, Applications, Activities, Policies, Groups, and more events into Microsoft Sentinel through the REST API.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimDnsSentinelOne(    ['disabled']:bool=False)
+{
+let ThreatConfidenceLookup_undefined = datatable(
+    alertInfo_analystVerdict_s: string,
+    ThreatConfidence_undefined: int
+)
+[
+    "FALSE_POSITIVE", 5,
+    "Undefined", 15,
+    "SUSPICIOUS", 25,
+    "TRUE_POSITIVE", 33 
+];
+let ThreatConfidenceLookup_suspicious = datatable(
+    alertInfo_analystVerdict_s: string,
+    ThreatConfidence_suspicious: int
+)
+[
+    "FALSE_POSITIVE", 40,
+    "Undefined", 50,
+    "SUSPICIOUS", 60,
+    "TRUE_POSITIVE", 67 
+];
+let ThreatConfidenceLookup_malicious = datatable(
+    alertInfo_analystVerdict_s: string,
+    ThreatConfidence_malicious: int
+)
+[
+    "FALSE_POSITIVE", 75,
+    "Undefined", 80,
+    "SUSPICIOUS", 90,
+    "TRUE_POSITIVE", 100 
+];
+let parser = (disabled: bool=false) {
+    let alldata = SentinelOne_CL
+        | where not(disabled)
+            and event_name_s == "Alerts." 
+            and alertInfo_eventType_s == "DNS"
+        | parse alertInfo_dnsResponse_s with * "type: " DnsQueryType: int " " RestMessage;
+    let undefineddata = alldata
+        | where ruleInfo_treatAsThreat_s == "UNDEFINED"
+        | lookup ThreatConfidenceLookup_undefined on alertInfo_analystVerdict_s;
+    let suspiciousdata = alldata
+        | where ruleInfo_treatAsThreat_s == "Suspicious"
+        | lookup ThreatConfidenceLookup_suspicious on alertInfo_analystVerdict_s;
+    let maaliciousdata = alldata
+        | where ruleInfo_treatAsThreat_s == "Malicious"
+        | lookup ThreatConfidenceLookup_malicious on alertInfo_analystVerdict_s;
+    union undefineddata, suspiciousdata, maaliciousdata
+    | extend 
+        DnsResponseCode = case(
+                      alertInfo_dnsResponse_s has "NoError" or alertInfo_dnsResponse_s has "No Error",
+                      int(0),
+                      alertInfo_dnsResponse_s has "FormErr" or alertInfo_dnsResponse_s has "Format Error",
+                      int(1),
+                      alertInfo_dnsResponse_s has "ServFail" or alertInfo_dnsResponse_s has "Server Failure",
+                      int(2),
+                      alertInfo_dnsResponse_s has "NXDomain" or alertInfo_dnsResponse_s has "Non-Existent Domain",
+                      int(3),
+                      alertInfo_dnsResponse_s has "NotImp" or alertInfo_dnsResponse_s has "Not Implemented",
+                      int(4),
+                      alertInfo_dnsResponse_s has "Refused" or alertInfo_dnsResponse_s has "Query Refused",
+                      int(5),
+                      alertInfo_dnsResponse_s has "YXDomain" or alertInfo_dnsResponse_s has "Name Exists when it should not",
+                      int(6),
+                      alertInfo_dnsResponse_s has "YXRRSet" or alertInfo_dnsResponse_s has "RR Set Exists when it should not",
+                      int(7),
+                      alertInfo_dnsResponse_s has "NXRRSet" or alertInfo_dnsResponse_s has "RR Set that should exist does not",
+                      int(8),
+                      alertInfo_dnsResponse_s has "NotAuth" or alertInfo_dnsResponse_s has "Server Not Authoritative for zone",
+                      int(9),
+                      alertInfo_dnsResponse_s has "NotAuth" or alertInfo_dnsResponse_s has "Not Authorized",
+                      int(9),
+                      alertInfo_dnsResponse_s has "NotZone" or alertInfo_dnsResponse_s has "Name not contained in zone",
+                      int(10),
+                      alertInfo_dnsResponse_s has "DSOTYPENI" or alertInfo_dnsResponse_s has "DSO-TYPE Not Implemented",
+                      int(11),
+                      alertInfo_dnsResponse_s has "Unassigned",
+                      int(12),
+                      alertInfo_dnsResponse_s has "BADVERS" or alertInfo_dnsResponse_s has "Bad OPT Version",
+                      int(16),
+                      alertInfo_dnsResponse_s has "BADSIG" or alertInfo_dnsResponse_s has "TSIG Signature Failure",
+                      int(16),
+                      alertInfo_dnsResponse_s has "BADKEY" or alertInfo_dnsResponse_s has "Key not recognized",
+                      int(17),
+                      alertInfo_dnsResponse_s has "BADTIME" or alertInfo_dnsResponse_s has "Signature out of time window",
+                      int(18),
+                      alertInfo_dnsResponse_s has "BADMODE" or alertInfo_dnsResponse_s has "Bad TKEY Mode",
+                      int(19),
+                      alertInfo_dnsResponse_s has "BADNAME" or alertInfo_dnsResponse_s has "Duplicate key name",
+                      int(20),
+                      alertInfo_dnsResponse_s has "BADALG" or alertInfo_dnsResponse_s has "Algorithm not supported",
+                      int(21),
+                      alertInfo_dnsResponse_s has "BADTRUNC" or alertInfo_dnsResponse_s has "Bad Truncation",
+                      int(22),
+                      alertInfo_dnsResponse_s has "BADCOOKIE" or alertInfo_dnsResponse_s has "Bad/missing Server Cookie",
+                      int(23),
+                      int(0)
+                  ),
+        AdditionalFields = bag_pack(
+                      "MachineType",
+                      agentDetectionInfo_machineType_s,
+                      "OsRevision",
+                      agentDetectionInfo_osRevision_s
+                  )
+    | extend 
+        DnsQueryType = iff(isempty(DnsQueryType) and DnsResponseCode == 0, int(1), DnsQueryType),
+        ThreatConfidence = coalesce(ThreatConfidence_undefined, ThreatConfidence_suspicious, ThreatConfidence_malicious)
+    | project-rename
+        EventStartTime = sourceProcessInfo_pidStarttime_t,
+        DnsQuery = alertInfo_dnsRequest_s,
+        EventUid = _ItemId,
+        DnsResponseName = alertInfo_dnsResponse_s,
+        DvcId = agentDetectionInfo_uuid_g,
+        DvcOs = agentDetectionInfo_osName_s,
+        DvcOsVersion = agentDetectionInfo_osRevision_s,
+        EventOriginalType = alertInfo_eventType_s,
+        EventOriginalSeverity = ruleInfo_severity_s,
+        EventOriginalUid = alertInfo_dvEventId_s,
+        RuleName = ruleInfo_name_s,
+        SrcProcessId = sourceProcessInfo_pid_s,
+        SrcProcessName = sourceProcessInfo_name_s,
+        SrcUsername = sourceProcessInfo_user_s,
+        ThreatOriginalConfidence = ruleInfo_treatAsThreat_s
+    | invoke _ASIM_ResolveDvcFQDN('agentDetectionInfo_name_s')
+    | extend
+        Dvc = DvcId,
+        EventEndTime = EventStartTime,
+        EventResult = iff(DnsResponseCode == 0, "Success", "Failure"),
+        EventResultDetails = _ASIM_LookupDnsResponseCode(DnsResponseCode),
+        EventSubType = iff(isnotempty(DnsResponseName), "Response", "Request"),
+        EventOriginalResultDetails = DnsResponseCode,
+        DnsQueryTypeName = _ASIM_LookupDnsQueryType(DnsQueryType),
+        Rule = RuleName,
+        SrcDvcId = DvcId,
+        SrcHostname = DvcHostname,
+        EventSeverity = iff(EventOriginalSeverity == "Critical", "High", EventOriginalSeverity),
+        Domain = DnsQuery,
+        Process = SrcProcessName,
+        User = SrcUsername,
+        SrcUsernameType = _ASIM_GetUsernameType(SrcUsername),
+        SrcUserType = _ASIM_GetUserType(SrcUsername, "")
+    | extend 
+        Src = SrcHostname,
+        Hostname = SrcHostname,
+        DnsResponseCodeName = EventResultDetails,
+        DvcIdType = iff(isnotempty(DvcId), "Other", ""),
+        SrcDvcIdType = iff(isnotempty(SrcDvcId), "Other", "")
+    | extend
+        EventCount = int(1),
+        EventProduct = "SentinelOne",
+        EventSchema = "Dns",
+        EventSchemaVersion = "0.1.7",
+        EventType = "Query",
+        EventVendor = "SentinelOne",
+        DnsQueryClassName = "IN",
+        DnsQueryClass = int(1)
+    | project-away
+        *_d,
+        *_s,
+        *_g,
+        *_t,
+        *_b,
+        RestMessage,
+        _ResourceId,
+        TenantId,
+        RawData,
+        Computer,
+        MG,
+        ManagementGroupName,
+        SourceSystem,
+        ThreatConfidence_*
+};
+parser(disabled = disabled)
+}
+
+
+
+//
+// Function Name: ASimDnsVectraAI
+// Description: This ASIM parser supports normalizing Vectra AI Steams logs to the ASIM DNS normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimDnsVectraAI(    ['disabled']:bool=False)
+{
+let parser = (disabled:bool=false) {
+  let NetworkProtocolLookup = datatable(proto_d:real, NetworkProtocol:string)[
+      6, 'TCP',
+      17, 'UDP'];
+  let DnsClassLookup = datatable(DnsQueryClass:int, DnsQueryClassName: string)[
+      0, 'Reserved',
+      1, 'IN',
+      2, 'Unassigned',
+      3, 'CH',
+      4, 'HS',
+      254, 'None',
+      255, 'Any'
+  ];
+  let HostnameRegex = @'^[a-zA-Z0-9-]{1,61}$';
+  VectraStream_CL
+  | project-away MG, ManagementGroupName, RawData, SourceSystem, Computer
+  | where metadata_type_s == 'metadata_dns'
+  | project-rename
+      DvcDescription = hostname_s,
+      DstDescription = resp_hostname_s,
+      SrcDescription = orig_hostname_s,
+      DnsFlagsAuthoritative = AA_b,
+      DnsFlagsRecursionAvailable = RA_b,
+      DnsFlagsRecursionDesired = RD_b,
+      DnsFlagsTruncated = TC_b,
+      DnsResponseName = answers_s,
+      DnsQuery = query_s,
+      DnsQueryTypeName = qtype_name_s,
+      DstIpAddr = id_resp_h_s,
+      DnsSessionId = community_id_s,
+      SrcIpAddr = id_orig_h_s,
+      DstDvcId = resp_huid_s,
+      SrcDvcId = orig_huid_s,
+      DvcId = sensor_uid_s,
+      EventOriginalUid = uid_s,
+      SrcSessionId = orig_sluid_s,
+      DstSessionId = resp_sluid_s
+  | extend
+      DstHostname = iff (DstDescription startswith "IP-" or not(DstDescription matches regex HostnameRegex), "", DstDescription),
+      SrcHostname = iff (SrcDescription startswith "IP-" or not(SrcDescription matches regex HostnameRegex), "", SrcDescription),
+      DvcHostname = iff (DvcDescription startswith "IP-" or not(DvcDescription matches regex HostnameRegex), "", DvcDescription),
+      NetworkProtocolVersion = toupper(id_ip_ver_s),
+      DnsResponseCode = toint(rcode_d),
+      DnsResponseCodeName = toupper(rcode_name_s),
+      DnsQueryClass = toint(qclass_d),
+      DnsQueryType = toint(qtype_d),
+      DstPortNumber = toint(id_resp_p_d),
+      EventCount = toint(1),
+      EventEndTime = unixtime_milliseconds_todatetime(ts_d),
+      EventOriginalSubType = tostring(split(metadata_type_s, '_')[1]),
+      EventProduct = 'Vectra Stream',
+      EventResult = case(tolong(rcode_d) > 0, "Failure", "Success"),
+      EventSchema = 'Dns', 
+      EventSchemaVersion='0.1.3',
+      EventType = 'Query',
+      EventVendor = 'Vectra AI',
+      SrcDvcIdType = 'VectraId',
+      DstDvcIdType = 'VectraId',
+      DvcIdType = 'VectraId',
+      SrcPortNumber = toint(id_orig_p_d),
+      TransactionIdHex = tostring(toint(trans_id_d)),
+      EventSubType = iff (saw_reply_b, "response", "request")
+  | lookup DnsClassLookup on DnsQueryClass
+  | lookup NetworkProtocolLookup on proto_d
+  | extend
+      EventResultDetails = DnsResponseCodeName,
+      EventStartTime = EventEndTime,
+      SessionId = DnsSessionId,
+      Domain = DnsQuery,
+      Hostname = DstHostname,
+      IpAddr = SrcIpAddr,
+      Dvc = coalesce (DvcId, DvcDescription),
+      Src = SrcIpAddr,
+      Dst = DstIpAddr
+  | project-away
+      *_d, *_s, *_b, *_g
+    };
+parser (disabled)
+}
+
+
+
+//
+// Function Name: ASimDnsZscalerZIA
+// Description: This ASIM parser supports normalizing Zscaler ZIA DNS logs to the ASIM Dns normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimDnsZscalerZIA(    ['disabled']:bool=False)
+{
+let ZscalerDNSevents=(disabled:bool=false){
+  CommonSecurityLog 
+  | where not(disabled)
+  | where DeviceProduct == "NSSDNSlog" 
+  | project-rename
+      Dvc=Computer , 
+      SrcIpAddr = SourceIP, 
+      SrcUsername = SourceUserName, 
+      DstIpAddr = DestinationIP, 
+      DstPortNumber = DestinationPort,  
+      EventProductVersion = DeviceVersion, 
+      DnsQueryTypeName = DeviceCustomString4,  
+      DnsQuery = DeviceCustomString5, 
+      SrcUserDepartment = DeviceCustomString1, // Not part of the standard schema
+      reqaction = DeviceCustomString2, 
+      resaction = DeviceCustomString3, 
+      DvcUsername = SourceUserID,
+      DvcZone = SourceUserPrivileges,
+      SrcHostname = DeviceName,
+      NetworkProtocol = Protocol,
+      EventOriginalSeverity = LogSeverity,
+      EventMessage = Message
+  | extend
+      EventCount=int(1), 
+      EventStartTime=TimeGenerated,  
+      EventVendor = "Zscaler", 
+      EventProduct = "ZIA DNS", 
+      EventSchema = "Dns", 
+      EventSchemaVersion="0.1.3", 
+      EventEndTime=TimeGenerated, 
+      SrcUsernameType = "UPN", 
+      EventSubType = iff(resaction == 'None', 'request', 'response'),  
+      DvcAction = iff(resaction == 'None', reqaction, resaction), 
+      EventResultDetails = iff (DeviceCustomString6 matches regex @'^([A-Z_]+)$', DeviceCustomString6, 'NOERROR'), 
+      EventType = 'Query', 
+      RuleName = strcat (FlexString1, " / ", FlexString2),
+      // -- Adjustment to support both old and new CSL fields.
+      UrlCategory = coalesce(column_ifexists("DeviceEventCategory", ""), extract("cat=(.*)", 1, AdditionalExtensions), ""),  
+      DnsNetworkDuration = coalesce(
+        toint(column_ifexists ("FieldDeviceCustomNumber1", int(null))), 
+        toint(column_ifexists ("DeviceCustomNumber1",int(null)))
+      )
+    | extend 
+      EventResult = case (
+        EventSubType == 'request', 'NA', 
+        EventResultDetails == 'NOERROR', 'Success',
+        'Failure'),
+      DnsResponseName = iff (EventResultDetails == 'NOERROR', DeviceCustomString6, '')
+  // -- Aliases
+  | extend
+      DnsResponseCodeName = EventResultDetails,
+      Domain = DnsQuery,
+      IpAddr = SrcIpAddr,
+      Src = SrcIpAddr,
+      Hostname = SrcHostname,
+      Dst = DstIpAddr,
+      DvcHostname = Dvc,
+      Duration = DnsNetworkDuration,
+      User = SrcUsername,
+  // -- Entity identifier explicit aliases
+      SrcUserUpn = SrcUsername
+  | project-away AdditionalExtensions, CommunicationDirection, Device*, Destination*, EndTime, ExternalID, File*, Flex*, IndicatorThreatType, Malicious*, Old*, OriginalLogSeverity, Process*, ReceiptTime, ReceivedBytes, Remote*, Request*, Sent*, SimplifiedDeviceAction, Source*, StartTime, TenantId, ThreatConfidence, ThreatDescription, ThreatSeverity, EventOutcome, FieldDevice*, ExtID, Reason, ApplicationProtocol, ReportReferenceLink, Activity, resaction, reqaction
+  };
+ZscalerDNSevents (disabled)
+}
+
+
+
+//
+// Function Name: imDns
+// Description: This ASIM parser supports filtering and normalizing DNS activity logs from all supported sources to the ASIM DNS activity normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) imDns(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr']:string='*',
+    ['domain_has_any']:dynamic=dynamic([]),
+    ['responsecodename']:string='*',
+    ['response_has_ipv4']:string='*',
+    ['response_has_any_prefix']:dynamic=dynamic([]),
+    ['eventtype']:string='lookup',
+    ['pack']:bool=False)
+{
+let Generic=(starttime:datetime=datetime(null), endtime:datetime=datetime(null) , srcipaddr:string='*' , domain_has_any:dynamic=dynamic([]) , responsecodename:string='*', response_has_ipv4:string='*' , response_has_any_prefix:dynamic=dynamic([]) , eventtype:string='lookup', pack:bool=false ){
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludeimDns') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser);
+let imDnsBuiltInDisabled=toscalar('ExcludeimDnsBuiltIn' in (DisabledParsers) or 'Any' in (DisabledParsers)); 
+union isfuzzy=true
+  vimDnsEmpty,
+  vimDnsAzureFirewall     ( starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, (imDnsBuiltInDisabled or('ExcludevimDnsAzureFirewall'       in (DisabledParsers) ))),
+  vimDnsCiscoUmbrella     ( starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, (imDnsBuiltInDisabled or('ExcludevimDnsCiscoUmbrella'       in (DisabledParsers) ))),
+  vimDnsCorelightZeek     ( starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, (imDnsBuiltInDisabled or('ExcludevimDnsCorelightZeek'       in (DisabledParsers) ))),
+  vimDnsFortinetFortiGate ( starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, (imDnsBuiltInDisabled or('ExcludevimDnsFortinetFortiGate'   in (DisabledParsers) ))),
+  vimDnsGcp               ( starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, (imDnsBuiltInDisabled or('ExcludevimDnsDnsGcp'              in (DisabledParsers) ))),
+  vimDnsInfobloxNIOS      ( starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, (imDnsBuiltInDisabled or('ExcludevimDnsInfobloxNIOS'        in (DisabledParsers) ))),
+  vimDnsMicrosoftNXlog    ( starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, (imDnsBuiltInDisabled or('ExcludevimDnsMicrosoftNXlog'      in (DisabledParsers) ))),
+  vimDnsMicrosoftOMS      ( starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, (imDnsBuiltInDisabled or('ExcludevimDnsMicrosoftOMS'        in (DisabledParsers) ))),
+  vimDnsMicrosoftSysmon   ( starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, (imDnsBuiltInDisabled or('ExcludevimDnsMicrosoftSysmon'     in (DisabledParsers) ))),
+  vimDnsMicrosoftSysmonWindowsEvent   ( starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, (imDnsBuiltInDisabled or('ExcludevimDnsMicrosoftSysmonWindowsevent'     in (DisabledParsers) ))),
+  vimDnsNative            ( starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, (imDnsBuiltInDisabled or('ExcludevimDnsNative'              in (DisabledParsers) ))),
+  vimDnsSentinelOne       ( starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, (imDnsBuiltInDisabled or('ExcludevimDnsSentinelOne'         in (DisabledParsers) ))),
+  vimDnsVectraAI          ( starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, (imDnsBuiltInDisabled or('ExcludevimDnsVectraAI'            in (DisabledParsers) ))),
+  vimDnsZscalerZIA        ( starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, (imDnsBuiltInDisabled or('ExcludevimDnsZscalerZIA'          in (DisabledParsers) )))
+  };
+Generic( starttime=starttime, endtime=endtime, srcipaddr=srcipaddr, domain_has_any=domain_has_any, responsecodename=responsecodename, response_has_ipv4=response_has_ipv4, response_has_any_prefix=response_has_any_prefix, eventtype=eventtype, pack=pack)
+}
+
+
+
+//
+// Function Name: vimDnsAzureFirewall
+// Description: This ASIM parser supports filtering and normalizing Azure Firewall logs to the ASIM Dns normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimDnsAzureFirewall(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr']:string='*',
+    ['domain_has_any']:dynamic=dynamic([]),
+    ['responsecodename']:string='*',
+    ['response_has_ipv4']:string='*',
+    ['response_has_any_prefix']:dynamic=dynamic([]),
+    ['eventtype']:string='Query',
+    ['disabled']:bool=False)
+{
+let DNS_query=(
+  starttime:datetime=datetime(null), endtime:datetime=datetime(null)
+  , srcipaddr:string='*'
+  , domain_has_any:dynamic=dynamic([]) 
+  , responsecodename:string='*', response_has_ipv4:string='*'
+  , response_has_any_prefix:dynamic=dynamic([]) , eventtype:string='Query'
+  , disabled:bool=false
+  ){
+  AzureDiagnostics | where not(disabled)
+  // | where ResourceType == "AZUREFIREWALLS" -- Implicit in the next line
+  | where Category == "AzureFirewallDnsProxy"
+  | project msg_s, TimeGenerated, ResourceId
+  | where msg_s startswith "DNS Request:"
+  //  --Pre-parsing filtering:
+  | where
+    // Return empty list if response IPs are passed
+    (response_has_ipv4=='*')
+    and (array_length(response_has_any_prefix) ==0) 
+    and (eventtype=='*' or eventtype in ("Query", "lookup")) // -- support both legacy and standard value 
+    and (isnull(starttime) or TimeGenerated >= starttime)
+    and (isnull(endtime) or TimeGenerated <= endtime) 
+    and (srcipaddr=='*' or has_ipv4(msg_s, srcipaddr))
+    and (array_length(domain_has_any) ==0 or  msg_s has_any (domain_has_any))
+    and (responsecodename=='*' or  msg_s has(responsecodename))
+  // --
+      | parse msg_s with
+      "DNS Request: " 
+      SrcIpAddr:string ":" SrcPortNumber:int 
+      " - " EventOriginalUid:string 
+      " " DnsQueryTypeName:string 
+      " " DnsQueryClassName:string
+      " " DnsQuery:string
+      ". " NetworkProtocol:string 
+      " " SrcBytes:int 
+      " " DnsDNSSECflag:bool 
+      " " DnsDNSSECBufferSize:int 
+      " " EventResultDetails:string 
+      " " DnsFlags:string
+      " " DstBytes:int
+      " " DnsNetworkDuration:double
+      "s"
+  // -- Post-filtering accurately now that message is parsed
+  | where
+      (srcipaddr=="*" or  SrcIpAddr==srcipaddr)
+        and (array_length(domain_has_any) ==0 or DnsQuery has_any (domain_has_any))
+        and (responsecodename=="*" or EventResultDetails has responsecodename)
+  | project-away msg_s
+  | extend
+    EventResult = iff (EventResultDetails == "NOERROR", "Success", "Failure"),
+    EventSubType = "response",
+    DnsNetworkDuration = toint(DnsNetworkDuration*1000)     
+};
+let DNS_error=(
+  starttime:datetime=datetime(null), endtime:datetime=datetime(null)
+  , srcipaddr:string='*'
+  , domain_has_any:dynamic=dynamic([]) 
+  , responsecodename:string='*', response_has_ipv4:string='*'
+  , response_has_any_prefix:dynamic=dynamic([]) , eventtype:string='Query'
+  , disabled:bool=false
+  ) {
+  AzureDiagnostics
+  // | where ResourceType == "AZUREFIREWALLS" -- Implicit in the next line
+  | where Category == "AzureFirewallDnsProxy"
+  | project msg_s, TimeGenerated, ResourceId
+  | where msg_s startswith " Error:"
+  //  --Pre-parsing filtering:
+  | where
+    (response_has_ipv4=='*') // Return empty list if response IPs are passed
+    and (array_length(response_has_any_prefix) ==0) // Return empty list if response IPs are passed
+    and (eventtype=='*' or eventtype in ("Query", "lookup")) // -- support both legacy and standard value 
+    and (isnull(starttime) or TimeGenerated >= starttime)
+    and (isnull(endtime) or TimeGenerated <= endtime) 
+    and (srcipaddr=='*' or has_ipv4(msg_s, srcipaddr))
+    and (array_length(domain_has_any) ==0 or  msg_s has_any (domain_has_any))
+    and (responsecodename=='*') // Return empty list if response code is passed
+  // --
+  | parse msg_s with 
+      " Error: " nu:string 
+      " " DnsQuery:string 
+      ". " DnsQueryTypeName:string 
+      ": " op:string 
+      " " NetworkProtocol:string
+      " " SrcIpAddr:string ":" SrcPortNumber:int 
+      "->" DstIpAddr:string ":" DstPortNumber:int  
+      ": " EventResultOriginalDetails:string
+  // -- Post-filtering accurately now that message is parsed
+  | where
+      (srcipaddr=="*" or  SrcIpAddr==srcipaddr)
+        and (array_length(domain_has_any) ==0 or DnsQuery has_any (domain_has_any))
+  | project-away msg_s
+  | extend 
+    EventResult = "Failure",
+    EventSubType = "request"
+};
+let DNS = (
+  starttime:datetime=datetime(null), endtime:datetime=datetime(null)
+  , srcipaddr:string='*'
+  , domain_has_any:dynamic=dynamic([]) 
+  , responsecodename:string='*', response_has_ipv4:string='*'
+  , response_has_any_prefix:dynamic=dynamic([]) , eventtype:string='Query'
+  , disabled:bool=false
+  ) {
+  union 
+    DNS_query (starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, disabled),
+    DNS_error (starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, disabled)
+  | extend
+    NetworkProtocol = toupper(NetworkProtocol)
+  | project-rename
+      DvcId = ResourceId
+  | extend
+      DvcIdType = "AzureResourceId",
+      EventCount = int(1),
+      EventStartTime = TimeGenerated,
+      EventVendor = "Microsoft",
+      EventProduct = "Azure Firewall",
+      EventSchema = "Dns",
+      EventSchemaVersion = "0.1.3",
+      EventEndTime = TimeGenerated, 
+      EventType = 'Query',
+      DnsFlagsAuthenticated = DnsFlags has "aa",
+      DnsFlagsAuthoritative = DnsFlags has "ad",
+      DnsFlagsCheckingDisabled = DnsFlags has "cd",
+      DnsFlagsRecursionAvailable = DnsFlags has "ra",
+      DnsFlagsRecursionDesired = DnsFlags has "rd",
+      DnsFlagsTruncates = DnsFlags has "tc"
+  | extend
+    // -- Aliases
+      DnsResponseCodeName=EventResultDetails,
+      Domain=DnsQuery,
+      IpAddr=SrcIpAddr,
+      Src=SrcIpAddr,
+      Dst=DstIpAddr,
+      Duration = DnsNetworkDuration,
+      Dvc=DvcId
+  | extend
+      // -- Backward Compatibility
+      Query = DnsQuery,
+      QueryTypeName = DnsQueryTypeName,
+      ResponseCodeName = DnsResponseCodeName,
+      Flags = DnsFlags
+};
+DNS (starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, disabled)
+}
+
+
+
+//
+// Function Name: vimDnsCiscoUmbrella
+// Description: This ASIM parser supports filtering and normalizing Cisco Umbrella DNS logs to the ASIM Dns normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimDnsCiscoUmbrella(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr']:string='*',
+    ['domain_has_any']:dynamic=dynamic([]),
+    ['responsecodename']:string='*',
+    ['response_has_ipv4']:string='*',
+    ['response_has_any_prefix']:dynamic=dynamic([]),
+    ['eventtype']:string='Query',
+    ['disabled']:bool=False)
+{
+let DNSQuery_CiscoUmbrella=(
+  starttime:datetime=datetime(null), endtime:datetime=datetime(null)
+  , srcipaddr:string='*'
+  , domain_has_any:dynamic=dynamic([]) 
+  , responsecodename:string='*'
+  , response_has_ipv4:string='*' , response_has_any_prefix:dynamic=dynamic([])
+  , eventtype:string='Query'
+  , disabled:bool=false
+  ){
+    Cisco_Umbrella_dns_CL | where not(disabled)
+    // ******************************************************************
+    //  Pre-parsing filterring:
+      | where
+      // Return empty list if response IPs are passed
+        (eventtype in~ ('lookup','Query'))
+        and (response_has_ipv4=='*')
+        and (array_length(response_has_any_prefix) ==0) 
+        and (isnull(starttime) or TimeGenerated >= starttime)
+        and (isnull(endtime) or TimeGenerated <= endtime) 
+        and (srcipaddr=='*' or InternalIp_s==srcipaddr)
+        and (array_length(domain_has_any) ==0 or Domain_s has_any (domain_has_any))
+        and (responsecodename=='*' or ResponseCode_s=~responsecodename)
+    // *****************************************************************
+    | parse QueryType_s with DnsQueryType:int " ("DnsQueryTypeName:string ")"
+    //
+    | project 
+    //
+    // ******************* Mandatory
+      EventCount=int(1),
+      EventStartTime=todatetime(column_ifexists('Timestamp_t',column_ifexists('Timestamp_s',''))),
+      EventProduct="Umbrella",
+      EventVendor="Cisco",
+      EventSchema="Dns",
+      EventSchemaVersion="0.1.3",
+      Dvc="CiscoUmbrella" ,
+      EventType="Query",
+      EventResult=iff(ResponseCode_s=~'NOERROR','Success','Failure'),
+      EventResultDetails=ResponseCode_s,  // => ResponseCodeNames
+      //
+      TimeGenerated, // not handled by schema, but we need to preserve it
+      SrcIpAddr=column_ifexists('InternalIp_s', ''),
+      EventSubType='response',
+  // ********** Renamed columns
+      UrlCategory=column_ifexists('Categories_s', ''),
+      DnsQuery=trim_end(@'\.',column_ifexists('Domain_s', '')) , 
+      ThreatCategory=column_ifexists('Blocked_Categories_s', ''),
+      SrcNatIpAddr=column_ifexists('ExternalIp_s', ''),
+      DvcAction=column_ifexists('Action_s', ''),
+      EventEndTime=todatetime(column_ifexists('Timestamp_t',  column_ifexists('Timestamp_s',"")  )),
+  //
+  // *************** keep Parsed data
+      DnsQueryType, DnsQueryTypeName
+  // **************Aliases
+  | extend 
+      DnsResponseCodeName=EventResultDetails, 
+      DomainCategory=UrlCategory,
+      Domain=DnsQuery,
+      IpAddr=SrcIpAddr,
+      Src=SrcIpAddr
+  };
+DNSQuery_CiscoUmbrella( starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, disabled)
+}
+
+
+
+//
+// Function Name: vimDnsCorelightZeek
+// Description: This ASIM parser supports filtering and normalizing Corelight Zeek DNS logs to the ASIM Dns normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimDnsCorelightZeek(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr']:string='*',
+    ['domain_has_any']:dynamic=dynamic([]),
+    ['responsecodename']:string='*',
+    ['response_has_ipv4']:string='*',
+    ['response_has_any_prefix']:dynamic=dynamic([]),
+    ['eventtype']:string='Query',
+    ['disabled']:bool=False)
+{
+let query_type_lookup=datatable(DnsQueryType:int,DnsQueryTypeName:string)[
+  0, "Reserved",
+  1, "A",
+  2, "NS",
+  3, "MD",
+  4, "MF",
+  5, "CNAME",
+  6, "SOA",
+  7, "MB",
+  8, "MG",
+  9, "MR",
+  10, "NULL",
+  11, "WKS",
+  12, "PTR",
+  13, "HINFO",
+  14, "MINFO",
+  15, "MX",
+  16, "TXT",
+  17, "RP",
+  18, "AFSDB",
+  19, "X25",
+  20, "ISDN",
+  21, "RT",
+  22, "NSAP",
+  23, "NSAP-PTR",
+  24, "SIG",
+  25, "KEY",
+  26, "PX",
+  27, "GPOS",
+  28, "AAAA",
+  29, "LOC",
+  30, "NXT",
+  31, "EID",
+  32, "NIMLOC",
+  33, "SRV",
+  34, "ATMA",
+  35, "NAPTR",
+  36, "KX",
+  37, "CERT",
+  38, "A6",
+  39, "DNAME",
+  40, "SINK",
+  41, "OPT",
+  42, "APL",
+  43, "DS",
+  44, "SSHFP",
+  45, "IPSECKEY",
+  46, "RRSIG",
+  47, "NSEC",
+  48, "DNSKEY",
+  49, "DHCID",
+  50, "NSEC3",
+  51, "NSEC3PARAM",
+  52, "TLSA",
+  53, "SMIMEA",
+  54, "Unassigned",
+  55, "HIP",
+  56, "NINFO",
+  57, "RKEY",
+  58, "TALINK",
+  59, "CDS",
+  60, "CDNSKEY",
+  61, "OPENPGPKEY",
+  62, "CSYNC",
+  99, "SPF",
+  100, "UINFO",
+  101, "UID",
+  102, "GID",
+  103, "UNSPEC",
+  104, "NID",
+  105, "L32",
+  106, "L64",
+  107, "LP",
+  108, "EUI48",
+  109, "EUI64",
+  249, "TKEY",
+  250, "TSIG",
+  251, "IXFR",
+  252, "AXFR",
+  253, "MAILB",
+  254, "MAILA",
+  255, "ANY",
+  256, "URI",
+  257, "CAA",
+  258, "AVC",
+  259, "DOA",
+  32768, "TA",
+  32769, "DLV"];
+let class_lookup = datatable(DnsQueryClass:int, DnsQueryClassName: string)[
+    0, 'Reserved',
+    1, 'IN',
+    2, 'Unassigned',
+    3, 'CH',
+    4, 'HS',
+    254, 'None',
+    255, 'Any'];
+let parser=(
+  starttime:datetime=datetime(null)
+  , endtime:datetime=datetime(null)
+  , srcipaddr:string='*'
+  , domain_has_any:dynamic=dynamic([]) 
+  , responsecodename:string='*'
+  , response_has_ipv4:string='*'
+  , response_has_any_prefix:dynamic=dynamic([])
+  , eventtype:string='Query'
+  , disabled:bool=false
+  ){
+  Corelight_CL | where not(disabled)
+  //  -- Pre-parsing filtering:
+  | where
+    (eventtype in~ ('lookup', 'Query'))
+    and (isnull(starttime) or TimeGenerated >= starttime)
+    and (isnull(endtime) or TimeGenerated <= endtime)
+    and (Message has '"_path":"dns"' or Message has '"_path":"dns_red"')
+    and (srcipaddr=='*' or has_ipv4(Message, srcipaddr))
+    and (array_length(domain_has_any) ==0 or Message has_any (domain_has_any))
+    and (responsecodename=='*' or Message has responsecodename)
+    and (response_has_ipv4=='*' or has_ipv4(Message,response_has_ipv4) )
+    and (array_length(response_has_any_prefix) == 0 or has_any_ipv4_prefix(Message, response_has_any_prefix))
+  // --
+  | project Message, TimeGenerated
+  | parse-kv Message as (
+      ['"_system_name"']:string,
+      ['"_write_ts"']:datetime,
+      ['"ts"']:datetime,
+      ['"uid"']:string,
+      ['"id.orig_h"']:string,
+      ['"id.orig_p"']:int,
+      ['"id.resp_h"']:string,
+      ['"id.resp_p"']:int,
+      ['"proto"']:string,
+      ['"trans_id"']:int,
+      ['"query"']:string,
+      ['"qclass"']:int,
+      ['"qtype"']:int,
+      ['"AA"']:bool,
+      ['"TC"']:bool,
+      ['"CD"']:bool,
+      ['"RD"']:bool,
+      ['"RA"']:bool,
+      ['"Z"']:int,
+      ['"rejected"']:bool,
+      ['"rcode"']:int,
+      ['"rcode_name"']:string,
+      ['"rtt"']:real,
+  ) 
+  with (quote = '"')
+  | parse Message with * '"answers":' answers:string ',"TTLs":' TTLs:string ',"rejected"' *
+  // -- Post-filtering accurately now that message is parsed
+  | where
+       (srcipaddr=="*" or srcipaddr==['"id.orig_h"'])
+        and (array_length(domain_has_any) ==0 or ['"query"'] has_any (domain_has_any))
+        and (responsecodename=="*" or ['"rcode_name"'] has responsecodename)
+        and (response_has_ipv4=='*' or has_ipv4(answers,response_has_ipv4) )
+        and (array_length(response_has_any_prefix) == 0 or has_any_ipv4_prefix(answers, response_has_any_prefix))
+  | extend 
+      EventCount=int(1),
+      EventProduct="Zeek",
+      EventVendor="Corelight",
+      EventSchema = "Dns",
+      EventSchemaVersion="0.1.4",
+      EventType="Query"
+  | project-rename
+      EventStartTime= ['"ts"'],
+      EventEndTime = ['"_write_ts"'],
+      EventOriginalUid = ['"uid"'],
+      SrcIpAddr = ['"id.orig_h"'],
+      SrcPortNumber = ['"id.orig_p"'],
+      DstIpAddr = ['"id.resp_h"'],
+      DstPortNumber = ['"id.resp_p"'],
+      NetworkProtocol = ['"proto"'],
+      DnsQuery = ['"query"'],
+      DnsResponseCode = ['"rcode"'],
+      EventResultDetails = ['"rcode_name"'],
+      DnsFlagsAuthoritative = ['"AA"'],
+      DnsFlagsTruncated = ['"TC"'],
+      DnsFlagsRecursionDesired = ['"RD"'],
+      DnsFlagsCheckingDisabled = ['"CD"'],
+      DnsFlagsRecursionAvailable = ['"RA"'],
+      DnsQueryClass = ['"qclass"'],
+      DnsQueryType = ['"qtype"'],
+      rtt = ['"rtt"'],
+      Z = ['"Z"'],
+      trans_id = ['"trans_id"'],
+      rejected = ['"rejected"'],
+      Dvc = ['"_system_name"']
+  | lookup query_type_lookup on DnsQueryType
+  | lookup class_lookup on DnsQueryClass
+  | extend
+      EventSubType=iff(isnull(DnsResponseCode),'request','response'),
+      DnsNetworkDuration = toint(rtt*1000),
+      EventResult = iff (EventResultDetails!~'NOERROR' or rejected,'Failure','Success'),
+      DnsQueryTypeName = case (DnsQueryTypeName == "" and not(isnull(DnsQueryType)), strcat("TYPE", DnsQueryType), DnsQueryTypeName),
+      DnsQueryClassName = case (DnsQueryClassName == "" and not(isnull(DnsQueryClass)), strcat("CLASS", DnsQueryClass), DnsQueryClassName),
+      TransactionIdHex = tohex(toint(trans_id)),
+      DnsFlagsZ = (Z != 0),
+      DnsResponseName = tostring(pack ('answers', answers, 'ttls', TTLs)) // support of auth & addl to be added.
+  | project-away rtt
+  // Aliases
+  | extend 
+      DnsResponseCodeName=EventResultDetails, 
+      Domain=DnsQuery,
+      IpAddr=SrcIpAddr,
+      Src=SrcIpAddr,
+      Duration=DnsNetworkDuration,
+      Dst=DstIpAddr
+  | project-away Message, Z, TTLs, answers, trans_id, rejected
+};
+parser (starttime=starttime, endtime=endtime, srcipaddr=srcipaddr, domain_has_any=domain_has_any, responsecodename=responsecodename, response_has_ipv4=response_has_ipv4, response_has_any_prefix=response_has_any_prefix, disabled=disabled)
+}
+
+
+
+//
+// Function Name: vimDnsEmpty
+// Description: This function returns an empty ASIM DNS activity schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimDnsEmpty
+{
+let EmptyNewDnsEvents=datatable(
+  _ResourceId: string,
+  AdditionalFields: dynamic,
+  DnsFlags: string,
+  DnsFlagsAuthenticated: bool,
+  DnsFlagsAuthoritative: bool,
+  DnsFlagsCheckingDisabled: bool,
+  DnsFlagsRecursionAvailable: bool,
+  DnsFlagsRecursionDesired: bool,
+  DnsFlagsTruncated: bool,
+  DnsFlagsZ: bool,
+  DnsNetworkDuration: int,
+  DnsQuery: string,
+  DnsQueryClass: int,
+  DnsQueryClassName: string,
+  DnsQueryType: int,
+  DnsQueryTypeName: string,
+  DnsResponseCode: int,
+  DnsResponseCodeName: string,
+  DnsResponseIpCity: string,
+  DnsResponseIpCountry: string,
+  DnsResponseIpLatitude: real,
+  DnsResponseIpLongitude: real,
+  DnsResponseIpRegion: string,
+  DnsResponseName: string,
+  DnsSessionId: string,
+  Domain: string,
+  DomainCategory: string,
+  Dst: string,
+  DstDescription: string,
+  DstDeviceType: string,
+  DstDomain: string,
+  DstDomainType: string,
+  DstDvcId: string,
+  DstDvcIdType: string,
+  DstDvcScopeId: string,
+  DstDvcScope: string,
+  DstFQDN: string,
+  DstGeoCity: string,
+  DstGeoCountry: string,
+  DstGeoLatitude: real,
+  DstGeoLongitude: real,
+  DstGeoRegion: string,
+  DstHostname: string,
+  DstIpAddr: string,
+  DstPortNumber: int,
+  DstRiskLevel: int,
+  DstOriginalRiskLevel: string,
+  Duration: int,
+  Dvc: string,
+  DvcAction: string,
+  DvcDescription: string,
+  DvcDomain: string,
+  DvcDomainType: string,
+  DvcFQDN: string,
+  DvcHostname: string,
+  DvcId: string,
+  DvcIdType: string,
+  DvcInterface: string,
+  DvcIpAddr: string,
+  DvcMacAddr: string,
+  DvcOriginalAction: string,
+  DvcOs: string,
+  DvcOsVersion: string,
+  DvcScope: string,
+  DvcScopeId: string,
+  DvcZone: string,
+  EventCount: int,
+  EventEndTime: datetime,
+  EventMessage: string,
+  EventOriginalSeverity: string,
+  EventOriginalSubType: string,
+  EventOriginalType: string,
+  EventOriginalUid: string,
+  EventOwner: string,
+  EventProduct: string,
+  EventProductVersion: string,
+  EventReportUrl: string,
+  EventResult: string,
+  EventResultDetails: string,
+  EventSchema: string,
+  EventSchemaVersion: string,
+  EventSeverity: string,
+  EventStartTime: datetime,
+  EventSubType: string,
+  EventType: string,
+  EventUid: string,
+  EventVendor: string,
+  Hostname: string,
+  IpAddr: string,
+  NetworkProtocol: string,
+  NetworkProtocolVersion: string,
+  Process: string,
+  Rule: string,
+  RuleName: string,
+  RuleNumber: int,
+  SessionId: string,
+  Src: string,
+  SrcDescription: string,
+  SrcDeviceType: string,
+  SrcDomain: string,
+  SrcDomainType: string,
+  SrcDvcId: string,
+  SrcDvcIdType: string,
+  SrcDvcScope: string,
+  SrcDvcScopeId: string,
+  SrcFQDN: string,
+  SrcGeoCity: string,
+  SrcGeoCountry: string,
+  SrcGeoLatitude: real,
+  SrcGeoLongitude: real,
+  SrcGeoRegion: string,
+  SrcHostname: string,
+  SrcIpAddr: string,
+  SrcOriginalRiskLevel: string,
+  SrcOriginalUserType: string,
+  SrcPortNumber: int,
+  SrcProcessGuid: string,
+  SrcProcessId: string,
+  SrcProcessName: string,
+  SrcRiskLevel: int,
+  SrcUserId: string,
+  SrcUserAadId: string,
+  SrcUserSid: string,
+  SrcUserAWSId: string,
+  SrcUserOktaId: string,
+  SrcUserUid: string,
+  SrcUserIdType: string,
+  SrcUserScope: string,
+  SrcUserScopeId: string,
+  SrcUsername: string,
+  SrcUsernameType: string,
+  SrcUserType: string,
+  SrcUserSessionId: string,
+  TenantId: string,
+  ThreatCategory: string,
+  ThreatConfidence: int,
+  ThreatField: string,
+  ThreatFirstReportedTime: datetime,
+  ThreatId: string,
+  ThreatIpAddr: string,
+  ThreatIsActive: bool,
+  ThreatLastReportedTime: datetime,
+  ThreatName: string,
+  ThreatOriginalConfidence: string,
+  ThreatOriginalRiskLevel: string,
+  ThreatRiskLevel: int,
+  TimeGenerated: datetime,
+  TransactionIdHex: string,
+  Type: string,
+  UrlCategory: string,
+  User: string
+)[];
+EmptyNewDnsEvents
+}
+
+
+
+//
+// Function Name: vimDnsFortinetFortiGate
+// Description: This ASIM parser supports filtering and normalizing Fortinet FortiGate logs ingested in 'CommonSecurityLogs' table produced by the Microsoft Sentinel Fortinet connector to the ASIM DNS normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimDnsFortinetFortiGate(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr']:string='*',
+    ['domain_has_any']:dynamic=dynamic([]),
+    ['responsecodename']:string='*',
+    ['response_has_ipv4']:string='*',
+    ['response_has_any_prefix']:dynamic=dynamic([]),
+    ['eventtype']:string='Query',
+    ['disabled']:bool=False)
+{
+let Parser = (
+    starttime: datetime=datetime(null),
+    endtime: datetime=datetime(null),
+    srcipaddr: string='*', 
+    domain_has_any: dynamic=dynamic([]),
+    responsecodename: string='*',
+    response_has_ipv4: string='*',
+    response_has_any_prefix: dynamic=dynamic([]),
+    eventtype: string='Query',
+    disabled: bool=false
+    ) {
+    let DeviceEventClassIDLookup = datatable(EventOriginalSubType:string,EventSubType:string, EventSeverity:string, DvcAction:string, ThreatCategory:string, ThreatField:string)[
+        "54000", "request", "Informational", "", "", "",
+        "54200", "response", "Low", "", "", "",
+        "54400", "response", "Low", "Blocked", "", "",
+        "54401", "response", "Informational", "", "", "",
+        "54600", "response", "Low", "Blocked", "Botnet", "DstIpAddr",
+        "54601", "response", "Low", "Blocked", "Botnet", "Domain",
+        "54800", "response", "Low", "", "", "",
+        "54801", "response", "Low", "", "", "",
+        "54802", "response", "Informational", "", "", "",
+        "54803", "response", "Low", "Blocked", "", "",
+        "54804", "response", "Informational", "", "", "",
+        "54805", "response", "Informational", "", "", "",
+    ];
+    let EventOriginalResultDetailsLookup = datatable(EventOriginalResultDetails:string, EventResultDetails:string, EventResult:string)[
+        "", "NOERROR", "Success",
+        "0", "NOERROR", "Success",
+        "1", "FORMERR", "Failure",
+        "2", "SERVFAIL", "Failure",
+        "3", "NXDOMAIN", "Failure",
+        "4", "NOTIMP", "Failure",
+        "5", "REFUSED", "Failure",
+        "6", "YXDOMAIN", "Failure",
+        "7", "YXRRSET", "Failure",
+        "8", "NXRRSET", "Failure",
+        "9", "NOTAUTH", "Failure",
+        "10", "NOTZONE", "Failure",
+        "11", "DSOTYPENI", "Failure",
+        "16", "BADVERS", "Failure",
+        "16", "BADSIG", "Failure",
+        "17", "BADKEY", "Failure",
+        "18", "BADTIME", "Failure",
+        "19", "BADMODE", "Failure",
+        "20", "BADNAME", "Failure",
+        "21", "BADALG", "Failure",
+        "22", "BADTRUNC", "Failure",
+        "23", "BADCOOKIE", "Failure"
+    ];
+    let DnsResponseCodeNameLookup = toscalar(
+        EventOriginalResultDetailsLookup
+        | where not(disabled)
+        | where (responsecodename == '*' or EventResultDetails =~ responsecodename)
+        | project EventOriginalResultDetails
+    );
+    let DnsQueryTypeLookup = datatable(DnsQueryType:int, DnsQueryTypeName:string)[
+        0, "Reserved",
+        1, "A",
+        2, "NS",
+        3, "MD",
+        4, "MF",
+        5, "CNAME",
+        6, "SOA",
+        7, "MB",
+        8, "MG",
+        9, "MR",
+        10, "NULL",
+        11, "WKS",
+        12, "PTR",
+        13, "HINFO",
+        14, "MINFO",
+        15, "MX",
+        16, "TXT",
+        17, "RP",
+        18, "AFSDB",
+        19, "X25",
+        20, "ISDN",
+        21, "RT",
+        22, "NSAP",
+        23, "NSAP-PTR",
+        24, "SIG",
+        25, "KEY",
+        26, "PX",
+        27, "GPOS",
+        28, "AAAA",
+        29, "LOC",
+        30, "NXT",
+        31, "EID",
+        32, "NIMLOC",
+        33, "SRV",
+        34, "ATMA",
+        35, "NAPTR",
+        36, "KX",
+        37, "CERT",
+        38, "A6",
+        39, "DNAME",
+        40, "SINK",
+        41, "OPT",
+        42, "APL",
+        43, "DS",
+        44, "SSHFP",
+        45, "IPSECKEY",
+        46, "RRSIG",
+        47, "NSEC",
+        48, "DNSKEY",
+        49, "DHCID",
+        50, "NSEC3",
+        51, "NSEC3PARAM",
+        52, "TLSA",
+        53, "SMIMEA",
+        55, "HIP",
+        56, "NINFO",
+        57, "RKEY",
+        58, "TALINK",
+        59, "CDS",
+        60, "CDNSKEY",
+        61, "OPENPGPKEY",
+        62, "CSYNC",
+        63, "ZONEMD",
+        64, "SVCB",
+        65, "HTTPS",
+        99, "SPF",
+        100, "UINFO",
+        101, "UID",
+        102, "GID",
+        103, "UNSPEC",
+        104, "NID",
+        105, "L32",
+        106, "L64",
+        107, "LP",
+        108, "EUI48",
+        109, "EUI64",
+        249, "TKEY",
+        250, "TSIG",
+        251, "IXFR",
+        252, "AXFR",
+        253, "MAILB",
+        254, "MAILA",
+        255, "*",
+        256, "URI",
+        257, "CAA",
+        258, "AVC",
+        259, "DOA",
+        32768, "TA",
+        32769, "DLV"
+    ];
+    CommonSecurityLog
+    | where not(disabled)
+    | where (isnull(starttime) or TimeGenerated >= starttime) and
+        (isnull(endtime) or TimeGenerated <= endtime)
+    | where DeviceVendor    == "Fortinet" and 
+        DeviceProduct       == "Fortigate"
+    | where DeviceEventClassID in(54000,54200,54400,54401,54600,54601,54800,54801,54802,54803,54804,54805)
+    | where (srcipaddr == "*" or SourceIP == srcipaddr) and
+        (array_length(domain_has_any) == 0 or AdditionalExtensions has_any (domain_has_any)) and
+        (responsecodename == '*' or AdditionalExtensions has DnsResponseCodeNameLookup) and
+        (response_has_ipv4 == '*' or has_ipv4(AdditionalExtensions, response_has_ipv4)) and 
+        (array_length(response_has_any_prefix) == 0 or has_any_ipv4_prefix(AdditionalExtensions, response_has_any_prefix)) and
+        (eventtype=='*' or eventtype in ("Query", "lookup")) // -- support both legacy and standard value 
+    | project TimeGenerated, EventOriginalSubType = DeviceEventClassID, AdditionalExtensions, EventUid = _ItemId, EventOriginalSeverity = LogSeverity, EventProductVersion = DeviceVersion ,Computer, Type, SrcIpAddr = SourceIP, SrcPortNumber = SourcePort, DstIpAddr = DestinationIP, DstPortNumber = DestinationPort, EventMessage = Message, NetworkProtocolNumber = Protocol, DvcId = DeviceExternalID, DnsSessionId = ExtID
+    | lookup DeviceEventClassIDLookup on EventOriginalSubType
+    | parse-kv  AdditionalExtensions as (FTNTFGTlogid:string, FTNTFGTsubtype:string, FTNTFGTsrccountry:string, FTNTFGTdstcountry:string,FTNTFGTsrcintfrole:string, FTNTFGTrcode:string, FTNTFGTqname:string, FTNTFGTqtype:string, FTNTFGTxid:string, FTNTFGTqtypeval:int, FTNTFGTqclass:string, FTNTFGTcatdesc:string, FTNTFGTipaddr:string, FTNTFGTunauthuser:string, FTNTFGTuser:string, FTNTFGTbotnetip:string) with (pair_delimiter=";", kv_delimiter="=")
+    | where (array_length(domain_has_any) == 0 or FTNTFGTqname has_any (domain_has_any)) and
+        (responsecodename == '*' or FTNTFGTrcode == DnsResponseCodeNameLookup) and
+        (response_has_ipv4 == '*' or has_ipv4(FTNTFGTipaddr, response_has_ipv4)) and
+        (array_length(response_has_any_prefix) == 0 or has_any_ipv4_prefix(FTNTFGTipaddr, response_has_any_prefix))
+    | project-rename 
+        EventOriginalResultDetails  = FTNTFGTrcode,
+        EventOriginalUid            = FTNTFGTlogid,
+        DvcZone                     = FTNTFGTsrcintfrole,
+        EventOriginalType           = FTNTFGTsubtype,
+        SrcGeoCountry               = FTNTFGTsrccountry,
+        DstGeoCountry               = FTNTFGTdstcountry,
+        DnsQuery                    = FTNTFGTqname,
+        DnsQueryTypeName            = FTNTFGTqtype,
+        TransactionIdHex            = FTNTFGTxid,
+        DnsQueryClass               = FTNTFGTqtypeval,
+        DnsQueryClassName           = FTNTFGTqclass,
+        UrlCategory                 = FTNTFGTcatdesc,
+        DnsResponseName             = FTNTFGTipaddr,
+        ThreatIpAddr                = FTNTFGTbotnetip
+    | extend 
+        DnsQueryTypeName = case(
+            DnsQueryTypeName == "Unknown","",
+            DnsQueryTypeName
+        )
+    | lookup EventOriginalResultDetailsLookup on EventOriginalResultDetails
+    | lookup DnsQueryTypeLookup on DnsQueryTypeName
+    | invoke _ASIM_ResolveDvcFQDN ("Computer")
+    | invoke _ASIM_ResolveNetworkProtocol("NetworkProtocolNumber")
+    | extend 
+        SrcUsername         = coalesce(FTNTFGTuser, FTNTFGTunauthuser),
+        IpAddr              = SrcIpAddr,
+        Src                 = SrcIpAddr,
+        Dst                 = DstIpAddr,
+        Dvc                 = DvcHostname,
+        DnsResponseCodeName = EventResultDetails,
+        EventType           = "Query",
+        EventSchemaVersion  = "0.1.7",
+        EventSchema         = "Dns",
+        EventCount          = int(1),
+        EventEndTime        = TimeGenerated,
+        EventStartTime      = TimeGenerated,
+        EventVendor         = "Fortinet",
+        EventProduct        = "FortiGate",
+        Domain              = DnsQuery,
+        DomainCategory      = UrlCategory
+    | extend 
+        User            = SrcUsername,
+        SrcUsernameType = _ASIM_GetUsernameType(SrcUsername),
+        SrcUserType     = _ASIM_GetUserType(SrcUsername, "")
+    | project-away FTNTFGTuser, FTNTFGTunauthuser, AdditionalExtensions, Computer, NetworkProtocolNumber
+};
+Parser(
+    starttime               = starttime,
+    endtime                 = endtime,
+    srcipaddr               = srcipaddr,
+    domain_has_any          = domain_has_any,
+    responsecodename        = responsecodename, 
+    response_has_ipv4       = response_has_ipv4, 
+    response_has_any_prefix = response_has_any_prefix, 
+    eventtype               = eventtype, 
+    disabled                = disabled
+)
+}
+
+
+
+//
+// Function Name: vimDnsGcp
+// Description: This ASIM parser supports filtering and normalizing Google cloud platform (GCP) DNS logs to the ASIM Dns normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimDnsGcp(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr']:string='*',
+    ['domain_has_any']:dynamic=dynamic([]),
+    ['responsecodename']:string='*',
+    ['response_has_ipv4']:string='*',
+    ['response_has_any_prefix']:dynamic=dynamic([]),
+    ['eventtype']:string='Query',
+    ['disabled']:bool=False)
+{
+// https://cloud.google.com/logging/docs/reference/v2/rest/v2/LogEntry
+let GCPSeverityTable=datatable(severity_s:string,EventSeverity:string)
+["DEFAULT","Informational",
+"DEBUG","Informational",
+"INFO","Informational",
+"NOTICE","Medium",
+"WARNING","Medium",
+"ERROR","High",
+"CRITICAL","High",
+"ALERT","High",
+"EMERGENCY","High"
+];
+let DNSQuery_GcpDns=(
+  starttime:datetime=datetime(null), endtime:datetime=datetime(null)
+  , srcipaddr:string='*'
+  , domain_has_any:dynamic=dynamic([]) 
+  , responsecodename:string='*', response_has_ipv4:string='*'
+  , response_has_any_prefix:dynamic=dynamic([]) , eventtype:string='Query'
+  , disabled:bool=false
+){
+  GCP_DNS_CL | where not(disabled)
+  | project-away MG, ManagementGroupName, RawData, SourceSystem, Computer
+  | where resource_type_s == "dns_query"
+  //  Pre-parsing filtering:
+  | where
+  (eventtype in ('lookup', 'Query')) // -- for now we support only lookup events
+    and (isnull(starttime) or TimeGenerated >= starttime)
+    and (isnull(endtime) or TimeGenerated <= endtime)
+    and (srcipaddr=='*' or has_ipv4(payload_sourceIP_s, srcipaddr))
+    and (array_length(domain_has_any) ==0 or payload_queryName_s has_any (domain_has_any))
+    and (responsecodename=='*' or payload_responseCode_s == responsecodename)
+    and (response_has_ipv4=='*' or has_ipv4(payload_rdata_s,response_has_ipv4) )
+    and (array_length(response_has_any_prefix) == 0 or has_any_ipv4_prefix(payload_rdata_s, response_has_any_prefix))
+  // *****************************************************************
+  | lookup GCPSeverityTable on severity_s
+  | project-rename
+      DnsQueryTypeName=payload_queryType_s,
+      DnsResponseName=payload_rdata_s, 
+      EventResultDetails=payload_responseCode_s,
+      NetworkProtocol=payload_protocol_s, 
+      SrcIpAddr=payload_sourceIP_s,
+      EventOriginalUid=insert_id_s,
+      EventOriginalSeverity=severity_s    
+  | extend
+      DnsQuery=trim_end(@'\.',payload_queryName_s), 
+      EventCount=int(1),
+      EventProduct='Cloud DNS',
+      EventVendor='GCP',
+      EventSchema='Dns',
+      EventSchemaVersion="0.1.3",
+      Dvc="GCPDNS" ,
+      EventType = iif (resource_type_s == "dns_query", "Query", resource_type_s),
+      EventResult=iff(EventResultDetails=~'NOERROR','Success','Failure'),
+      EventSubType='response',
+      EventEndTime=todatetime(timestamp_t)
+  | extend
+      EventStartTime = EventEndTime,
+      EventResult = iff (EventResultDetails=~'NOERROR','Success','Failure')
+  // -- Aliases
+  | extend 
+      DnsResponseCodeName=EventResultDetails, 
+      Domain=DnsQuery,
+      IpAddr=SrcIpAddr,
+      Src=SrcIpAddr
+  | project-away *_s, *_d, *_b, *_t
+  };
+  DNSQuery_GcpDns (starttime=starttime, endtime=endtime, srcipaddr=srcipaddr, domain_has_any=domain_has_any, responsecodename=responsecodename, response_has_ipv4=response_has_ipv4, response_has_any_prefix=response_has_any_prefix, eventtype=eventtype, disabled=disabled)
+}
+
+
+
+//
+// Function Name: vimDnsInfobloxNIOS
+// Description: This ASIM parser supports filtering and normalizing Infoblox NIOS DNS logs to the ASIM Dns normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimDnsInfobloxNIOS(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr']:string='*',
+    ['domain_has_any']:dynamic=dynamic([]),
+    ['responsecodename']:string='*',
+    ['response_has_ipv4']:string='*',
+    ['response_has_any_prefix']:dynamic=dynamic([]),
+    ['eventtype']:string='Query',
+    ['disabled']:bool=False)
+{
+let SyslogProjected = Syslog | project SyslogMessage, ProcessName, TimeGenerated, Computer, HostIP;
+let response = (
+  starttime:datetime=datetime(null), 
+  endtime:datetime=datetime(null), 
+  srcipaddr:string="*", 
+  domain_has_any:dynamic=dynamic([]), 
+  responsecodename:string="*", 
+  response_has_ipv4:string="*",
+  response_has_any_prefix:dynamic=dynamic([]),
+  eventtype:string="Query",
+  disabled:bool=false
+) 
+{
+  SyslogProjected
+  | where not(disabled)
+    and (eventtype in~ ('lookup', 'Query'))
+  // -- Pre filtering
+  | where
+    (isnull(starttime) or TimeGenerated >= starttime)
+    and (isnull(endtime) or TimeGenerated <= endtime) 
+  | where ProcessName == "named" and SyslogMessage has_all ("client", "query:", "response:")
+  | where 
+    (srcipaddr=="*" or has_ipv4(SyslogMessage, srcipaddr))
+    and (array_length(domain_has_any) == 0 or SyslogMessage has_any (domain_has_any))
+    and (responsecodename=="*" or SyslogMessage has responsecodename)
+    and (array_length(response_has_any_prefix)==0 or has_any_ipv4_prefix(SyslogMessage, response_has_any_prefix))
+    and (response_has_ipv4=='*' or has_ipv4(SyslogMessage,response_has_ipv4))
+  | parse SyslogMessage with *
+      "client " SrcIpAddr: string
+      "#" SrcPortNumber: string
+      " " NetworkProtocol: string
+      ": query: " DnsQuery: string
+      " " DnsQueryClassName: string
+      " " DnsQueryTypeName: string
+      " response: " DnsResponseCodeName: string
+      " " DnsFlags: string
+  | extend DnsResponseNameIndex= indexof(DnsFlags, " ")
+  | extend DnsResponseName =iif(DnsResponseNameIndex != "-1", substring(DnsFlags, DnsResponseNameIndex+1), "")
+  | extend DnsFlags =iif(DnsResponseNameIndex != "-1", substring(DnsFlags, 0, DnsResponseNameIndex), DnsFlags)
+  | extend SrcPortNumber = iif(SrcPortNumber has ':',replace_string(SrcPortNumber,':',''),SrcPortNumber)
+  | extend SrcPortNumber = toint(SrcPortNumber)
+  | extend EventSubType = "response"
+  | project-away SyslogMessage, ProcessName, DnsResponseNameIndex
+};
+let request =(
+  starttime:datetime=datetime(null), 
+  endtime:datetime=datetime(null), 
+  srcipaddr:string="*", 
+  domain_has_any:dynamic=dynamic([]), 
+  responsecodename:string="*", 
+  response_has_ipv4:string="*",
+  response_has_any_prefix:dynamic=dynamic([]),
+  eventtype:string="Query",
+  disabled:bool=false
+) 
+{
+  SyslogProjected 
+  | where not(disabled)
+  // -- Pre filtering
+    and (eventtype in~ ('lookup', 'Query'))
+    and (responsecodename=="*")
+    and (array_length(response_has_any_prefix)==0)
+    and (response_has_ipv4=='*')
+  | where
+    (isnull(starttime) or TimeGenerated >= starttime)
+    and (isnull(endtime) or TimeGenerated <= endtime) 
+  | where ProcessName == "named" and SyslogMessage has_all ("client", "query:") and SyslogMessage !has "response:"
+  | where 
+    (srcipaddr=="*" or has_ipv4(SyslogMessage, srcipaddr))
+    and (array_length(domain_has_any) == 0 or SyslogMessage has_any (domain_has_any))
+  | extend SyslogMessage = (split(SyslogMessage,"client "))[1]
+  | extend SyslogMessage = iif(SyslogMessage startswith "@", (substring(SyslogMessage, indexof(SyslogMessage, " ")+1)), SyslogMessage)
+  | extend SyslogMessage = replace_string(SyslogMessage,"\\ ","@@@")
+  | parse SyslogMessage with 
+      SrcIpAddr: string
+      "#" SrcPortNumber: int *
+      "query: " DnsQuery: string
+      " " DnsQueryClassName: string
+      " " DnsQueryTypeName: string
+      " " DnsFlags: string
+  | extend DnsQuery = replace_string (DnsQuery, '@@@', ' ')
+  | extend DnsFlags= tostring((split(DnsFlags," "))[0])
+  | extend 
+      EventSubType = "request",
+      DnsResponseCodeName = "NA"
+  | project-away SyslogMessage, ProcessName
+};
+let parser = (
+  starttime:datetime=datetime(null), 
+  endtime:datetime=datetime(null), 
+  srcipaddr:string="*", 
+  domain_has_any:dynamic=dynamic([]), 
+  responsecodename:string="*", 
+  response_has_ipv4:string="*",
+  response_has_any_prefix:dynamic=dynamic([]),
+  eventtype:string="Query",
+  disabled:bool=false
+) 
+{
+  union 
+    response (
+      starttime=starttime, 
+      endtime=endtime, 
+      srcipaddr=srcipaddr,
+      domain_has_any=domain_has_any,
+      responsecodename=responsecodename, 
+      response_has_ipv4=response_has_ipv4, 
+      response_has_any_prefix=response_has_any_prefix, 
+      eventtype=eventtype, 
+      disabled=disabled
+    ),
+    request (
+      starttime=starttime, 
+      endtime=endtime, 
+      srcipaddr=srcipaddr,
+      domain_has_any=domain_has_any,
+      responsecodename=responsecodename, 
+      response_has_ipv4=response_has_ipv4, 
+      response_has_any_prefix=response_has_any_prefix, 
+      eventtype=eventtype, 
+      disabled=disabled
+    )    
+  // -- Post-filtering
+  | where
+      (srcipaddr=="*" or  SrcIpAddr==srcipaddr)
+      and (array_length(domain_has_any) ==0 or DnsQuery has_any (domain_has_any))
+      and (responsecodename=="*" or DnsResponseCodeName has responsecodename)
+      and (array_length(response_has_any_prefix) ==0 or has_any_ipv4_prefix(DnsResponseName, response_has_any_prefix))
+      and (response_has_ipv4 == '*' or has_ipv4(DnsResponseName,response_has_ipv4))
+  | extend
+      EventCount=int(1),
+      EventStartTime=todatetime(TimeGenerated),
+      EventEndTime=todatetime(TimeGenerated),
+      EventProduct="NIOS",
+      EventVendor="Infoblox",
+      EventSchema="Dns",
+      EventSchemaVersion="0.1.3",
+      EventType="Query", 
+      EventResult=iff(EventSubType=="request" or DnsResponseCodeName=="NOERROR","Success","Failure"),
+      DvcIpAddr=iff (HostIP == "Unknown IP", "", HostIP)
+  // -- Aliases
+  | invoke _ASIM_ResolveDvcFQDN ("Computer")
+  | project-away Computer
+  | extend
+      Dvc=DvcHostname,
+      Domain=DnsQuery,
+      IpAddr=SrcIpAddr,
+      Src=SrcIpAddr,
+      EventResultDetails = DnsResponseCodeName
+  | project-away HostIP
+};
+parser  (
+  starttime=starttime, 
+  endtime=endtime, 
+  srcipaddr=srcipaddr,
+  domain_has_any=domain_has_any,
+  responsecodename=responsecodename, 
+  response_has_ipv4=response_has_ipv4, 
+  response_has_any_prefix=response_has_any_prefix, 
+  eventtype=eventtype, 
+  disabled=disabled)
+}
+
+
+
+//
+// Function Name: vimDnsMicrosoftNXlog
+// Description: This ASIM parser supports filtering and normalizing Microsoft DNS logs, collected using NXlog, to the ASIM Dns normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimDnsMicrosoftNXlog(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr']:string='*',
+    ['domain_has_any']:dynamic=dynamic([]),
+    ['responsecodename']:string='*',
+    ['response_has_ipv4']:string='*',
+    ['response_has_any_prefix']:dynamic=dynamic([]),
+    ['eventtype']:string='Query',
+    ['disabled']:bool=False)
+{
+let ASimDnsMicrosoftNXLog = (
+  starttime:datetime=datetime(null), endtime:datetime=datetime(null)
+  , srcipaddr:string='*'
+  , domain_has_any:dynamic=dynamic([]) 
+  , responsecodename:string='*', response_has_ipv4:string='*'
+  , response_has_any_prefix:dynamic=dynamic([]) , eventtype:string='Query'
+  , disabled:bool=false
+  ){
+let EventTypeTable=datatable(EventOriginalType:real,EventType:string)[
+    256, 'Query'
+  , 257, 'Query'
+  , 258, 'Query'
+  , 259, 'Query'
+  , 260, 'Query'
+  , 261, 'Query'
+  , 262, 'Query'
+  , 263, 'Dynamic update'
+  , 264, 'Dynamic update'
+  , 265, 'Zone XFR'
+  , 266, 'Zone XFR'
+  , 267, 'Zone XFR'
+  , 268, 'Zone XFR'
+  , 269, 'Zone XFR'
+  , 270, 'Zone XFR'
+  , 271, 'Zone XFR'
+  , 272, 'Zone XFR'
+  , 273, 'Zone XFR'
+  , 274, 'Zone XFR'
+  , 275, 'Zone XFR'
+  , 276, 'Zone XFR'
+  , 277, 'Dynamic update'
+  , 278, 'Dynamic update'
+  , 279, 'Query'
+  , 280, 'Query'
+];
+let EventSubTypeTable=datatable(EventOriginalType:real,EventSubType:string)[
+  256, 'request'
+, 257, 'response'
+, 258, 'response'
+, 259, 'response'
+, 260, 'request'
+, 261, 'response'
+, 262, 'response'
+, 263, 'request'
+, 264, 'response'
+, 265, 'request'
+, 266, 'request'
+, 267, 'response'
+, 268, 'response'
+, 269, 'request'
+, 270, 'request'
+, 271, 'response'
+, 272, 'response'
+, 273, 'request'
+, 274, 'request'
+, 275, 'response'
+, 276, 'response'
+, 277, 'request'
+, 278, 'response'
+, 279, 'response'
+, 280, 'response'
+];
+let EventResultTable=datatable(EventOriginalType:real,EventResult:string)[
+    256, 'NA'
+  , 257, 'Success'
+  , 258, 'Failure'
+  , 259, 'Failure'
+  , 260, 'NA'
+  , 261, 'NA'
+  , 262, 'Failure'
+  , 263, 'NA'
+  , 264, 'Based on RCODE'
+  , 265, 'NA'
+  , 266, 'NA'
+  , 267, 'Based on RCODE'
+  , 268, 'Based on RCODE'
+  , 269, 'NA'
+  , 270, 'NA'
+  , 271, 'Based on RCODE'
+  , 272, 'Based on RCODE'
+  , 273, 'NA'
+  , 274, 'NA'
+  , 275, 'Success'
+  , 276, 'Success'
+  , 277, 'NA'
+  , 278, 'Based on RCODE'
+  , 279, 'NA'
+  , 280, 'NA'
+];
+let RCodeTable=datatable(DnsResponseCode:int,ResponseCodeName:string)[
+    0,'NOERROR'
+  , 1,'FORMERR'
+  , 2,'SERVFAIL'
+  , 3,'NXDOMAIN'
+  , 4,'NOTIMP'
+  , 5,'REFUSED'
+  , 6,'YXDOMAIN'
+  , 7,'YXRRSET'
+  , 8,'NXRRSET'
+  , 9,'NOTAUTH'
+  , 10,'NOTZONE'
+  , 11,'DSOTYPENI'
+  , 16,'BADVERS'
+  , 16,'BADSIG'
+  , 17,'BADKEY'
+  , 18,'BADTIME'
+  , 19,'BADMODE'
+  , 20,'BADNAME'
+  , 21,'BADALG'
+  , 22,'BADTRUNC'
+  , 23,'BADCOOKIE'
+];
+let QTypeTable=datatable(DnsQueryType:int,QTypeName:string)[
+    0, 'Reserved'
+  , 1, 'A'
+  , 2, 'NS'
+  , 3, 'MD'
+  , 4, 'MF'
+  , 5, 'CNAME'
+  , 6, 'SOA'
+  , 7, 'MB'
+  , 8 ,'MG'
+  , 9 ,'MR'
+  , 10,'NULL'
+  , 11,'WKS'
+  , 12,'PTR'
+  , 13,'HINFO'
+  , 14,'MINFO'
+  , 15,'MX'
+  , 16,'TXT'
+  , 17,'RP'
+  , 18,'AFSDB'
+  , 19,'X25'
+  , 20,'ISDN'
+  , 21,'RT'
+  , 22,'NSAP'
+  , 23,'NSAP-PTR'
+  , 24,'SIG'
+  , 25,'KEY'
+  , 26,'PX'
+  , 27,'GPOS'
+  , 28,'AAAA'
+  , 29,'LOC'
+  , 30,'NXT'
+  , 31,'EID'
+  , 32,'NIMLOC'
+  , 33,'SRV'
+  , 34,'ATMA'
+  , 35,'NAPTR'
+  , 36,'KX'
+  , 37,'CERT'
+  , 38,'A6'
+  , 39,'DNAME'
+  , 40,'SINK'
+  , 41,'OPT'
+  , 42,'APL'
+  , 43,'DS'
+  , 44,'SSHFP'
+  , 45,'IPSECKEY'
+  , 46,'RRSIG'
+  , 47,'NSEC'
+  , 48,'DNSKEY'
+  , 49,'DHCID'
+  , 50,'NSEC3'
+  , 51,'NSEC3PARAM'
+  , 52,'TLSA'
+  , 53,'SMIMEA'
+  , 55,'HIP'
+  , 56,'NINFO'
+  , 57,'RKEY'
+  , 58,'TALINK'
+  , 59,'CDS'
+  , 60,'CDNSKEY'
+  , 61,'OPENPGPKEY'
+  , 62,'CSYNC'
+  , 63,'ZONEMD'
+  , 64,'SVCB'
+  , 65,'HTTPS'
+  , 99,'SPF'
+  , 100,'UINFO'
+  , 101,'UID'
+  , 102,'GID'
+  , 103,'UNSPEC'
+  , 104,'NID'
+  , 105,'L32'
+  , 106,'L64'
+  , 107,'LP'
+  , 108,'EUI48'
+  , 109,'EUI64'
+  , 249,'TKEY'
+  , 250,'TSIG'
+  , 251,'IXFR'
+  , 252,'AXFR'
+  , 253,'MAILB'
+  , 254,'MAILA'
+  , 255,'*'
+  , 256,'URI'
+  , 257,'CAA'
+  , 258,'AVC'
+  , 259,'DOA'
+  , 32768,'TA'
+  , 32769,'DLV'
+];
+NXLog_DNS_Server_CL | where not(disabled)
+| where EventID_d < 281
+| project-rename 
+   EventOriginalType=EventID_d
+| lookup EventTypeTable on EventOriginalType
+| extend
+  eventtype = iff (eventtype == "lookup", "Query", eventtype)
+//  Pre-parsing filtering:
+  | where
+    // Return empty list if response IPs are passed
+    (response_has_ipv4=='*')
+    and (array_length(response_has_any_prefix) ==0) 
+    and (eventtype=='*' or EventType == eventtype)   
+    and (isnull(starttime) or TimeGenerated >= starttime)
+    and (isnull(endtime) or TimeGenerated <= endtime) 
+    and (srcipaddr=='*' or Source_s==srcipaddr)
+    and (array_length(domain_has_any) ==0 or QNAME_s has_any (domain_has_any))
+    and (responsecodename=='*' or RCODE_s=~responsecodename)
+// --
+| project-rename
+    DnsFlags=Flags_s,
+    DnsQuery=QNAME_s,
+    DnsQueryType=QTYPE_s,
+    DnsResponseCode=RCODE_s,
+    DnsResponseName=PacketData_s,
+    Dvc=Hostname_s,
+    EventOriginalUid=GUID_g,
+    EventStartTime=EventTime_t,
+    SrcIpAddr=Source_s,
+    EventUid=_ItemId
+| extend
+    DnsQuery=trim_end(".",DnsQuery),
+    DnsQueryType=toint(DnsQueryType),
+    DnsResponseCode=toint(DnsResponseCode),
+    SrcPortNumber=toint(Port_s),
+    DvcHostname=Dvc,
+    DvcIpAddr=HostIP_s,
+    EventEndTime=EventStartTime,
+    EventProduct = "DNS Server",
+    EventSchemaVersion = "0.1.7",
+    EventVendor = "Microsoft",
+    EventSchema = "Dns",
+    EventCount = int(1),
+    NetworkProtocol=iff(TCP_s == "0","UDP","TCP"),
+    TransactionIdHex=tohex(toint(XID_s)),
+    DnsFlagsAuthenticated = tobool(AD_s),
+    DnsFlagsAuthoritative = tobool(AA_s),
+    DnsFlagsRecursionDesired = tobool(RD_s)
+| lookup EventSubTypeTable on EventOriginalType
+| lookup EventResultTable on EventOriginalType
+| lookup RCodeTable on DnsResponseCode
+| lookup QTypeTable on DnsQueryType
+| extend
+    EventResultDetails = case (isnotempty(ResponseCodeName), ResponseCodeName
+      , DnsResponseCode between (3841 .. 4095), 'Reserved for Private Use'
+      , 'Unassigned'),
+    EventOriginalType = tostring(EventOriginalType)
+| extend
+    Domain=DnsQuery,
+    DnsResponseCodeName=EventResultDetails,
+    DnsQueryTypeName = case (isnotempty(QTypeName), QTypeName
+      , DnsQueryType between (66 .. 98), 'Unassigned'
+      , DnsQueryType between (110 .. 248), 'Unassigned'
+      , DnsQueryType between (261 .. 32767), 'Unassigned'
+      , 'Unassigned'),
+    EventResult=iff (EventResult == "Based on RCODE", iff(DnsResponseCode == 0, "Success", "Failure"),EventResult)
+| extend
+  // Aliases
+    IpAddr = SrcIpAddr,
+    Src = SrcIpAddr
+| project-away
+    *_s, *_d, QTypeName, TenantId, SourceSystem, MG, ManagementGroupName, Computer, RawData, ResponseCodeName, EventReceivedTime_t, ProviderGuid_g, _ResourceId, eventtype
+};
+ASimDnsMicrosoftNXLog (
+  starttime=starttime,
+  endtime=endtime,
+  srcipaddr=srcipaddr,
+  domain_has_any=domain_has_any,
+  responsecodename=responsecodename,
+  response_has_ipv4=response_has_ipv4,
+  response_has_any_prefix=response_has_any_prefix,
+  eventtype=eventtype,
+  disabled=disabled)
+}
+
+
+
+//
+// Function Name: vimDnsMicrosoftOMS
+// Description: This ASIM parser supports filtering and normalizing Windows DNS logs, collected using the Log Analytics agent, to the ASIM Dns normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimDnsMicrosoftOMS(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr']:string='*',
+    ['domain_has_any']:dynamic=dynamic([]),
+    ['responsecodename']:string='*',
+    ['response_has_ipv4']:string='*',
+    ['response_has_any_prefix']:dynamic=dynamic([]),
+    ['eventtype']:string='Query',
+    ['disabled']:bool=False)
+{
+let EventTypeTable=datatable(EventId:int,EventType:string,EventSubType:string, EventResult:string)[
+   256, 'Query', 'request', 'NA'
+ , 257, 'Query', 'response', 'Success'
+ , 258, 'Query', 'response', 'Based on RCODE'
+ , 259, 'Query', 'response', 'Based on RCODE'
+ , 260, 'Query', 'request', 'NA'
+ , 261, 'Query', 'response', 'NA'
+ , 262, 'Query', 'response', 'Based on RCODE'
+ , 263, 'Update', 'request', 'NA'
+ , 264, 'Update', 'response', 'Based on RCODE'
+ , 265, 'XFR', 'request', 'NA' 
+ , 266, 'XFR', 'request', 'NA'
+ , 267, 'XFR', 'response', 'Based on RCODE'
+ , 268, 'XFR', 'response', 'Based on RCODE'
+ , 269, 'XFR', 'request', 'NA'
+ , 270, 'XFR', 'request', 'NA'
+ , 271, 'XFR', 'response', 'Based on RCODE'
+ , 272, 'XFR', 'response', 'Based on RCODE'
+ , 273, 'XFR', 'request', 'NA'
+ , 274, 'XFR', 'request', 'NA'
+ , 275, 'XFR', 'response', 'Success'
+ , 276, 'XFR', 'response', 'Success'
+ , 277, 'Update', 'request', 'NA'
+ , 278, 'Update', 'response', 'Based on RCODE'
+ , 279, 'Query', 'NA', 'NA'
+ , 280, 'Query', 'NA', 'NA'
+ ];
+ let RCodeTable=datatable(DnsResponseCode:int,DnsResponseCodeName:string)[
+    0, 'NOERROR'
+  , 1, "FORMERR"
+  , 2,"SERVFAIL"
+  , 3,'NXDOMAIN'
+  , 4,'NOTIMP'
+  , 5,'REFUSED'
+  , 6,'YXDOMAIN'
+  , 7,'YXRRSET'
+  , 8,'NXRRSET'
+  , 9,'NOTAUTH'
+  , 10,'NOTZONE'
+  , 11,'DSOTYPENI'
+  , 16,'BADVERS'
+  , 16,'BADSIG'
+  , 17,'BADKEY'
+  , 18,'BADTIME'
+  , 19,'BADMODE'
+  , 20,'BADNAME'
+  , 21,'BADALG'
+  , 22,'BADTRUNC'
+  , 23,'BADCOOKIE'];
+ let QueryTypeSymbols=datatable(QTypeSeq:string,QTypeName:string)[
+   "0", "Reserved",
+   "1", "A",
+   "2", "NS",
+   "3", "MD",
+   "4", "MF",
+   "5", "CNAME",
+   "6", "SOA",
+   "7", "MB",
+   "8", "MG",
+   "9", "MR",
+   "10", "NULL",
+   "11", "WKS",
+   "12", "PTR",
+   "13", "HINFO",
+   "14", "MINFO",
+   "15", "MX",
+   "16", "TXT",
+   "17", "RP",
+   "18", "AFSDB",
+   "19", "X25",
+   "20", "ISDN",
+   "21", "RT",
+   "22", "NSAP",
+   "23", "NSAP-PTR",
+   "24", "SIG",
+   "25", "KEY",
+   "26", "PX",
+   "27", "GPOS",
+   "28", "AAAA",
+   "29", "LOC",
+   "30", "NXT",
+   "31", "EID",
+   "32", "NIMLOC",
+   "33", "SRV",
+   "34", "ATMA",
+   "35", "NAPTR",
+   "36", "KX",
+   "37", "CERT",
+   "38", "A6",
+   "39", "DNAME",
+   "40", "SINK",
+   "41", "OPT",
+   "42", "APL",
+   "43", "DS",
+   "44", "SSHFP",
+   "45", "IPSECKEY",
+   "46", "RRSIG",
+   "47", "NSEC",
+   "48", "DNSKEY",
+   "49", "DHCID",
+   "50", "NSEC3",
+   "51", "NSEC3PARAM",
+   "52", "TLSA",
+   "53", "SMIMEA",
+   "54", "Unassigned",
+   "55", "HIP",
+   "56", "NINFO",
+   "57", "RKEY",
+   "58", "TALINK",
+   "59", "CDS",
+   "60", "CDNSKEY",
+   "61", "OPENPGPKEY",
+   "62", "CSYNC",
+   "99", "SPF",
+   "100", "UINFO",
+   "101", "UID",
+   "102", "GID",
+   "103", "UNSPEC",
+   "104", "NID",
+   "105", "L32",
+   "106", "L64",
+   "107", "LP",
+   "108", "EUI48",
+   "109", "EUI64",
+   "249", "TKEY",
+   "250", "TSIG",
+   "251", "IXFR",
+   "252", "AXFR",
+   "253", "MAILB",
+   "254", "MAILA",
+   "255", "All",
+   "256", "URI",
+   "257", "CAA",
+   "258", "AVC",
+   "259", "DOA",
+   "32768", "TA",
+   "32769", "DLV"];
+ let DNSQuery_MS=(
+   starttime:datetime=datetime(null), 
+   endtime:datetime=datetime(null),
+   srcipaddr:string='*',
+   domain_has_any:dynamic=dynamic([]),
+   responsecodename:string='*', 
+   response_has_ipv4:string='*',
+   response_has_any_prefix:dynamic=dynamic([]),
+   eventtype:string='Query',
+   disabled:bool=false
+   ){
+   let rcodenames=toscalar(RCodeTable | where DnsResponseCodeName == responsecodename | project DnsResponseCode);
+   DnsEvents | where not(disabled)
+   // ******************************************************************
+     //  Pre-parsing filtering:
+   | where
+         (isnull(starttime) or TimeGenerated >= starttime)
+         and (isnull(endtime) or TimeGenerated <= endtime)
+         and (srcipaddr=='*' or ClientIP==srcipaddr)
+         and (array_length(domain_has_any) ==0 or Name has_any (domain_has_any))
+         and (responsecodename=='*' or ResultCode == rcodenames)
+         and (response_has_ipv4=='*' or has_ipv4(IPAddresses,response_has_ipv4) )
+         and (array_length(response_has_any_prefix) ==0 or has_any_ipv4_prefix(IPAddresses, response_has_any_prefix)  )
+   // *****************************************************************
+   | where EventId < 500
+   | lookup QueryTypeSymbols on $left.QueryType == $right.QTypeSeq
+   | extend DnsQueryTypeName=coalesce(QTypeName, QueryType)
+   | lookup EventTypeTable on EventId
+   // late filtering:
+   | extend
+     eventtype = iff (eventtype == "lookup", "Query", eventtype)
+   | where (eventtype == "*" or eventtype == EventType)
+   | project-rename
+        Dvc=Computer ,
+        SrcIpAddr = ClientIP,
+        // DnsQueryTypeName=QueryType,
+        EventMessage = Message,
+        EventReportUrl = ReportReferenceLink,
+        DnsResponseName = IPAddresses,
+        DnsQuery = Name,
+        DnsResponseCode = ResultCode
+   | extend hostelements=split(Dvc,'.')
+ | extend DvcHostname=tostring(hostelements[0])
+        , DvcDomain=strcat_array( array_slice(hostelements,1,-1), '.')
+        , DvcFQDN = iff(Dvc contains ".",Dvc,"" )
+ | extend  DvcDomainType=iff(DvcFQDN !="","FQDN","" )
+   | project-away hostelements
+   | extend
+        EventCount=int(1),
+        EventStartTime=TimeGenerated,
+        EventVendor = "Microsoft",
+        EventProduct = "DNS Server",
+        EventSchema = "Dns",
+        EventSchemaVersion="0.1.3",
+        EventEndTime=TimeGenerated,
+        EventSeverity = tostring(Severity),
+        EventOriginalType = tostring(EventId)
+   | lookup RCodeTable on DnsResponseCode
+   | extend EventResultDetails = case (isnotempty(DnsResponseCodeName), DnsResponseCodeName
+                                   , DnsResponseCode between (3841 .. 4095), 'Reserved for Private Use'
+                                   , 'Unassigned'),
+     EventResult = iff (EventResult == "Based on RCODE", iff(DnsResponseCode == 0, "Success", "Failure"),EventResult)
+   // **************Aliases
+   | extend
+       DnsResponseCodeName=EventResultDetails,
+       Domain=DnsQuery,
+       IpAddr=SrcIpAddr,
+       Src=srcipaddr
+   | project-away 
+       SubType, QTypeName, QueryType, SourceSystem, TaskCategory, Remote*, Severity, Result, Confidence, Description, IndicatorThreatType, MaliciousIP, eventtype, EventId
+   };
+ DNSQuery_MS (starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, disabled)
+}
+
+
+
+//
+// Function Name: vimDnsMicrosoftSysmon
+// Description: This ASIM parser supports filtering and normalizing Sysmon for Windows DNS logs (event number 22) logs ingested in 'Event' table to the ASIM Dns normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimDnsMicrosoftSysmon(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr']:string='*',
+    ['domain_has_any']:dynamic=dynamic([]),
+    ['responsecodename']:string='*',
+    ['response_has_ipv4']:string='*',
+    ['response_has_any_prefix']:dynamic=dynamic([]),
+    ['eventtype']:string='Query',
+    ['disabled']:bool=False)
+{
+let RCodeTable=datatable(DnsResponseCode:int,DnsResponseCodeName:string)[
+  // See https://docs.microsoft.com/windows/win32/debug/system-error-codes--9000-11999-
+  0, 'NOERROR'
+, 9001, "FORMERR"
+, 9002,"SERVFAIL"
+, 9003,'NXDOMAIN'
+, 9004,'NOTIMP'
+, 9005,'REFUSED'
+, 9006,'YXDOMAIN'
+, 9007,'YXRRSET'
+, 9008,'NXRRSET'
+, 9009,'NOTAUTH'
+, 9010,'NOTZONE'
+, 9011,'DSOTYPENI'
+, 9016,'BADVERS'
+, 9016,'BADSIG'
+, 9017,'BADKEY'
+, 9018,'BADTIME'
+, 9019,'BADMODE'
+, 9020,'BADNAME'
+, 9021,'BADALG'
+, 9022,'BADTRUNC'
+, 9023,'BADCOOKIE'
+, 1460, 'TIMEOUT'
+];
+let ParsedDnsEvent_Event =(
+  starttime:datetime=datetime(null), endtime:datetime=datetime(null)
+  , srcipaddr:string='*'
+  , domain_has_any:dynamic=dynamic([]) 
+  , responsecodename:string='*', response_has_ipv4:string='*'
+  , response_has_any_prefix:dynamic=dynamic([]) , eventtype:string='Query'
+  , disabled:bool=false
+) 
+{
+  Event | where not(disabled)
+    | project EventID, EventData, Computer, TimeGenerated, _ResourceId, _SubscriptionId, Source, Type , _ItemId 
+    | where Source == "Microsoft-Windows-Sysmon" and EventID==22
+    | project-away Source, EventID
+    // -- Pre-parsing filtering (srcipaddr not available, responsecodename not optimizable)
+    | where
+      (eventtype in~ ('Query', 'lookup'))
+      and (srcipaddr=='*')
+      and (isnull(starttime) or TimeGenerated >= starttime)
+      and (isnull(endtime) or TimeGenerated <= endtime)
+      and (array_length(domain_has_any) ==0 or EventData has_any (domain_has_any))
+      and (response_has_ipv4=='*' or has_ipv4(EventData,response_has_ipv4) )
+      and (array_length(response_has_any_prefix) == 0 or has_any_ipv4_prefix(EventData, response_has_any_prefix))
+    // --
+    | parse-kv EventData as (
+        RuleName:string,
+        UtcTime:datetime, 
+        ProcessGuid:string,
+        ProcessId:string,
+        QueryName:string,
+        QueryStatus:int,
+        QueryResults:string,
+        Image:string,
+        User:string
+      )
+      with (regex=@'<Data Name="(\w+)">{?([^<]*?)}?</Data>')
+    | project-rename 
+        EventEndTime = UtcTime,
+        SrcProcessId = ProcessId,
+        SrcProcessGuid = ProcessGuid,
+        DnsQuery = QueryName,
+        DnsResponseCode = QueryStatus,
+        DnsResponseName = QueryResults,
+        SrcProcessName = Image,
+        SrcUsername = User
+    | project-away EventData      
+    // -- Post-filtering tests differnt for Event and WindowsEvent
+    | lookup RCodeTable on DnsResponseCode
+    | where  (responsecodename=="*" or DnsResponseCodeName has responsecodename) // -- filter is not optimized
+    // --
+  };
+let ParsedDnsEvent=(
+  starttime:datetime=datetime(null)
+  , endtime:datetime=datetime(null)
+  , srcipaddr:string='*'
+  , domain_has_any:dynamic=dynamic([]) 
+  , responsecodename:string='*'
+  , response_has_ipv4:string='*'
+  , response_has_any_prefix:dynamic=dynamic([]) 
+  , eventtype:string='lookup'
+  , disabled:bool=false
+) 
+{
+  ParsedDnsEvent_Event        (starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, disabled)
+// -- Post-filtering accurately now that message is parsed
+| where
+  (array_length(domain_has_any) == 0 or DnsQuery has_any (domain_has_any))
+  and (response_has_ipv4=='*' or has_ipv4(DnsResponseName,response_has_ipv4) )
+  and (array_length(response_has_any_prefix) == 0 or has_any_ipv4_prefix(DnsResponseName, response_has_any_prefix))
+// --
+| project-rename 
+    DvcHostname = Computer,
+    //EventUid = _ItemId,
+    DvcScopeId = _SubscriptionId,
+    DvcId = _ResourceId
+| extend
+    EventOriginalType = '22',
+    EventCount=int(1),
+    EventProduct = 'Sysmon',
+    EventVendor = 'Microsoft',
+    EventSchema = 'Dns',
+    EventSchemaVersion="0.1.6",
+    EventType = 'Query',
+    EventResult = iff (DnsResponseCode == 0,'Success','Failure'),
+    EventStartTime = EventEndTime,
+    EventSubType= 'response',
+    EventSeverity= iif (DnsResponseCode == 0, 'Informational', 'Low'),
+    SrcUsernameType = 'Windows',
+    RuleName = iff (RuleName == "-", "", RuleName),
+    DnsResponseName = iff (DnsResponseName == "-", "", DnsResponseName),
+    DnsResponseCodeName = iff (DnsResponseCodeName == "", "NA", DnsResponseCodeName),
+    DvcIdType = iff (DvcId != "", "AzureResourceId", ""),
+    EventUid = _ItemId
+// -- Aliases
+| extend 
+    EventResultDetails = DnsResponseCodeName,
+    Domain = DnsQuery,
+    Dvc = DvcHostname,
+    SrcHostname = DvcHostname,
+    Src = DvcHostname,
+    Hostname=DvcHostname,
+    DnsResponseCode = toint(iff (DnsResponseCode > 9000 and DnsResponseCode < 9100, DnsResponseCode-9000, DnsResponseCode)),
+    User = SrcUsername,
+    Process = SrcProcessName,
+    Rule = RuleName,
+    DvcAzureResourceId = DvcId
+    | project-away DvcAzureResourceId
+};
+ParsedDnsEvent (starttime=starttime, endtime=endtime, srcipaddr=srcipaddr, domain_has_any=domain_has_any, responsecodename=responsecodename, response_has_ipv4=response_has_ipv4, response_has_any_prefix=response_has_any_prefix, eventtype=eventtype, disabled=disabled)
+}
+
+
+
+//
+// Function Name: vimDnsMicrosoftSysmonWindowsEvent
+// Description: This ASIM parser supports normalizing Sysmon for Windows DNS logs (event number 22) logs ingested in 'Event' table to the ASIM Dns normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimDnsMicrosoftSysmonWindowsEvent(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr']:string='*',
+    ['domain_has_any']:dynamic=dynamic([]),
+    ['responsecodename']:string='*',
+    ['response_has_ipv4']:string='*',
+    ['response_has_any_prefix']:dynamic=dynamic([]),
+    ['eventtype']:string='Query',
+    ['disabled']:bool=False)
+{
+let RCodeTable=datatable(DnsResponseCode:int,DnsResponseCodeName:string)[
+  // See https://docs.microsoft.com/windows/win32/debug/system-error-codes--9000-11999-
+  0, 'NOERROR'
+, 9001, "FORMERR"
+, 9002,"SERVFAIL"
+, 9003,'NXDOMAIN'
+, 9004,'NOTIMP'
+, 9005,'REFUSED'
+, 9006,'YXDOMAIN'
+, 9007,'YXRRSET'
+, 9008,'NXRRSET'
+, 9009,'NOTAUTH'
+, 9010,'NOTZONE'
+, 9011,'DSOTYPENI'
+, 9016,'BADVERS'
+, 9016,'BADSIG'
+, 9017,'BADKEY'
+, 9018,'BADTIME'
+, 9019,'BADMODE'
+, 9020,'BADNAME'
+, 9021,'BADALG'
+, 9022,'BADTRUNC'
+, 9023,'BADCOOKIE'
+, 1460, 'TIMEOUT'
+];
+let ParsedDnsEvent_WindowsEvent =(
+  starttime:datetime=datetime(null), endtime:datetime=datetime(null)
+  , srcipaddr:string='*'
+  , domain_has_any:dynamic=dynamic([]) 
+  , responsecodename:string='*', response_has_ipv4:string='*'
+  , response_has_any_prefix:dynamic=dynamic([]) , eventtype:string='lookup'
+  , disabled:bool=false
+) 
+{
+  WindowsEvent | where not(disabled)
+  | project EventID, EventData, Computer, TimeGenerated, _ResourceId, _SubscriptionId, Provider, Type , _ItemId 
+  | where Provider == "Microsoft-Windows-Sysmon" and EventID == 22
+  | project-away Provider, EventID
+    // -- Pre-parsing filtering (srcipaddr not available)
+  | where
+    (eventtype=='lookup')
+    and (srcipaddr=='*')
+    and (isnull(starttime) or TimeGenerated >= starttime)
+    and (isnull(endtime) or TimeGenerated <= endtime)
+    and (array_length(domain_has_any) ==0 or EventData has_any (domain_has_any))
+    and (response_has_ipv4=='*' or has_ipv4(EventData,response_has_ipv4) )
+    and (array_length(response_has_any_prefix) == 0 or has_any_ipv4_prefix(EventData, response_has_any_prefix))
+  | extend DnsResponseCode = toint(EventData.QueryStatus)
+  | lookup RCodeTable on DnsResponseCode
+  | where  (responsecodename=="*" or DnsResponseCodeName has responsecodename) // -- filter is not optimized
+  // --
+  | extend 
+      RuleName = tostring(EventData.RuleName),
+      EventEndTime = todatetime(EventData.UtcTime),
+      SrcProcessGuid = tostring(EventData.ProcessGuid),
+      SrcProcessId = tostring(EventData.ProcessId),  
+      DnsQuery = tostring(EventData.QueryName),
+      DnsResponseName = tostring(EventData.QueryResults),
+      SrcProcessName = tostring(EventData.Image),
+      SrcUsername = tostring(EventData.User),
+      EventUid = _ItemId
+  | project-away EventData
+  | parse SrcProcessGuid with '{' SrcProcessGuid '}'
+};
+let ParsedDnsEvent=(
+  starttime:datetime=datetime(null), endtime:datetime=datetime(null)
+  , srcipaddr:string='*'
+  , domain_has_any:dynamic=dynamic([]) 
+  , responsecodename:string='*', response_has_ipv4:string='*'
+  , response_has_any_prefix:dynamic=dynamic([]) , eventtype:string='lookup'
+  , disabled:bool=false
+) 
+{
+  ParsedDnsEvent_WindowsEvent (starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, disabled)
+// -- Post-filtering accurately now that message is parsed
+| where
+  (array_length(domain_has_any) == 0 or DnsQuery has_any (domain_has_any))
+  and (response_has_ipv4=='*' or has_ipv4(DnsResponseName,response_has_ipv4) )
+  and (array_length(response_has_any_prefix) == 0 or has_any_ipv4_prefix(DnsResponseName, response_has_any_prefix))
+// --
+| project-rename 
+    DvcHostname = Computer,
+    //EventUid = _ItemId,
+    DvcScopeId = _SubscriptionId,
+    DvcId = _ResourceId
+| extend
+    EventOriginalType = '22',
+    EventCount=int(1),
+    EventProduct = 'Sysmon',
+    EventVendor = 'Microsoft',
+    EventSchema = 'Dns',
+    EventSchemaVersion="0.1.6",
+    EventType = 'Query',
+    EventResult = iff (DnsResponseCode == 0,'Success','Failure'),
+    EventStartTime = EventEndTime,
+    EventSubType= 'response',
+    EventSeverity= iif (DnsResponseCode == 0, 'Informational', 'Low'),
+    SrcUsernameType = 'Windows',
+    RuleName = iff (RuleName == "-", "", RuleName),
+    DnsResponseName = iff (DnsResponseName == "-", "", DnsResponseName),
+    DnsResponseCodeName = iff (DnsResponseCodeName == "", "NA", DnsResponseCodeName),
+    DvcIdType = iff (DvcId != "", "AzureResourceId", "")
+// -- Aliases
+| extend 
+    EventResultDetails = DnsResponseCodeName,
+    Domain = DnsQuery,
+    Dvc = DvcHostname,
+    SrcHostname = DvcHostname,
+    Src = DvcHostname,
+    Hostname=DvcHostname,
+    DnsResponseCode = toint(iff (DnsResponseCode > 9000 and DnsResponseCode < 9100, DnsResponseCode-9000, DnsResponseCode)),
+    User = SrcUsername,
+    Process = SrcProcessName,
+    Rule = RuleName,
+    DvcAzureResourceId = DvcId
+    | project-away DvcAzureResourceId
+};
+ParsedDnsEvent (starttime=starttime, endtime=endtime, srcipaddr=srcipaddr, domain_has_any=domain_has_any, responsecodename=responsecodename, response_has_ipv4=response_has_ipv4, response_has_any_prefix=response_has_any_prefix, eventtype=eventtype, disabled=disabled)
+}
+
+
+
+//
+// Function Name: vimDnsNative
+// Description: This ASIM parser supports filtering and normalizing the native Microsoft Sentinel DNS table (ASimDnsActivityLogs) to the ASIM DNS activity normalized schema. While the native table is ASIM compliant, the parser is needed to add capabilities, such as aliases, available only at query time. 
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimDnsNative(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr']:string='*',
+    ['domain_has_any']:dynamic=dynamic([]),
+    ['responsecodename']:string='*',
+    ['response_has_ipv4']:string='*',
+    ['response_has_any_prefix']:dynamic=dynamic([]),
+    ['eventtype']:string='Query',
+    ['disabled']:bool=False)
+{
+let parser=
+(
+  starttime:datetime=datetime(null), 
+  endtime:datetime=datetime(null),
+  srcipaddr:string='*',
+  domain_has_any:dynamic=dynamic([]),
+  responsecodename:string='*', 
+  response_has_ipv4:string='*',
+  response_has_any_prefix:dynamic=dynamic([]),
+  eventtype:string='Query',
+  disabled:bool=false
+)
+{
+  ASimDnsActivityLogs  | where not(disabled)
+  //  -- Pre-parsing filtering:
+  | where
+      (response_has_ipv4=='*') and (array_length(response_has_any_prefix) == 0) // -- Check that unsupported filters are set to default
+      and (isnull(starttime) or TimeGenerated >= starttime)
+      and (isnull(endtime) or TimeGenerated <= endtime)
+      and (srcipaddr=='*' or SrcIpAddr==srcipaddr)
+      and (array_length(domain_has_any) ==0 or DnsQuery has_any (domain_has_any))
+      and (responsecodename=='*' or EventResultDetails == responsecodename)
+      and (eventtype == "*" or eventtype == EventType or (eventtype == "lookup" and EventType == "Query")) // -- Support "lookup" as value for backward compatibility
+  // --
+  | project-rename
+      EventUid = _ItemId
+  | extend
+      EventStartTime = TimeGenerated,
+      EventEndTime = TimeGenerated,
+      Dvc = coalesce (Dvc, DvcFQDN, DvcHostname, DvcIpAddr, DvcId, _ResourceId, strcat (EventVendor,'/', EventProduct)),
+      Dst = coalesce (DstFQDN, DstHostname, DstIpAddr, DstDvcId),
+      Src = coalesce (SrcFQDN, SrcHostname, SrcIpAddr, SrcDvcId),
+      EventSchema = "Dns"
+  // -- Type fixes
+  | extend
+      ThreatConfidence = toint(ThreatConfidence),
+      ThreatFirstReportedTime = todatetime(ThreatFirstReportedTime),
+      ThreatIsActive = tobool(ThreatIsActive),
+      ThreatLastReportedTime = todatetime(ThreatLastReportedTime),
+      ThreatOriginalRiskLevel = tostring(ThreatOriginalRiskLevel),
+      ThreatRiskLevel = toint(ThreatRiskLevel)
+  //  -- Aliases here
+  | extend
+      DnsResponseCodeName=EventResultDetails,
+      Domain=DnsQuery,
+      IpAddr=SrcIpAddr,
+      SessionId=DnsSessionId,
+      Duration = DnsNetworkDuration,
+      Process = SrcProcessName,
+      User = SrcUsername,
+      Hostname = SrcHostname,
+      DvcScopeId = coalesce(DvcScopeId,_SubscriptionId)
+    | project-away
+        TenantId, SourceSystem, _ResourceId, _SubscriptionId
+};
+parser (starttime=starttime, endtime=endtime, srcipaddr=srcipaddr, domain_has_any=domain_has_any, responsecodename=responsecodename, response_has_ipv4=response_has_ipv4, response_has_any_prefix=response_has_any_prefix, eventtype=eventtype, disabled=disabled)
+}
+
+
+
+//
+// Function Name: vimDnsSentinelOne
+// Description: This ASIM parser supports normalizing SentinelOne logs to the ASIM DNS normalized schema. SentinelOne events are captured through SentinelOne data connector which ingests SentinelOne server objects such as Threats, Agents, Applications, Activities, Policies, Groups, and more events into Microsoft Sentinel through the REST API.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimDnsSentinelOne(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr']:string='*',
+    ['domain_has_any']:dynamic=dynamic([]),
+    ['responsecodename']:string='*',
+    ['response_has_ipv4']:string='*',
+    ['response_has_any_prefix']:dynamic=dynamic([]),
+    ['eventtype']:string='Query',
+    ['disabled']:bool=False)
+{
+let ThreatConfidenceLookup_undefined = datatable(
+    alertInfo_analystVerdict_s: string,
+    ThreatConfidence_undefined: int
+)
+    [
+    "FALSE_POSITIVE", 5,
+    "Undefined", 15,
+    "SUSPICIOUS", 25,
+    "TRUE_POSITIVE", 33 
+];
+let ThreatConfidenceLookup_suspicious = datatable(
+    alertInfo_analystVerdict_s: string,
+    ThreatConfidence_suspicious: int
+)
+    [
+    "FALSE_POSITIVE", 40,
+    "Undefined", 50,
+    "SUSPICIOUS", 60,
+    "TRUE_POSITIVE", 67 
+];
+let ThreatConfidenceLookup_malicious = datatable(
+    alertInfo_analystVerdict_s: string,
+    ThreatConfidence_malicious: int
+)
+    [
+    "FALSE_POSITIVE", 75,
+    "Undefined", 80,
+    "SUSPICIOUS", 90,
+    "TRUE_POSITIVE", 100 
+];
+let parser = (
+    starttime: datetime=datetime(null),
+    endtime: datetime=datetime(null),
+    srcipaddr: string='*', 
+    domain_has_any: dynamic=dynamic([]),
+    responsecodename: string='*',
+    response_has_ipv4: string='*',
+    response_has_any_prefix: dynamic=dynamic([]),
+    eventtype: string='Query',
+    disabled: bool=false
+    ) {
+    let alldata = SentinelOne_CL
+        | where not(disabled)
+            and (eventtype == '*' or eventtype == "Query")
+            and (isnull(starttime) or TimeGenerated >= starttime)
+            and (isnull(endtime) or TimeGenerated <= endtime)
+            and event_name_s == "Alerts." 
+            and alertInfo_eventType_s == "DNS"
+            and srcipaddr == '*'
+            and (array_length(domain_has_any) == 0 or alertInfo_dnsRequest_s has_any (domain_has_any))
+            and (response_has_ipv4 == '*' or has_ipv4(alertInfo_dnsResponse_s, response_has_ipv4))
+            and (array_length(response_has_any_prefix) == 0 or has_any_ipv4_prefix(alertInfo_dnsResponse_s, response_has_any_prefix))
+        | parse alertInfo_dnsResponse_s with * "type: " DnsQueryType: int " " RestMessage;
+    let undefineddata = alldata
+        | where ruleInfo_treatAsThreat_s == "UNDEFINED"
+        | lookup ThreatConfidenceLookup_undefined on alertInfo_analystVerdict_s;
+    let suspiciousdata = alldata
+        | where ruleInfo_treatAsThreat_s == "Suspicious"
+        | lookup ThreatConfidenceLookup_suspicious on alertInfo_analystVerdict_s;
+    let maaliciousdata = alldata
+        | where ruleInfo_treatAsThreat_s == "Malicious"
+        | lookup ThreatConfidenceLookup_malicious on alertInfo_analystVerdict_s;
+    union undefineddata, suspiciousdata, maaliciousdata
+    | extend 
+        DnsResponseCode = case(
+                      alertInfo_dnsResponse_s has "NoError" or alertInfo_dnsResponse_s has "No Error",
+                      int(0),
+                      alertInfo_dnsResponse_s has "FormErr" or alertInfo_dnsResponse_s has "Format Error",
+                      int(1),
+                      alertInfo_dnsResponse_s has "ServFail" or alertInfo_dnsResponse_s has "Server Failure",
+                      int(2),
+                      alertInfo_dnsResponse_s has "NXDomain" or alertInfo_dnsResponse_s has "Non-Existent Domain",
+                      int(3),
+                      alertInfo_dnsResponse_s has "NotImp" or alertInfo_dnsResponse_s has "Not Implemented",
+                      int(4),
+                      alertInfo_dnsResponse_s has "Refused" or alertInfo_dnsResponse_s has "Query Refused",
+                      int(5),
+                      alertInfo_dnsResponse_s has "YXDomain" or alertInfo_dnsResponse_s has "Name Exists when it should not",
+                      int(6),
+                      alertInfo_dnsResponse_s has "YXRRSet" or alertInfo_dnsResponse_s has "RR Set Exists when it should not",
+                      int(7),
+                      alertInfo_dnsResponse_s has "NXRRSet" or alertInfo_dnsResponse_s has "RR Set that should exist does not",
+                      int(8),
+                      alertInfo_dnsResponse_s has "NotAuth" or alertInfo_dnsResponse_s has "Server Not Authoritative for zone",
+                      int(9),
+                      alertInfo_dnsResponse_s has "NotAuth" or alertInfo_dnsResponse_s has "Not Authorized",
+                      int(9),
+                      alertInfo_dnsResponse_s has "NotZone" or alertInfo_dnsResponse_s has "Name not contained in zone",
+                      int(10),
+                      alertInfo_dnsResponse_s has "DSOTYPENI" or alertInfo_dnsResponse_s has "DSO-TYPE Not Implemented",
+                      int(11),
+                      alertInfo_dnsResponse_s has "Unassigned",
+                      int(12),
+                      alertInfo_dnsResponse_s has "BADVERS" or alertInfo_dnsResponse_s has "Bad OPT Version",
+                      int(16),
+                      alertInfo_dnsResponse_s has "BADSIG" or alertInfo_dnsResponse_s has "TSIG Signature Failure",
+                      int(16),
+                      alertInfo_dnsResponse_s has "BADKEY" or alertInfo_dnsResponse_s has "Key not recognized",
+                      int(17),
+                      alertInfo_dnsResponse_s has "BADTIME" or alertInfo_dnsResponse_s has "Signature out of time window",
+                      int(18),
+                      alertInfo_dnsResponse_s has "BADMODE" or alertInfo_dnsResponse_s has "Bad TKEY Mode",
+                      int(19),
+                      alertInfo_dnsResponse_s has "BADNAME" or alertInfo_dnsResponse_s has "Duplicate key name",
+                      int(20),
+                      alertInfo_dnsResponse_s has "BADALG" or alertInfo_dnsResponse_s has "Algorithm not supported",
+                      int(21),
+                      alertInfo_dnsResponse_s has "BADTRUNC" or alertInfo_dnsResponse_s has "Bad Truncation",
+                      int(22),
+                      alertInfo_dnsResponse_s has "BADCOOKIE" or alertInfo_dnsResponse_s has "Bad/missing Server Cookie",
+                      int(23),
+                      int(0)
+                  ),
+        AdditionalFields = bag_pack(
+                      "MachineType",
+                      agentDetectionInfo_machineType_s,
+                      "OsRevision",
+                      agentDetectionInfo_osRevision_s
+                  )
+    | extend EventResultDetails = _ASIM_LookupDnsResponseCode(DnsResponseCode)
+    | where (responsecodename == '*' or EventResultDetails =~ responsecodename)
+    | extend 
+        DnsQueryType = iff(isempty(DnsQueryType) and DnsResponseCode == 0, int(1), DnsQueryType),
+        ThreatConfidence = coalesce(ThreatConfidence_undefined, ThreatConfidence_suspicious, ThreatConfidence_malicious)
+    | project-rename
+        EventStartTime = sourceProcessInfo_pidStarttime_t,
+        DnsQuery = alertInfo_dnsRequest_s,
+        EventUid = _ItemId,
+        DnsResponseName = alertInfo_dnsResponse_s,
+        DvcId = agentDetectionInfo_uuid_g,
+        DvcOs = agentDetectionInfo_osName_s,
+        DvcOsVersion = agentDetectionInfo_osRevision_s,
+        EventOriginalType = alertInfo_eventType_s,
+        EventOriginalSeverity = ruleInfo_severity_s,
+        EventOriginalUid = alertInfo_dvEventId_s,
+        RuleName = ruleInfo_name_s,
+        SrcProcessId = sourceProcessInfo_pid_s,
+        SrcProcessName = sourceProcessInfo_name_s,
+        SrcUsername = sourceProcessInfo_user_s,
+        ThreatOriginalConfidence = ruleInfo_treatAsThreat_s
+    | invoke _ASIM_ResolveDvcFQDN('agentDetectionInfo_name_s')
+    | extend
+        Dvc = DvcId,
+        EventEndTime = EventStartTime,
+        EventResult = iff(DnsResponseCode == 0, "Success", "Failure"),
+        EventSubType = iff(isnotempty(DnsResponseName), "Response", "Request"),
+        EventOriginalResultDetails = DnsResponseCode,
+        DnsQueryTypeName = _ASIM_LookupDnsQueryType(DnsQueryType),
+        Rule = RuleName,
+        SrcDvcId = DvcId,
+        SrcHostname = DvcHostname,
+        EventSeverity = iff(EventOriginalSeverity == "Critical", "High", EventOriginalSeverity),
+        Domain = DnsQuery,
+        Process = SrcProcessName,
+        User = SrcUsername,
+        SrcUsernameType = _ASIM_GetUsernameType(SrcUsername),
+        SrcUserType = _ASIM_GetUserType(SrcUsername, "")
+    | extend 
+        Src = SrcHostname,
+        Hostname = SrcHostname,
+        DnsResponseCodeName = EventResultDetails,
+        DvcIdType = iff(isnotempty(DvcId), "Other", ""),
+        SrcDvcIdType = iff(isnotempty(SrcDvcId), "Other", "")
+    | extend
+        EventCount = int(1),
+        EventProduct = "SentinelOne",
+        EventSchema = "Dns",
+        EventSchemaVersion = "0.1.7",
+        EventType = "Query",
+        EventVendor = "SentinelOne",
+        DnsQueryClassName = "IN",
+        DnsQueryClass = int(1)
+    | project-away
+        *_d,
+        *_s,
+        *_g,
+        *_t,
+        *_b,
+        RestMessage,
+        _ResourceId,
+        TenantId,
+        RawData,
+        Computer,
+        MG,
+        ManagementGroupName,
+        SourceSystem,
+        ThreatConfidence_*
+};
+parser(
+    starttime=starttime,
+    endtime=endtime,
+    srcipaddr=srcipaddr,
+    domain_has_any=domain_has_any,
+    responsecodename=responsecodename, 
+    response_has_ipv4=response_has_ipv4, 
+    response_has_any_prefix=response_has_any_prefix, 
+    eventtype=eventtype, 
+    disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimDnsVectraAI
+// Description: This ASIM parser supports normalizing Vectra AI Steams logs to the ASIM DNS normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimDnsVectraAI(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr']:string='*',
+    ['domain_has_any']:dynamic=dynamic([]),
+    ['responsecodename']:string='*',
+    ['response_has_ipv4']:string='*',
+    ['response_has_any_prefix']:dynamic=dynamic([]),
+    ['eventtype']:string='Query',
+    ['disabled']:bool=False)
+{
+let parser=
+(
+  starttime:datetime=datetime(null), 
+  endtime:datetime=datetime(null),
+  srcipaddr:string='*',
+  domain_has_any:dynamic=dynamic([]),
+  responsecodename:string='*', 
+  response_has_ipv4:string='*',
+  response_has_any_prefix:dynamic=dynamic([]),
+  eventtype:string='Query',
+  disabled:bool=false
+) 
+{
+  let NetworkProtocolLookup = datatable(proto_d:real, NetworkProtocol:string)[
+      6, 'TCP',
+      17, 'UDP'];
+  let DnsClassLookup = datatable(DnsQueryClass:int, DnsQueryClassName: string)[
+      0, 'Reserved',
+      1, 'IN',
+      2, 'Unassigned',
+      3, 'CH',
+      4, 'HS',
+      254, 'None',
+      255, 'Any'
+  ];
+  let HostnameRegex = @'^[a-zA-Z0-9-]{1,61}$';
+  VectraStream_CL
+  | where not(disabled)
+  | where (isnull(starttime) or TimeGenerated >= starttime)
+      and (isnull(endtime) or TimeGenerated <= endtime)
+  | project-away MG, ManagementGroupName, RawData, SourceSystem, Computer
+  | where metadata_type_s == 'metadata_dns'
+  | where (srcipaddr == '*' or id_orig_h_s == srcipaddr)
+  | where (array_length(domain_has_any) == 0 or query_s has_any(domain_has_any))
+  | where (responsecodename == '*' or rcode_name_s =~ responsecodename)
+  | where (response_has_ipv4 == '*' or has_ipv4(answers_s, response_has_ipv4))
+  | where (array_length(response_has_any_prefix) == 0 or has_any_ipv4_prefix(answers_s, response_has_any_prefix))
+  | where (eventtype == '*' or eventtype in~ ('Query', 'lookup'))
+  | project-rename
+      DvcDescription = hostname_s,
+      DstDescription = resp_hostname_s,
+      SrcDescription = orig_hostname_s,
+      DnsFlagsAuthoritative = AA_b,
+      DnsFlagsRecursionAvailable = RA_b,
+      DnsFlagsRecursionDesired = RD_b,
+      DnsFlagsTruncated = TC_b,
+      DnsResponseName = answers_s,
+      DnsQuery = query_s,
+      DnsQueryTypeName = qtype_name_s,
+      DstIpAddr = id_resp_h_s,
+      DnsSessionId = community_id_s,
+      SrcIpAddr = id_orig_h_s,
+      DstDvcId = resp_huid_s,
+      SrcDvcId = orig_huid_s,
+      DvcId = sensor_uid_s,
+      EventOriginalUid = uid_s
+  | extend
+      DstHostname = iff (DstDescription startswith "IP-" or not(DstDescription matches regex HostnameRegex), "", DstDescription),
+      SrcHostname = iff (SrcDescription startswith "IP-" or not(SrcDescription matches regex HostnameRegex), "", SrcDescription),
+      DvcHostname = iff (DvcDescription startswith "IP-" or not(DvcDescription matches regex HostnameRegex), "", DvcDescription),
+      NetworkProtocolVersion = toupper(id_ip_ver_s),
+      DnsResponseCode = toint(rcode_d),
+      DnsResponseCodeName = toupper(rcode_name_s),
+      DnsQueryClass = toint(qclass_d),
+      DnsQueryType = toint(qtype_d),
+      DstPortNumber = toint(id_resp_p_d),
+      EventCount = toint(1),
+      EventEndTime = unixtime_milliseconds_todatetime(ts_d),
+      EventOriginalSubType = tostring(split(metadata_type_s, '_')[1]),
+      EventProduct = 'Vectra Stream',
+      EventResult = case(tolong(rcode_d) > 0, "Failure", "Success"),
+      EventSchema = 'Dns', 
+      EventSchemaVersion='0.1.3',
+      EventType = 'Query',
+      EventVendor = 'Vectra AI',
+      SrcDvcIdType = 'VectraId',
+      DstDvcIdType = 'VectraId',
+      DvcIdType = 'VectraId',
+      SrcPortNumber = toint(id_orig_p_d),
+      TransactionIdHex = tostring(toint(trans_id_d)),
+      EventSubType = iff (saw_reply_b, "response", "request")
+  | lookup DnsClassLookup on DnsQueryClass
+  | lookup NetworkProtocolLookup on proto_d
+  | extend
+      EventResultDetails = DnsResponseCodeName,
+      EventStartTime = EventEndTime,
+      SessionId = DnsSessionId,
+      Domain = DnsQuery,
+      Hostname = DstHostname,
+      IpAddr = SrcIpAddr,
+      Dvc = coalesce (DvcId, DvcDescription),
+      Src = SrcIpAddr,
+      Dst = DstIpAddr
+  | project-away
+      *_d, *_s, *_b, *_g
+    };
+parser(starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, disabled)
+}
+
+
+
+//
+// Function Name: vimDnsZscalerZIA
+// Description: This ASIM parser supports filtering and normalizing Zscaler ZIA DNS logs to the ASIM Dns normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimDnsZscalerZIA(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr']:string='*',
+    ['domain_has_any']:dynamic=dynamic([]),
+    ['responsecodename']:string='*',
+    ['response_has_ipv4']:string='*',
+    ['response_has_any_prefix']:dynamic=dynamic([]),
+    ['eventtype']:string='Query',
+    ['disabled']:bool=False)
+{
+let ZscalerDNSevents=(
+  starttime:datetime=datetime(null), endtime:datetime=datetime(null)
+  , srcipaddr:string='*'
+  , domain_has_any:dynamic=dynamic([]) 
+  , responsecodename:string='*', response_has_ipv4:string='*'
+  , response_has_any_prefix:dynamic=dynamic([]) , eventtype:string='Query'
+  , disabled:bool=false
+){
+  CommonSecurityLog 
+  | where (isnull(starttime) or TimeGenerated >= starttime)
+      and (isnull(endtime) or TimeGenerated <= endtime) 
+  | where not(disabled)
+  | where DeviceProduct == "NSSDNSlog"
+  //  -- Pre-parsing filtering
+  | where
+      (eventtype in~ ('lookup', 'Query')
+      and (srcipaddr=='*' or SourceIP==srcipaddr)
+      and (array_length(domain_has_any) == 0 or DeviceCustomString5 has_any (domain_has_any))
+      and (response_has_ipv4=='*' or has_ipv4(DeviceCustomString6,response_has_ipv4) )
+      and (array_length(response_has_any_prefix) == 0 or has_any_ipv4_prefix(DeviceCustomString6, response_has_any_prefix))
+      and (responsecodename in ('*', 'NOERROR') or DeviceCustomString6 =~ responsecodename)) // NOERROR is determined only later
+  | extend
+      EventResultDetails = iff (DeviceCustomString6 matches regex @'^([A-Z_]+)$', DeviceCustomString6, 'NOERROR')
+  | where
+      (responsecodename=='*' or EventResultDetails =~ responsecodename)
+  // --
+  | project-rename
+      Dvc=Computer , 
+      SrcIpAddr = SourceIP, 
+      SrcUsername = SourceUserName,
+      DstIpAddr = DestinationIP, 
+      DstPortNumber = DestinationPort, 
+      EventProductVersion = DeviceVersion, 
+      DnsQueryTypeName = DeviceCustomString4, 
+      DnsQuery = DeviceCustomString5, 
+      SrcUserDepartment = DeviceCustomString1, // Not part of the standard schema
+      reqaction = DeviceCustomString2, 
+      resaction = DeviceCustomString3, 
+      DvcUsername = SourceUserID,
+      DvcZone = SourceUserPrivileges,
+      SrcHostname = DeviceName,
+      NetworkProtocol = Protocol,
+      EventOriginalSeverity = LogSeverity,
+      EventMessage = Message
+  | extend
+      EventCount=int(1), 
+      EventStartTime=TimeGenerated, 
+      EventVendor = "Zscaler", 
+      EventProduct = "ZIA DNS", 
+      EventSchema = "Dns",
+      EventSchemaVersion="0.1.3", 
+      EventEndTime=TimeGenerated, 
+      SrcUsernameType = "UPN",
+      EventSubType = iff(resaction == 'None', 'request', 'response'), 
+      DvcAction = iff(resaction == 'None', reqaction, resaction), 
+      EventType = 'Query', 
+      RuleName = strcat (FlexString1, " / ", FlexString2),
+      // -- Adjustment to support both old and new CSL fields.
+      UrlCategory = coalesce(column_ifexists("DeviceEventCategory", ""), extract("cat=(.*)", 1, AdditionalExtensions), ""),  
+      DnsNetworkDuration = coalesce(
+        toint(column_ifexists ("FieldDeviceCustomNumber1", int(null))), 
+        toint(column_ifexists ("DeviceCustomNumber1",int(null)))
+      )
+   | extend 
+      EventResult = case (
+        EventSubType == 'request', 'NA', 
+        EventResultDetails == 'NOERROR', 'Success',
+        'Failure'),
+      DnsResponseName = iff (EventResultDetails == 'NOERROR', DeviceCustomString6, '')
+  // -- Aliases
+  | extend
+      DnsResponseCodeName = EventResultDetails,
+      Domain = DnsQuery,
+      IpAddr = SrcIpAddr,
+      Src = SrcIpAddr,
+      Hostname = SrcHostname,
+      Dst = DstIpAddr,
+      DvcHostname = Dvc,
+      Duration = DnsNetworkDuration,
+      User = SrcUsername,
+  // -- Entity identifier explicit aliases
+      SrcUserUpn = SrcUsername
+  | project-away AdditionalExtensions, CommunicationDirection, Device*, Destination*, EndTime, ExternalID, File*, Flex*, IndicatorThreatType, Malicious*, Old*, OriginalLogSeverity, Process*, ReceiptTime, ReceivedBytes, Remote*, Request*, Sent*, SimplifiedDeviceAction, Source*, StartTime, TenantId, ThreatConfidence, ThreatDescription, ThreatSeverity, EventOutcome, FieldDevice*, ExtID, Reason, ApplicationProtocol, ReportReferenceLink, Activity, resaction, reqaction
+  };
+ZscalerDNSevents (starttime, endtime, srcipaddr, domain_has_any, responsecodename, response_has_ipv4, response_has_any_prefix, eventtype, disabled)
+}
+
+
+

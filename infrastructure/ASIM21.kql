@@ -1,0 +1,2551 @@
+//
+// Function Name: vimProcessTerminateVMwareCarbonBlackCloud
+// Description: This ASIM parser supports normalizing VMware Carbon Black Cloud logs to the ASIM Process Terminate normalized schema. VMware Carbon Black Cloud events are captured through VMware Carbon Black Cloud data connector which ingests Carbon Black Audit, Notification and Event data into Microsoft Sentinel through the REST API.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimProcessTerminateVMwareCarbonBlackCloud(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['commandline_has_any']:dynamic=dynamic([]),
+    ['commandline_has_all']:dynamic=dynamic([]),
+    ['commandline_has_any_ip_prefix']:dynamic=dynamic([]),
+    ['actingprocess_has_any']:dynamic=dynamic([]),
+    ['targetprocess_has_any']:dynamic=dynamic([]),
+    ['parentprocess_has_any']:dynamic=dynamic([]),
+    ['actorusername_has']:string='*',
+    ['dvcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['eventtype']:string='*',
+    ['disabled']:bool=false)
+{
+let EventFieldsLookup = datatable(
+  sensor_action_s: string,
+  DvcAction: string,
+  EventResult: string
+)[
+    "ACTION_ALLOW", "Allow", "Success",
+    "ACTION_BLOCK", "Block", "Failure",
+    "ACTION_TERMINATE", "Terminate", "Failure",
+    "ACTION_BREAK", "Break", "Failure",
+    "ACTION_SUSPEND", "Suspend", "Failure",
+    "", "", "Success"
+];
+let parser = (
+    starttime: datetime=datetime(null),
+    endtime: datetime=datetime(null),
+    commandline_has_any: dynamic=dynamic([]),
+    commandline_has_all: dynamic=dynamic([]),
+    commandline_has_any_ip_prefix: dynamic=dynamic([]),
+    actingprocess_has_any: dynamic=dynamic([]),
+    targetprocess_has_any: dynamic=dynamic([]),
+    parentprocess_has_any: dynamic=dynamic([]),
+    actorusername_has: string='*',
+    dvcipaddr_has_any_prefix: dynamic=dynamic([]),
+    dvchostname_has_any: dynamic=dynamic([]),
+    eventtype: string='*',
+    disabled: bool=false) {
+    CarbonBlackEvents_CL
+    | where not(disabled)
+    | where (isnull(starttime) or TimeGenerated >= starttime)
+        and (isnull(endtime) or TimeGenerated <= endtime)
+        and (eventType_s == "endpoint.event.procend" and isnotempty(process_pid_d))
+        and (eventtype == '*' or eventtype == 'ProcessTerminated')
+        and array_length(parentprocess_has_any) == 0
+        and (array_length(dvcipaddr_has_any_prefix) == 0 or has_any_ipv4_prefix(device_external_ip_s, dvcipaddr_has_any_prefix)) 
+        and (actorusername_has == '*' or process_username_s has actorusername_has)  
+        and (array_length(commandline_has_all) == 0 or target_cmdline_s has_all (commandline_has_all) or process_cmdline_s has_all (commandline_has_all))
+        and (array_length(commandline_has_any) == 0 or target_cmdline_s has_any (commandline_has_any) or process_cmdline_s has_any (commandline_has_any)) 
+        and (array_length(commandline_has_any_ip_prefix) == 0 or has_any_ipv4_prefix(target_cmdline_s, commandline_has_any_ip_prefix) or has_any_ipv4_prefix(process_cmdline_s, commandline_has_any_ip_prefix)) 
+        and (array_length(actingprocess_has_any) == 0 or parent_path_s has_any (actingprocess_has_any)) 
+        and (array_length(targetprocess_has_any) == 0 or process_path_s has_any (targetprocess_has_any)) 
+        and (array_length(dvchostname_has_any) == 0 or device_name_s has_any (dvchostname_has_any))
+    | parse process_hash_s with * '["' TargetProcessMD5: string '","' TargetProcessSHA256: string '"]'
+    | parse parent_hash_s with * '["' ActingProcessMD5: string  '","' ActingProcessSHA256: string '"]'
+    | lookup EventFieldsLookup on sensor_action_s
+    | extend
+        EventStartTime = todatetime(split(createTime_s, '+')[0]),
+        TargetProcessId = tostring(toint(process_pid_d)),
+        ActingProcessId = tostring(toint(parent_pid_d)),
+        ActorUsername = process_username_s,
+        TargetProcessCommandLine = coalesce(target_cmdline_s, process_cmdline_s),
+        AdditionalFields = bag_pack(
+                    "org_key", org_key_s,
+                    "alert_id", alert_id_g,
+                    "process_reputation", process_reputation_s,
+                    "parent_reputation", parent_reputation_s,
+                    "parent_guid", parent_guid_s,
+                    "process_guid", process_guid_s
+                )
+    | invoke _ASIM_ResolveDvcFQDN('device_name_s')
+    | project-rename 
+        TargetProcessName = process_path_s,
+        DvcIpAddr = device_external_ip_s,
+        DvcScope = device_group_s,
+        ActingProcessCommandLine = parent_cmdline_s,
+        DvcId = device_id_s,
+        DvcOriginalAction = sensor_action_s,
+        DvcOs = device_os_s,
+        EventOriginalType = action_s,
+        EventOriginalUid = event_id_g,
+        EventOwner = event_origin_s,
+        ActingProcessName = parent_path_s,
+        EventUid = _ItemId
+    | extend
+        EventCount = int(1),
+        EventProduct = "Carbon Black Cloud",
+        EventSchemaVersion = "0.1.4",
+        EventType = "ProcessTerminated",
+        EventVendor = "VMware",
+        EventSchema = "ProcessEvent"
+    | extend 
+        Dvc = coalesce(DvcFQDN, DvcId, DvcHostname, DvcIpAddr),
+        EventEndTime = EventStartTime,
+        Hash = coalesce(TargetProcessSHA256, TargetProcessMD5),
+        CommandLine = TargetProcessCommandLine,
+        Process = TargetProcessName,
+        User = ActorUsername,
+        DvcIdType = iff(isnotempty(DvcId), "Other", ""),
+        ActorUsernameType = _ASIM_GetUsernameType(ActorUsername),
+        ActorUserType = _ASIM_GetUserType(ActorUsername, ""),
+        HashType = case(
+              isnotempty(TargetProcessSHA256),
+              "TargetProcessSHA256",
+              isnotempty(TargetProcessMD5),
+              "TargetProcessMD5",
+              ""
+          )
+    | project-away
+        *_s,
+        *_d,
+        *_g,
+        *_b,
+        _ResourceId,
+        Computer,
+        MG,
+        ManagementGroupName,
+        RawData,
+        SourceSystem,
+        TenantId
+};
+parser(
+    starttime=starttime, 
+    endtime=endtime, 
+    commandline_has_any=commandline_has_any,
+    commandline_has_all=commandline_has_all,
+    commandline_has_any_ip_prefix=commandline_has_any_ip_prefix,
+    actingprocess_has_any=actingprocess_has_any,
+    targetprocess_has_any=targetprocess_has_any,
+    parentprocess_has_any=parentprocess_has_any,
+    actorusername_has=actorusername_has,
+    dvcipaddr_has_any_prefix=dvcipaddr_has_any_prefix,
+    dvchostname_has_any=dvchostname_has_any,
+    eventtype=eventtype,
+    disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: ASimRegistry
+// Description: This ASIM parser supports normalizing Registry Event logs from all supported sources to the ASIM Registry Event normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimRegistry(    ['pack']:bool=false)
+{
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludeASimRegistry') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser| where isnotempty(SourceSpecificParser));
+let ASimBuiltInDisabled=toscalar('ExcludeASimRegistryEventBuiltIn' in (DisabledParsers) or 'Any' in (DisabledParsers));
+let parser=(pack:bool=false){
+union isfuzzy=true
+  vimRegistryEventEmpty,
+  ASimRegistryEventMicrosoft365D(disabled=(ASimBuiltInDisabled or ('ExcludeASimRegistryEventMicrosoft365D' in (DisabledParsers) ))),
+  ASimRegistryEventMicrosoftSysmon(disabled=(ASimBuiltInDisabled or ('ExcludeASimRegistryEventMicrosoftSysmon' in (DisabledParsers) ))),
+  ASimRegistryEventMicrosoftWindowsEvent(disabled=(ASimBuiltInDisabled or ('ExcludeASimRegistryEventMicrosoftWindowsEvent' in (DisabledParsers) ))),
+  ASimRegistryEventMicrosoftSysmonWindowsEvent(disabled=(ASimBuiltInDisabled or ('ExcludeASimRegistryEventMicrosoftSysmonWindowsEvent' in (DisabledParsers) ))),
+  ASimRegistryEventMicrosoftSecurityEvent(disabled=(ASimBuiltInDisabled or ('ExcludeASimRegistryEventMicrosoftSecurityEvent' in (DisabledParsers) ))),
+  ASimRegistryEventSentinelOne(disabled=(ASimBuiltInDisabled or ('ExcludeASimRegistryEventSentinelOne' in (DisabledParsers) ))),
+  ASimRegistryEventNative(disabled=(ASimBuiltInDisabled or ('ExcludeASimRegistryEventNative' in (DisabledParsers) ))),
+  ASimRegistryEventVMwareCarbonBlackCloud(disabled=(ASimBuiltInDisabled or ('ExcludeASimRegistryEventVMwareCarbonBlackCloud' in (DisabledParsers) ))),
+  ASimRegistryEventTrendMicroVisionOne(disabled=(ASimBuiltInDisabled or ('ExcludeASimRegistryEventTrendMicroVisionOne' in (DisabledParsers) )))
+  };
+  parser (pack=pack)
+}
+
+
+
+//
+// Function Name: ASimRegistryEventMicrosoft365D
+// Description: This ASIM parser supports normalizing Microsoft 365 Defender for endpoint logs, produced by the Microsoft Sentinel Microsoft 365 Defender connector, to the ASIM Registry Event normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimRegistryEventMicrosoft365D(    ['disabled']:bool=false)
+{
+let RegistryType = datatable (TypeCode: string, TypeName: string)
+  [
+  "None", "Reg_None",
+  "String", "Reg_Sz",
+  "ExpandString", "Reg_Expand_Sz",
+  "Binary", "Reg_Binary",
+  "Dword", "Reg_DWord",
+  "MultiString", "Reg_Multi_Sz",
+  "QWord", "Reg_QWord"
+];
+let parser = (
+    disabled: bool=false
+    ) {
+    DeviceRegistryEvents
+    | where not(disabled)
+    | extend
+        // Event
+        EventOriginalUid = tostring(ReportId), 
+        EventCount = int(1), 
+        EventProduct = 'M365 Defender for Endpoint', 
+        EventVendor = 'Microsoft', 
+        EventSchemaVersion = '0.1.0', 
+        EventStartTime = TimeGenerated, 
+        EventEndTime = TimeGenerated, 
+        EventType = ActionType,
+        // Registry
+        RegistryKey = iff (ActionType in ("RegistryKeyDeleted", "RegistryValueDeleted"), PreviousRegistryKey, RegistryKey),
+        RegistryValue = iff (ActionType == "RegistryValueDeleted", PreviousRegistryValueName, RegistryValueName),
+        // RegistryValueType -- original name is fine 
+        // RegistryValueData -- original name is fine 
+        RegistryKeyModified = iff (ActionType == "RegistryKeyRenamed", PreviousRegistryKey, ""),
+        RegistryValueModified = iff (ActionType == "RegistryValueSet", PreviousRegistryValueName, ""),
+        // RegistryValueTypeModified -- Not provided by Defender
+        RegistryValueDataModified = PreviousRegistryValueData
+    | lookup RegistryType on $left.RegistryValueType == $right.TypeCode
+    | extend RegistryValueType = TypeName
+    | project-away
+        TypeName,
+        PreviousRegistryKey,
+        PreviousRegistryValueName,
+        PreviousRegistryValueData
+    // Device
+    | extend
+        DvcHostname = DeviceName, 
+        DvcId = DeviceId, 
+        Dvc = DeviceName 
+    // Users
+    | extend
+        ActorUsername = iff (InitiatingProcessAccountDomain == '', InitiatingProcessAccountName, strcat(InitiatingProcessAccountDomain, '\\', InitiatingProcessAccountName)), 
+        ActorUsernameType = iff(InitiatingProcessAccountDomain == '', 'Simple', 'Windows'), 
+        ActorUserIdType = 'SID'
+    //| project-away InitiatingProcessAccountDomain, InitiatingProcessAccountName
+    | project-rename
+        ActorUserId = InitiatingProcessAccountSid, 
+        ActorUserAadId = InitiatingProcessAccountObjectId, 
+        ActorUserUpn = InitiatingProcessAccountUpn
+    // Processes
+    | extend
+        ActingProcessId = tostring(InitiatingProcessId), 
+        ParentProcessId = tostring(InitiatingProcessParentId) 
+    | project-away InitiatingProcessId, InitiatingProcessParentId
+    | project-rename
+        ParentProcessName = InitiatingProcessParentFileName, 
+        ParentProcessCreationTime = InitiatingProcessParentCreationTime, 
+        ActingProcessName = InitiatingProcessFolderPath, 
+        ActingProcessFileName = InitiatingProcessFileName,
+        ActingProcessCommandLine = InitiatingProcessCommandLine, 
+        ActingProcessMD5 = InitiatingProcessMD5, 
+        ActingProcessSHA1 = InitiatingProcessSHA1, //OK
+        ActingProcessSHA256 = InitiatingProcessSHA256, 
+        ActingProcessIntegrityLevel = InitiatingProcessIntegrityLevel, 
+        ActingProcessTokenElevation = InitiatingProcessTokenElevation, 
+        ActingProcessCreationTime = InitiatingProcessCreationTime 
+    // -- aliases
+    | extend 
+        Username = ActorUsername,
+        UserId = ActorUserId,
+        UserIdType = ActorUserIdType,
+        User = ActorUsername,
+        CommandLine = ActingProcessCommandLine,
+        Process = ActingProcessName
+};
+parser (
+    disabled = disabled
+)
+}
+
+
+
+//
+// Function Name: ASimRegistryEventMicrosoftSecurityEvent
+// Description: This ASIM parser supports normalizing Microsoft Windows events (event numbers 4657 and 4663), logs ingested in 'SecurityEvent' table to the ASIM Registry Event normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimRegistryEventMicrosoftSecurityEvent(    ['disabled']:bool=false)
+{
+let parser = (
+disabled: bool=false
+) {
+let ASIM_GetAccountType = (sid: string) { 
+iif ( 
+sid in ("S-1-0-0", "S-1-5-18", "S-1-5-19", "S-1-5-20"),
+"Simple"
+    ,
+"Windows"
+)
+};
+    let ASIM_ParseSecurityEvents = (SecurityEvent: (SubjectDomainName: string, SubjectUserName: string, ProcessId: string, ObjectName: string, SubjectUserSid: string, SubjectLogonId: string, ProcessName: string)) {
+    SecurityEvent
+        | project-rename
+            ActorUsername = SubjectUserName
+            ,
+            ActorUserId = SubjectUserSid
+            ,
+            ActorSessionId = SubjectLogonId
+            ,
+            ActingProcessName = ProcessName
+            ,
+            ActorDomainName = SubjectDomainName
+        | extend
+            ActorUsername = iif(isnotempty(ActorDomainName), strcat(ActorDomainName, @'\', ActorUsername), ActorUsername)
+            ,
+            ActingProcessId = tostring(toint(tolong(ProcessId)))
+            ,
+            RegistryKey = iif(
+                ObjectName startswith @"\REGISTRY\MACHINE",
+                replace_string(ObjectName, @"\REGISTRY\MACHINE", "HKEY_LOCAL_MACHINE")
+            ,
+                replace_string(ObjectName, @"\REGISTRY\USER", "HKEY_USERS")
+            )
+};
+    let Event4663TypeLookup = datatable (AccessMask: string, EventType: string)
+        [
+    "0x1", "RegistryValueRead"
+        ,
+    "0x10", "RegistryKeyNotify"
+        ,
+    "0x10000", "RegistryKeyDeleted"
+        ,
+    "0x2", "RegistryValueSet"
+        ,
+    "0x20000", "MetadataAccessed"
+        ,
+    "0x20006", "RegistryValueSet"
+        ,
+    "0x40000", "MetadataModified"
+        ,
+    "0x8", "RegistrySubkeyEnumerated"
+];
+    let Event4567TypeLookup = datatable (EventOriginalSubType: string, EventType: string)
+        [
+    "%%1904", "RegistryValueSet"
+        ,
+    "%%1905", "RegistryValueSet"
+        ,
+    "%%1906", "RegistryValueDeleted"
+];
+    let RegistryType = datatable (TypeCode: string, TypeName: string)
+        [
+    "%%1872", "REG_NONE"
+        ,
+    "%%1873", "REG_SZ"
+        ,
+    "%%1874", "REG_EXPAND_SZ"
+        ,
+    "%%1875", "REG_BINARY"
+        ,
+    "%%1876", "REG_DWORD"
+        ,
+    "%%1879", "REG_MULTI_SZ"
+        ,
+    "%%1883", "REG_QWORD"
+];
+    union isfuzzy=false
+        (
+        SecurityEvent
+        | where not(disabled)
+        | where EventID == 4663 and ObjectType == "Key"
+        | lookup Event4663TypeLookup on AccessMask
+        | extend EventType = iif(isempty(EventType), "Other", EventType)
+        | invoke ASIM_ParseSecurityEvents()
+        | project
+            TimeGenerated,
+            Computer,
+            EventID,
+            EventType,
+            ActorUsername,
+            ActorDomainName,
+            ActorUserId,
+            ActorSessionId,
+            ActingProcessName,
+            ActingProcessId,
+            RegistryKey,
+            _ResourceId,
+            Type
+        ),
+        (
+            SecurityEvent
+            | where not(disabled)
+            | where EventID == 4657
+            | invoke ASIM_ParseSecurityEvents()
+            | extend
+                EventOriginalSubType = OperationType
+                ,
+                RegistryValue = ObjectValueName
+            | lookup Event4567TypeLookup on EventOriginalSubType
+            | extend EventType = iif(isempty(EventType), "Other", EventType)
+            | project
+                TimeGenerated,
+                Computer,
+                EventID,
+                EventType,
+                ActorUsername,
+                ActorDomainName,
+                ActorUserId,
+                ActorSessionId,
+                ActingProcessName,
+                ActingProcessId,
+                RegistryKey,
+                _ResourceId,
+                Type,
+                NewValueType,
+                OldValueType,
+                EventOriginalSubType,
+                OldValue,
+                NewValue,
+                RegistryValue
+        )
+        | lookup RegistryType on $left.NewValueType == $right.TypeCode
+        | project-rename RegistryValueType = TypeName
+        | lookup RegistryType on $left.OldValueType == $right.TypeCode
+        | project-rename RegistryPreviousValueType = TypeName
+        | extend
+            RegistryValueData = iff (EventOriginalSubType == "%%1906", OldValue, NewValue)
+            ,
+            RegistryPreviousKey = iff (EventOriginalSubType == "%%1905", RegistryKey, "")
+            ,
+            RegistryPreviousValue = iff (EventOriginalSubType == "%%1905", RegistryValue, "")
+            ,
+            RegistryPreviousValueData = iff (EventOriginalSubType == "%%1905", OldValue, "")
+        | project-away
+            NewValueType,
+            OldValueType,
+            EventOriginalSubType,
+            OldValue,
+            NewValue
+    | invoke _ASIM_ResolveFQDN ("Computer")
+    | extend
+        ActorUserIdType = iff (ActorUserId <> "S-1-0-0", "SID", ""),
+        ActorUserId = iff (ActorUserId <> "S-1-0-0", ActorUserId, "")
+    | project-rename
+        DvcDomainType = DomainType
+        ,
+        DvcHostname = ExtractedHostname
+    | extend
+        DvcFQDN = iif(DvcDomainType == "FQDN", FQDN, "")
+        ,
+        DvcDomain = iif(isnotempty(Domain), Domain, "")
+        ,
+        Dvc = iif(DvcDomainType == "FQDN", FQDN, "DvcHostname")
+    | extend
+        ActorUserType = _ASIM_GetWindowsUserType(ActorUsername, ActorUserId)
+        ,
+        ActorUsernameType = ASIM_GetAccountType(ActorUserId)
+    | extend
+        User = ActorUsername
+        ,
+        UserId = ActorUserId
+        ,
+        ActorUserSid = ActorUserId
+        ,
+        Process = ActingProcessName
+        ,
+        Dvc = iif(DvcDomainType == "FQDN", Computer, "")
+        ,
+        EventStartTime = TimeGenerated
+        ,
+        EventEndTime = TimeGenerated
+        ,
+        EventOriginalType = tostring(EventID)
+    | extend
+        EventSchemaVersion = "0.1" 
+        ,
+        EventSchema = "RegistryEvent"
+        ,
+        EventCount = toint(1)
+        ,
+        EventResult = "Success"
+        ,
+        EventVendor = "Microsoft"
+        ,
+        EventProduct = "Security Events" 
+        ,
+        DvcOs = "Windows"
+        | project-away ActorDomainName,ActorUserSid,ActorUserType,Computer,Domain,DvcDomainType,DvcDomain,DvcFQDN,EventID,FQDN,UserId,_ResourceId
+};
+parser (
+    disabled                 = disabled
+)
+}
+
+
+
+//
+// Function Name: ASimRegistryEventMicrosoftSysmon
+// Description: This ASIM parser supports normalizing Microsoft Sysmon events (event number 12, 13, 14) logs ingested in 'Event' table to the ASIM Registry Event normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimRegistryEventMicrosoftSysmon(    ['disabled']:bool=false)
+{
+let parser = (
+  disabled: bool=false
+  ) {
+  let RegistryAction = datatable (EventType: string, NewEventType: string)
+      [
+  "CreateKey", "RegistryKeyCreated",
+  "DeleteKey", "RegistryKeyDeleted",
+  "DeleteValue", "RegistryValueDeleted", 
+  "SetValue", "RegistryValueSet",
+  "RenameKey", "RegistryKeyRenamed"
+  ];     
+      let Hives = datatable (KeyPrefix: string, Hive: string)
+          [
+      "HKLM", "HKEY_LOCAL_MACHINE",
+      "HKU", "HKEY_USERS", 
+      "HKCR", "HKEY_LOCAL_MACHINE\\Classes" 
+  ];
+      // this is the parser for sysmon from Event table
+      // Create the raw table from the raw XML file structure
+      let ParsedRegistryEvent_Event=() {
+      Event
+          | where not(disabled)
+          | where Source == "Microsoft-Windows-Sysmon" and EventID in (12, 13, 14)
+          | parse EventData with 
+              * '<Data Name="RuleName">'RuleName // parsing the XML using the original fields name - for readibliy 
+              '</Data><Data Name="EventType">'EventType
+              '</Data><Data Name="UtcTime">'UtcTime
+              '</Data><Data Name="ProcessGuid">{'ProcessGuid
+              '}</Data><Data Name="ProcessId">'ProcessId
+              '</Data><Data Name="Image">'Image
+              '</Data><Data Name="TargetObject">'TargetObject
+              '</Data>' EventDataRemainder 
+          | parse EventDataRemainder with '<Data Name="Details">' Parameter '</Data><Data Name="User">' ActorUsername '</Data>' *
+          | project-away EventDataRemainder
+          // End of XML parse
+          | extend 
+              EventStartTime = todatetime(TimeGenerated), 
+              EventEndTime = todatetime(TimeGenerated), 
+              EventCount = int(1), 
+              EventVendor = "Microsoft",
+              EventSchemaVersion = "0.1.0", 
+              EventProduct = "Sysmon",
+              EventOriginalType = tostring(EventID), 
+              DvcOs = "Windows",
+              ActorUsernameType = iff(isnotempty(ActorUsername), 'Windows', '')
+          | project-rename 
+              EventMessage = RenderedDescription, 
+              DvcHostName = Computer, 
+              ActingProcessId = ProcessId,
+              ActingProcessGuid = ProcessGuid, 
+              ActingProcessName = Image 
+          // Lookup Event Type
+          | lookup RegistryAction on EventType 
+          | project-rename EventOriginalSubType = EventType
+          | project-rename EventType = NewEventType
+          // Normalize Key Hive
+          | parse TargetObject with KeyPrefix "\\" KeyMain
+          | lookup Hives on KeyPrefix
+          | extend Key = strcat (Hive, "\\", KeyMain)
+          | parse Parameter with KeyPrefix "\\" KeyMain
+          | lookup Hives on KeyPrefix
+          | extend NewName = strcat (Hive, "\\", KeyMain)
+          | project-away KeyPrefix, KeyMain, Hive
+          // Split Key and Value for relevant events 
+          | extend ParsedKey = extract_all (@"^(.+)\\(.+)$", Key)
+          | extend Key = iff (EventType in ("RegistryValueSet", "RegistryValueDeleted"), ParsedKey[0][0], Key)
+          | extend Value = iff (EventType in ("RegistryValueSet", "RegistryValueDeleted"), ParsedKey[0][1], "")
+          | extend ParsedKey = extract_all (@"^(.+)\\(.+)$", NewName)
+          | extend NewKey = ParsedKey[0][0]
+          | extend NewValue = ParsedKey[0][1]
+          | project-away ParsedKey, TargetObject, NewName
+          // Set normalized registry fields
+          | extend
+              RegistryKey = iff (EventType == "RegistryKeyRenamed", NewKey, Key),
+              RegistryKeyModified = iff (EventType in ("RegistryKeyRenamed", "RegistryValueSet"), Key, ""),
+              RegistryValue = iff (EventType in ("RegistryValueSet", "RegistryValueDeleted"), Value, ""),
+              RegistryValueModified = iff (EventType == "RegistryValueSet", Value, ""),
+              RegistryValueData = iff (EventType == "RegistryValueSet", Parameter, ""),
+              EventResult = "Success",
+              EventSchema = "RegistryEvent",
+              Rule=RuleName
+          | extend // aliases
+              User = ActorUsername,
+              Process = ActingProcessName,
+              Dvc = DvcHostName
+          | project-away
+              Parameter,
+              Value,
+              Key,
+              NewKey,
+              NewValue,
+              EventData,
+              ParameterXml,
+              DvcHostName,
+              EventCategory,
+              EventID,
+              EventLevelName,
+              EventLevel,
+              EventLog,
+              Hive1,
+              MG,
+              AzureDeploymentID,
+              RegistryKeyModified,
+              RegistryValueModified,
+              Role,
+              SourceSystem,
+              Source,
+              TenantId,
+              UserName,
+              UtcTime,
+              ManagementGroupName,
+              Message,_ResourceId
+  };
+      ParsedRegistryEvent_Event
+  };
+  parser (
+      disabled                 = disabled
+  )
+}
+
+
+
+//
+// Function Name: ASimRegistryEventMicrosoftSysmonWindowsEvent
+// Description: This ASIM parser supports normalizing Microsoft Sysmon events (event number 12, 13, 14) logs ingested in 'WindowsEvent' table to the ASIM Registry Event normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimRegistryEventMicrosoftSysmonWindowsEvent(    ['disabled']:bool=false)
+{
+let parser = (
+  disabled: bool=false
+  ) {
+  let RegistryAction = datatable (EventType: string, NewEventType: string)
+      [
+  "CreateKey", "RegistryKeyCreated",
+  "DeleteKey", "RegistryKeyDeleted",
+  "DeleteValue", "RegistryValueDeleted", 
+  "SetValue", "RegistryValueSet",
+  "RenameKey", "RegistryKeyRenamed"
+  ];     
+      let Hives = datatable (KeyPrefix: string, Hive: string)
+          [
+      "HKLM", "HKEY_LOCAL_MACHINE",
+      "HKU", "HKEY_USERS", 
+      "HKCR", "HKEY_LOCAL_MACHINE\\Classes" 
+  ];
+      // this is the parser for sysmon from WindowsEvent table
+      let ParsedRegistryEvent_WindowsEvent=() {
+      WindowsEvent
+          | where not(disabled)
+          | where Provider == "Microsoft-Windows-Sysmon" and EventID in (12, 13, 14)
+          | extend 
+              EventStartTime = todatetime(TimeGenerated), 
+              EventEndTime = todatetime(TimeGenerated), 
+              EventCount = int(1), 
+              EventVendor = "Microsoft",
+              EventSchemaVersion = "0.1.0", 
+              EventProduct = "Sysmon",
+              EventOriginalType = tostring(EventID),
+              EventType = tostring(EventData.EventType),
+              DvcOs = "Windows",
+              EventMessage = tostring(EventData.RenderedDescription), 
+              ActorUsername = tostring(EventData.User),
+              ActingProcessId = tostring(EventData.ProcessId),
+              ActingProcessGuid = extract ('^{(.*)}$', 1, tostring(EventData.ProcessGuid), typeof(string)),
+              ActingProcessName = tostring(EventData.Image),
+              TargetObject = tostring(EventData.TargetObject),
+              Parameter = tostring(EventData.Parameter)
+          | project-rename
+              DvcHostName = Computer 
+          | lookup RegistryAction on EventType
+          | project-rename EventOriginalSubType = EventType
+          | project-rename EventType = NewEventType
+          // Normalize Key Hive
+          | parse TargetObject with KeyPrefix "\\" KeyMain
+          | lookup Hives on KeyPrefix
+          | extend Key = strcat (Hive, "\\", KeyMain)
+          | parse Parameter with KeyPrefix "\\" KeyMain
+          | lookup Hives on KeyPrefix
+          | extend NewName = strcat (Hive, "\\", KeyMain)
+          | project-away KeyPrefix, KeyMain, Hive
+          // Split Key and Value for relevant events 
+          | extend ParsedKey = extract_all (@"^(.+)\\(.+)$", Key)
+          | extend Key = iff (EventType in ("RegistryValueSet", "RegistryValueDeleted"), ParsedKey[0][0], Key)
+          | extend Value = iff (EventType in ("RegistryValueSet", "RegistryValueDeleted"), ParsedKey[0][1], "")
+          | extend ParsedKey = extract_all (@"^(.+)\\(.+)$", NewName)
+          | extend NewKey = ParsedKey[0][0]
+          | extend NewValue = ParsedKey[0][1]
+          | project-away ParsedKey, TargetObject, NewName
+          // Set normalized registry fields
+          | extend
+              RegistryKey = iff (EventType == "RegistryKeyRenamed", NewKey, Key),
+              RegistryKeyModified = iff (EventType in ("RegistryKeyRenamed", "RegistryValueSet"), Key, ""),
+              RegistryValue = iff (EventType in ("RegistryValueSet", "RegistryValueDeleted"), Value, ""),
+              RegistryValueModified = iff (EventType == "RegistryValueSet", Value, ""),
+              RegistryValueData = iff (EventType == "RegistryValueSet", Parameter, ""),
+              ActorUsernameType =  iff(isnotempty(ActorUsername), 'Windows', '')
+          | extend // aliases
+              User = ActorUsername,
+              Process = ActingProcessName,
+              Dvc = DvcHostName,
+              EventResult = "Success",
+            EventSchema = "RegistryEvent"
+          | project-away
+              Parameter,
+              Value,
+              Key,
+              NewKey,
+              NewValue,
+              EventData,
+              Channel,Correlation,Data,DvcHostName,EventID,EventLevelName,EventLevel,EventOriginId,EventRecordId,Hive1,Keywords,ManagementGroupName,_ResourceId,Opcode,Provider,RawEventData,RegistryKeyModified,RegistryValueModified,SourceSystem,SystemProcessId,SystemThreadId,SystemUserId,Task,TenantId,TimeCreated,Version,_ResourceId
+  };
+      ParsedRegistryEvent_WindowsEvent
+  };
+  parser (
+      disabled                 = disabled
+  )
+}
+
+
+
+//
+// Function Name: ASimRegistryEventMicrosoftWindowsEvent
+// Description: This ASIM parser supports normalizing Microsoft Windows events (event numbers 4657 and 4663), logs ingested in 'WindowsEvent' table to the ASIM Registry Event normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimRegistryEventMicrosoftWindowsEvent(    ['disabled']:bool=false)
+{
+let parser = (
+disabled: bool=false
+) {
+let ASIM_GetAccountType = (sid: string) { 
+iif ( 
+sid in ("S-1-0-0", "S-1-5-18", "S-1-5-19", "S-1-5-20"),
+"Simple"
+    ,
+"Windows"
+)
+};
+    let ASIM_ParseWindowsEvents = (WindowsEvent: (EventData: dynamic)) {
+    WindowsEvent
+        | extend
+            ActorUsername = iif(isnotempty(EventData.SubjectDomainName), strcat(EventData.SubjectDomainName, @'\', EventData.SubjectUserName), EventData.SubjectUserName)
+            ,
+            ActorDomainName = tostring(EventData.SubjectDomainName)
+            ,
+            ActorUserId = tostring(EventData.SubjectUserSid)
+            ,
+            ActorSessionId = tostring(EventData.SubjectLogonId)
+            ,
+            ActingProcessName = tostring(EventData.ProcessName)
+            ,
+            ActingProcessId = tostring(toint(tolong(EventData.ProcessId)))
+            ,
+            RegistryKey = iif(
+                EventData.ObjectName startswith @"\REGISTRY\MACHINE",
+                replace_string(tostring(EventData.ObjectName), @"\REGISTRY\MACHINE", "HKEY_LOCAL_MACHINE")
+            ,
+                replace_string(tostring(EventData.ObjectName), @"\REGISTRY\USER", "HKEY_USERS")
+            )
+};
+    let Event4663TypeLookup = datatable (AccessMask: string, EventType: string)
+        [
+    "0x1", "RegistryValueRead"
+        ,
+    "0x10", "RegistryKeyNotify"
+        ,
+    "0x10000", "RegistryKeyDeleted"
+        ,
+    "0x2", "RegistryValueSet"
+        ,
+    "0x20000", "MetadataAccessed"
+        ,
+    "0x20006", "RegistryValueSet"
+        ,
+    "0x40000", "MetadataModified"
+        ,
+    "0x8", "RegistrySubkeyEnumerated"
+];
+    let Event4567TypeLookup = datatable (EventOriginalSubType: string, EventType: string)
+        [
+    "%%1904", "RegistryValueSet"
+        ,
+    "%%1905", "RegistryValueSet"
+        ,
+    "%%1906", "RegistryValueDeleted"
+];
+    let RegistryType = datatable (TypeCode: string, TypeName: string)
+        [
+    "%%1872", "REG_NONE"
+        ,
+    "%%1873", "REG_SZ"
+        ,
+    "%%1874", "REG_EXPAND_SZ"
+        ,
+    "%%1875", "REG_BINARY"
+        ,
+    "%%1876", "REG_DWORD"
+        ,
+    "%%1879", "REG_MULTI_SZ"
+        ,
+    "%%1883", "REG_QWORD"
+];
+    union isfuzzy=false
+        (
+        WindowsEvent
+        | where not(disabled)
+        | where EventID == 4663 and EventData.ObjectType == "Key"
+        | extend
+            AccessMask = tostring(EventData.AccessMask)
+            ,
+            Type = "WindowsEvent"
+        | lookup Event4663TypeLookup on AccessMask
+        | extend EventType = iif(isempty(EventType), "Other", EventType)
+        | invoke ASIM_ParseWindowsEvents()
+        | project
+            TimeGenerated,
+            Computer,
+            EventID,
+            EventType,
+            ActorUsername,
+            ActorDomainName,
+            ActorUserId,
+            ActorSessionId,
+            ActingProcessName,
+            ActingProcessId,
+            RegistryKey,
+            _ResourceId,
+            Type
+        ),
+            (
+            WindowsEvent
+            | where not(disabled)
+            | where EventID == 4657
+            | invoke ASIM_ParseWindowsEvents()
+            | extend
+                EventOriginalSubType = tostring(EventData.OperationType)
+                ,
+                OldValue = tostring(EventData.OldValue)
+                ,
+                NewValue = tostring(EventData.NewValue)
+                ,
+                RegistryValue = tostring(EventData.ObjectValueName)
+                ,
+                NewValueType = tostring(EventData.NewValueType)
+                ,
+                OldValueType = tostring(EventData.OldValueType)
+            | lookup Event4567TypeLookup on EventOriginalSubType
+            | extend EventType = iif(isempty(EventType), "Other", EventType)
+            | project
+                TimeGenerated,
+                Computer,
+                EventID,
+                EventType,
+                ActorUsername,
+                ActorDomainName,
+                ActorUserId,
+                ActorSessionId,
+                ActingProcessName,
+                ActingProcessId,
+                RegistryKey,
+                _ResourceId,
+                RegistryValue,
+                Type,
+                NewValueType,
+                OldValueType,
+                EventOriginalSubType,
+                OldValue,
+                NewValue
+        | lookup RegistryType on $left.NewValueType == $right.TypeCode
+        | project-rename RegistryValueType = TypeName
+        | lookup RegistryType on $left.OldValueType == $right.TypeCode
+        | project-rename RegistryPreviousValueType = TypeName
+        | extend
+            RegistryValueData = iff (EventOriginalSubType == "%%1906", OldValue, NewValue)
+            ,
+            RegistryPreviousKey = iff (EventOriginalSubType == "%%1905", RegistryKey, "")
+            ,
+            RegistryPreviousValue = iff (EventOriginalSubType == "%%1905", RegistryValue, "")
+            ,
+            RegistryPreviousValueData = iff (EventOriginalSubType == "%%1905", OldValue, "")
+        | project-away
+            NewValueType,
+            OldValueType,
+            EventOriginalSubType,
+            OldValue,
+            NewValue
+        )
+    | invoke _ASIM_ResolveFQDN ("Computer")
+    | extend
+        ActorUserIdType = iff (ActorUserId <> "S-1-0-0", "SID", ""),
+        ActorUserId = iff (ActorUserId <> "S-1-0-0", ActorUserId, "")
+    | project-rename
+        DvcDomainType = DomainType
+        ,
+        DvcHostname = ExtractedHostname
+    | extend
+        DvcFQDN = iif(DvcDomainType == "FQDN", FQDN, "")
+        ,
+        DvcDomain = iif(isnotempty(Domain), Domain, "")
+        ,
+        Dvc = iif(DvcDomainType == "FQDN", FQDN, "DvcHostname")
+    | extend
+        ActorUserType = _ASIM_GetWindowsUserType(ActorUsername, ActorUserId)
+        ,
+        ActorUsernameType = ASIM_GetAccountType(ActorUserId)
+    | extend
+        User = ActorUsername
+        ,
+        UserId = ActorUserId
+        ,
+        ActorUserSid = ActorUserId
+        ,
+        Process = ActingProcessName
+        ,
+        Dvc = iif(DvcDomainType == "FQDN", Computer, "")
+        ,
+        EventStartTime = TimeGenerated
+        ,
+        EventEndTime = TimeGenerated
+        ,
+        EventOriginalType = tostring(EventID)
+    | extend
+        EventSchemaVersion = "0.1" 
+        ,
+        EventSchema = "RegistryEvent"
+        ,
+        EventCount = toint(1)
+        ,
+        EventResult = "Success"
+        ,
+        EventVendor = "Microsoft"
+        ,
+        EventProduct = "Security Events" 
+        ,
+        DvcOs = "Windows"
+    | project-away ActorDomainName,ActorUserSid,ActorUserType,Computer,Domain,DvcDomainType,DvcDomain,DvcFQDN,EventID,FQDN,UserId,_ResourceId    };
+parser (
+    disabled                 = disabled
+)
+}
+
+
+
+//
+// Function Name: ASimRegistryEventNative
+// Description: This ASIM parser supports normalizing the native Registry Event table (ASimRegistryEventLogs) to the ASIM Registry Event normalized schema. While the native table is ASIM compliant, the parser is needed to add capabilities, such as aliases, available only at query time.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimRegistryEventNative(    ['disabled']:bool=false)
+{
+let parser=(disabled: bool=false) {
+  ASimRegistryEventLogs
+  | where not(disabled)
+  | project-rename
+      EventUid = _ItemId
+  | extend          
+      EventSchema = "RegistryEvent",
+      DvcScopeId = iff(isempty(DvcScopeId), _SubscriptionId, DvcScopeId)
+  //  -- Aliases
+  | extend
+      EventEndTime = iff (isnull(EventEndTime), TimeGenerated, EventEndTime),
+      EventStartTime = iff (isnull(EventEndTime), TimeGenerated, EventStartTime),
+      Dvc = coalesce (DvcFQDN, DvcHostname, DvcIpAddr, DvcId, _ResourceId),
+      User =  ActorUsername,
+      Rule = coalesce(RuleName, tostring(RuleNumber)),
+      Process =  ActingProcessName
+  | project-away
+      TenantId,
+      SourceSystem,
+      _SubscriptionId,
+      _ResourceId
+};
+parser (disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimRegistryEventSentinelOne
+// Description: This ASIM parser supports normalizing SentinelOne logs to the ASIM Registry Event normalized schema. SentinelOne events are captured through SentinelOne data connector which ingests SentinelOne server objects such as Threats, Agents, Applications, Activities, Policies, Groups, and more events into Microsoft Sentinel through the REST API.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimRegistryEventSentinelOne(    ['disabled']:bool=false)
+{
+let EventTypeLookup = datatable (alertInfo_eventType_s: string, EventType: string)
+[
+    "REGVALUEMODIFIED", "RegistryValueSet",
+    "REGVALUECREATE", "RegistryValueSet",
+    "REGKEYCREATE", "RegistryKeyCreated",
+    "REGKEYDELETE", "RegistryKeyDeleted",
+    "REGVALUEDELETE", "RegistryValueDeleted",
+    "REGKEYRENAME", "RegistryKeyRenamed"
+];
+let RegistryKeyPrefixLookup = datatable (
+    RegistryKeyPrefix: string,
+    RegistryKeyNormalizedPrefix: string
+)
+    [
+    "MACHINE", "HKEY_LOCAL_MACHINE",
+    "USER", "HKEY_USERS",
+    "CONFIG", "HKEY_CURRENT_CONFIG",
+    "ROOT", "HKEY_CLASSES_ROOT"
+];
+let RegistryPreviousValueTypeLookup = datatable (
+    alertInfo_registryOldValueType_s: string,
+    RegistryPreviousValueType_lookup: string
+)
+    [
+    "BINARY", "Reg_Binary",
+    "DWORD", "Reg_DWord",
+    "QWORD", "Reg_QWord",
+    "SZ", "Reg_Sz",
+    "EXPAND_SZ", "Reg_Expand_Sz",
+    "MULTI_SZ", "Reg_Multi_Sz",
+    "DWORD_BIG_ENDIAN", "Reg_DWord"
+];
+let ThreatConfidenceLookup_undefined = datatable(
+    alertInfo_analystVerdict_s: string,
+    ThreatConfidence_undefined: int
+)
+    [
+    "FALSE_POSITIVE", 5,
+    "Undefined", 15,
+    "SUSPICIOUS", 25,
+    "TRUE_POSITIVE", 33 
+];
+let ThreatConfidenceLookup_suspicious = datatable(
+    alertInfo_analystVerdict_s: string,
+    ThreatConfidence_suspicious: int
+)
+    [
+    "FALSE_POSITIVE", 40,
+    "Undefined", 50,
+    "SUSPICIOUS", 60,
+    "TRUE_POSITIVE", 67 
+];
+let ThreatConfidenceLookup_malicious = datatable(
+    alertInfo_analystVerdict_s: string,
+    ThreatConfidence_malicious: int
+)
+    [
+    "FALSE_POSITIVE", 75,
+    "Undefined", 80,
+    "SUSPICIOUS", 90,
+    "TRUE_POSITIVE", 100 
+];
+let parser = (disabled: bool=false) { 
+    let alldata = SentinelOne_CL 
+    | where not(disabled)
+        and event_name_s == "Alerts."
+        and alertInfo_eventType_s in ("REGVALUEMODIFIED", "REGVALUECREATE", "REGKEYCREATE", "REGKEYDELETE", "REGVALUEDELETE", "REGKEYRENAME")
+    | lookup EventTypeLookup on alertInfo_eventType_s
+    | lookup RegistryPreviousValueTypeLookup on alertInfo_registryOldValueType_s;
+    let undefineddata = alldata
+    | where ruleInfo_treatAsThreat_s == "UNDEFINED"
+    | lookup ThreatConfidenceLookup_undefined on alertInfo_analystVerdict_s;
+    let suspiciousdata = alldata
+    | where ruleInfo_treatAsThreat_s == "Suspicious"
+    | lookup ThreatConfidenceLookup_suspicious on alertInfo_analystVerdict_s;
+    let maliciousdata = alldata
+    | where ruleInfo_treatAsThreat_s == "Malicious"
+    | lookup ThreatConfidenceLookup_malicious on alertInfo_analystVerdict_s;
+    union undefineddata, suspiciousdata, maliciousdata
+    | invoke _ASIM_ResolveDvcFQDN('agentDetectionInfo_name_s')
+    | extend RegistryKeyPrefix = tostring(split(alertInfo_registryKeyPath_s, @'\')[0])
+    | lookup RegistryKeyPrefixLookup on RegistryKeyPrefix
+    | extend RegistryKey = replace_string(alertInfo_registryKeyPath_s, RegistryKeyPrefix, RegistryKeyNormalizedPrefix)
+    | extend RegistryValue = iff(alertInfo_eventType_s in ("REGVALUEMODIFIED", "REGVALUECREATE", "REGVALUEDELETE"), tostring(split(alertInfo_registryKeyPath_s, @'\')[-1]), "")
+    | extend RegistryValueType = case(
+                                alertInfo_registryValue_s matches regex '^[0-9]+$',
+                                "Reg_Dword",
+                                alertInfo_registryValue_s startswith "0x" and strlen(alertInfo_registryValue_s) <= 10,
+                                "Reg_DWord",
+                                alertInfo_registryValue_s startswith "0x" and strlen(alertInfo_registryValue_s) > 10,
+                                "Reg_QWord",
+                                alertInfo_registryValue_s matches regex '^[A-Fa-f0-9]+$',
+                                "Reg_Binary",
+                                ""
+                            )
+    | extend RegistryValueType = iff(alertInfo_eventType_s in ("REGVALUEMODIFIED", "REGVALUECREATE") and isempty(RegistryValueType), "Reg_Sz", RegistryValueType),
+            ThreatConfidence = coalesce(ThreatConfidence_undefined, ThreatConfidence_suspicious, ThreatConfidence_malicious)
+    | project-rename
+        ActingProcessId = sourceProcessInfo_pid_s,
+        ActorUsername = sourceProcessInfo_user_s,
+        EventStartTime= sourceProcessInfo_pidStarttime_t,
+        EventOriginalSeverity = ruleInfo_severity_s,
+        EventUid = _ItemId,
+        ParentProcessId = sourceParentProcessInfo_pid_s,
+        ActingProcessName = sourceProcessInfo_name_s,
+        DvcId = agentDetectionInfo_uuid_g,
+        DvcOs = agentDetectionInfo_osName_s,
+        DvcOsVersion = agentDetectionInfo_osRevision_s,
+        EventOriginalType = alertInfo_eventType_s,
+        ParentProcessName = sourceParentProcessInfo_name_s,
+        RegistryValueData = alertInfo_registryValue_s,
+        EventOriginalUid = alertInfo_dvEventId_s,
+        RuleName = ruleInfo_name_s,
+        ThreatOriginalConfidence = ruleInfo_treatAsThreat_s
+    | extend
+        EventCount = int(1),
+        EventProduct = "SentinelOne",
+        EventVendor = "SentinelOne",
+        EventResult = "Success",
+        DvcAction = "Allowed",
+        EventSchema = "RegistryEvent",
+        EventSchemaVersion = "0.1.2"
+    | extend
+        Dvc = coalesce(DvcHostname, EventProduct), 
+        EventEndTime = EventStartTime,
+        EventSeverity = iff(EventOriginalSeverity == "Critical", "High", EventOriginalSeverity),
+        RegistryPreviousKey = RegistryKey,
+        RegistryPreviousValueData = coalesce(alertInfo_registryOldValue_s, RegistryValueData),
+        RegistryPreviousValueType = coalesce(RegistryPreviousValueType_lookup, RegistryValueType),
+        RegistryPreviousValue = RegistryValue,
+        Process = ActingProcessName,
+        User = ActorUsername,
+        DvcIdType = iff(isnotempty(DvcId), "Other", ""),
+        ActorUsernameType =  _ASIM_GetUsernameType(ActorUsername),
+        ActorUserType = _ASIM_GetUserType(ActorUsername, ""),
+        Rule = RuleName
+    | project-away 
+        *_d,
+        *_s,
+        *_g,
+        *_t,
+        *_b,
+        _ResourceId,
+        Computer,
+        MG,
+        ManagementGroupName,
+        RawData,
+        SourceSystem,
+        TenantId,
+        RegistryKeyPrefix,
+        RegistryKeyNormalizedPrefix,
+        RegistryPreviousValueType_lookup,
+        ThreatConfidence_*
+};
+parser(disabled = disabled)
+}
+
+
+
+//
+// Function Name: ASimRegistryEventTrendMicroVisionOne
+// Description: This ASIM parser supports normalizing Trend Micro Vision One logs to the ASIM Registry Event normalized schema. Trend Micro Vision One events are captured through Trend Vision One data connector which ingests XDR logs into Microsoft Sentinel through the Trend Vision One API.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimRegistryEventTrendMicroVisionOne(    ['disabled']:bool=false)
+{
+let EventTypeLookup = datatable(detail_eventSubId_s: string, EventType: string)[
+  "TELEMETRY_REGISTRY_CREATE", "RegistryKeyCreated",
+  "TELEMETRY_REGISTRY_SET", "RegistryValueSet",
+  "TELEMETRY_REGISTRY_DELETE", "RegistryKeyDeleted",
+  "TELEMETRY_REGISTRY_RENAME", "RegistryKeyRenamed"
+];
+let RegistryKeyPrefixLookup = datatable(
+    RegistryKeyPrefix: string,
+    RegistryKeyNormalizedPrefix: string
+)[
+    "HKLM", "HKEY_LOCAL_MACHINE",
+    "HKU", "HKEY_USERS",
+    "HKCU", "HKEY_CURRENT_USER",
+    "HKCR", "HKEY_CLASSES_ROOT",
+    "HKCC", "HKEY_CURRENT_CONFIG"
+];
+let RegistryValueTypeLookup = datatable (detail_objectRegType_d: real, RegistryValueType: string)[
+  0, "Reg_None",
+  1, "Reg_Sz",
+  2, "Reg_Expand_Sz",
+  3, "Reg_Binary",
+  4, "Reg_DWord",
+  5, "Reg_DWord",
+  7, "Reg_Multi_Sz",
+  11, "Reg_QWord"
+];
+let EventSeverityLookup = datatable(detail_filterRiskLevel_s: string, EventSeverity: string)[
+    "low", "Low",
+    "medium", "Medium",
+    "high", "High",
+    "info", "Informational",
+    "critical", "High"
+];
+let parser = (disabled: bool=false) {
+    TrendMicro_XDR_OAT_CL
+    | where not(disabled)
+    | where detail_eventId_s == "TELEMETRY_REGISTRY"
+    | parse filters_s with * "[" filters: string "]"
+    | parse-kv filters as (description: string, name: string) with (pair_delimiter=",", kv_delimiter=":", quote='"')
+    | lookup EventTypeLookup on detail_eventSubId_s
+    | lookup RegistryValueTypeLookup on detail_objectRegType_d
+    | lookup EventSeverityLookup on detail_filterRiskLevel_s
+    | invoke _ASIM_ResolveDvcFQDN('detail_endpointHostName_s')
+    | extend RegistryKeyPrefix = tostring(split(detail_objectRegistryKeyHandle_s, @'\')[0])
+    | lookup RegistryKeyPrefixLookup on RegistryKeyPrefix
+    | extend 
+        RegistryKey = replace_string(detail_objectRegistryKeyHandle_s, RegistryKeyPrefix, RegistryKeyNormalizedPrefix),
+        ActingProcessId = tostring(toint(detail_processPid_d)),
+        ParentProcessId = tostring(toint(detail_parentPid_d)),
+        ActorSessionId = tostring(toint(detail_authId_d)),
+        AdditionalFields = bag_pack(
+                      "name", name,
+                      "tags", detail_tags_s,
+                      "objectRegType", detail_objectRegType_d
+                  )
+    | extend
+        EventCount = int(1),
+        EventProduct = "Vision One",
+        EventVendor = "Trend Micro",
+        EventSchema = "RegistryEvent",
+        EventSchemaVersion = "0.1.2",
+        EventResult = "Success",
+        DvcAction = "Allowed"
+    | project-rename
+        ActorUsername = detail_processUser_s,
+        EventStartTime = detail_eventTimeDT_t,
+        RegistryValue = detail_objectRegistryValue_s,
+        RegistryValueData = detail_objectRegistryData_s,
+        ActingProcessName = detail_processName_s,
+        DvcId = detail_endpointGuid_g,
+        DvcOs = detail_osName_s,
+        DvcOsVersion = detail_osVer_s,
+        EventUid = _ItemId,
+        EventOriginalSubType = detail_eventSubId_s,
+        EventOriginalType = detail_eventId_s,
+        EventOriginalUid = detail_uuid_g,
+        EventOriginalSeverity = detail_filterRiskLevel_s,
+        EventProductVersion = detail_pver_s,
+        EventMessage = description
+    | extend
+        User = ActorUsername,
+        ActorUsernameType = iff(isnotempty(ActorUsername), "Simple", ""),
+        ActorUserType = _ASIM_GetUserType(ActorUsername,""),
+        Dvc = coalesce(DvcFQDN, DvcId, DvcHostname),
+        DvcIdType = iff(isnotempty(DvcId), "Other", ""),
+        Process = ActingProcessName,
+        EventEndTime = EventStartTime,
+        RegistryPreviousKey = RegistryKey,
+        RegistryPreviousValue = RegistryValue,
+        RegistryPreviousValueData = RegistryValueData,
+        RegistryPreviousValueType = RegistryValueType
+    | project-away
+        *_d,
+        *_s,
+        *_g,
+        *_t,
+        *_b,
+        _ResourceId,
+        Computer,
+        MG,
+        ManagementGroupName,
+        RawData,
+        SourceSystem,
+        TenantId,
+        name,
+        filters,
+        *Prefix
+};
+parser(disabled = disabled)
+}
+
+
+
+//
+// Function Name: ASimRegistryEventVMwareCarbonBlackCloud
+// Description: This ASIM parser supports normalizing VMware Carbon Black Cloud logs to the ASIM Registry Event normalized schema. VMware Carbon Black Cloud events are captured through VMware Carbon Black Cloud data connector which ingests Carbon Black Audit, Notification and Event data into Microsoft Sentinel through the REST API.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimRegistryEventVMwareCarbonBlackCloud(    ['disabled']:bool=false)
+{
+let EventTypeLookup = datatable (temp_action: string, EventType: string)
+[
+    "ACTION_WRITE_VALUE", "RegistryValueSet",
+    "ACTION_CREATE_KEY", "RegistryKeyCreated",
+    "ACTION_DELETE_KEY", "RegistryKeyDeleted",
+    "ACTION_DELETE_VALUE", "RegistryValueDeleted",
+    "ACTION_RENAME_KEY", "RegistryKeyRenamed"
+];
+let RegistryKeyPrefixLookup = datatable(
+    RegistryKeyPrefix: string,
+    RegistryKeyNormalizedPrefix: string
+)[
+    "HKLM", "HKEY_LOCAL_MACHINE",
+    "HKU", "HKEY_USERS",
+    "HKCU", "HKEY_CURRENT_USER",
+    "HKCR", "HKEY_CLASSES_ROOT",
+    "HKCC", "HKEY_CURRENT_CONFIG"
+];
+let actionvalues = dynamic(["ACTION_WRITE_VALUE", "ACTION_CREATE_KEY", "ACTION_DELETE_KEY", "ACTION_DELETE_VALUE", "ACTION_RENAME_KEY"]);
+let parser=(disabled: bool=false) {
+    CarbonBlackEvents_CL
+    | where not(disabled)
+    | where eventType_s == "endpoint.event.regmod"
+        and isnotempty(regmod_name_s)
+    | extend
+        temp_action = case(
+                          action_s has "|" and action_s has "delete",
+                          "ACTION_DELETE_KEY",
+                          action_s has "|" and action_s !has "delete",
+                          "ACTION_CREATE_KEY",
+                          action_s
+                      ),
+        RegistryKeyPrefix = tostring(split(regmod_name_s, @'\')[0])
+    | where temp_action in (actionvalues)
+    | lookup EventTypeLookup on temp_action
+    | lookup RegistryKeyPrefixLookup on RegistryKeyPrefix
+    | extend
+        RegistryKey = replace_string(regmod_name_s, RegistryKeyPrefix, RegistryKeyNormalizedPrefix),
+        ActingProcessId = tostring(toint(process_pid_d)),
+        EventStartTime = todatetime(split(createTime_s, '+')[0]),
+        ParentProcessId = tostring(toint(parent_pid_d)),
+        AdditionalFields = bag_pack(
+                      "process_guid", process_guid_s,
+                      "parent_guid", parent_guid_s 
+                  )
+    | project-rename
+        ActorUsername = process_username_s,
+        DvcIpAddr = device_external_ip_s,
+        DvcScope = device_group_s,
+        EventUid = _ItemId,
+        ActingProcessName = process_path_s,
+        DvcId = device_id_s,
+        DvcOs = device_os_s,
+        EventMessage = event_description_s,
+        EventOriginalType = action_s,
+        EventOriginalUid = event_id_g,
+        EventOwner = event_origin_s,
+        ParentProcessName = processDetails_parentName_s,
+        ActorScopeId = org_key_s
+    | invoke _ASIM_ResolveDvcFQDN('device_name_s')
+    | extend
+        EventCount = toint(1),
+        EventProduct = "Carbon Black Cloud",
+        EventVendor = "VMware",
+        EventResult = "Success",
+        DvcAction = "Allowed",
+        EventSchema = "RegistryEvent",
+        EventSchemaVersion = "0.1.2"
+    | extend
+        Dvc = coalesce(DvcFQDN, DvcId, DvcHostname, DvcIpAddr),
+        DvcIdType = iff(isnotempty(DvcId), "Other", ""),
+        EventEndTime = EventStartTime,
+        Process = ActingProcessName,
+        User = ActorUsername,
+        ActorUsernameType = _ASIM_GetUsernameType(ActorUsername),
+        ActorUserType = _ASIM_GetUserType(ActorUsername, "")
+    | project-away
+        *_d,
+        *_s,
+        *_g,
+        *_b,
+        temp_action,
+        _ResourceId,
+        Computer,
+        MG,
+        ManagementGroupName,
+        RawData,
+        SourceSystem,
+        TenantId,
+        RegistryKeyPrefix,
+        RegistryKeyNormalizedPrefix
+};
+parser(disabled = disabled)
+}
+
+
+
+//
+// Function Name: imRegistry
+// Description: This ASIM parser supports normalizing Registry Event logs from all supported sources to the ASIM Registry Event normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) imRegistry(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['registrykey_has_any']:dynamic=dynamic([]),
+    ['registryvalue_has_any']:dynamic=dynamic([]),
+    ['registrydata_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=false,
+    ['pack']:bool=false)
+{
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludevimRegistry') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser | where isnotempty(SourceSpecificParser));
+let vimBuiltInDisabled=toscalar('ExcludevimRegistryEventBuiltIn' in (DisabledParsers) or 'Any' in (DisabledParsers));
+let parser = (
+    starttime: datetime=datetime(null), 
+    endtime: datetime=datetime(null),
+    eventtype_in: dynamic=dynamic([]),
+    actorusername_has_any: dynamic=dynamic([]),
+    registrykey_has_any: dynamic =dynamic([]),
+    registryvalue_has_any: dynamic =dynamic([]),
+    registrydata_has_any: dynamic =dynamic([]),
+    dvchostname_has_any: dynamic=dynamic([]),
+    pack:bool=false
+    )
+    {
+union isfuzzy=true
+  vimRegistryEventEmpty,
+  vimRegistryEventMicrosoft365D (starttime = starttime, endtime = endtime, eventtype_in = eventtype_in, actorusername_has_any = actorusername_has_any, registrykey_has_any = registrykey_has_any, registryvalue_has_any = registryvalue_has_any, registrydata_has_any = registrydata_has_any, dvchostname_has_any= dvchostname_has_any, disabled=(vimBuiltInDisabled or('ExcludevimRegistryEventMicrosoft365D'   in (DisabledParsers) ))),
+  vimRegistryEventMicrosoftSysmon(starttime = starttime, endtime = endtime, eventtype_in = eventtype_in, actorusername_has_any = actorusername_has_any, registrykey_has_any = registrykey_has_any, registryvalue_has_any = registryvalue_has_any, registrydata_has_any = registrydata_has_any, dvchostname_has_any= dvchostname_has_any, disabled=(vimBuiltInDisabled or('ExcludevimRegistryEventMicrosoftSysmon'   in (DisabledParsers) ))),
+  vimRegistryEventMicrosoftSysmonWindowsEvent(starttime = starttime, endtime = endtime, eventtype_in = eventtype_in, actorusername_has_any = actorusername_has_any, registrykey_has_any = registrykey_has_any, registryvalue_has_any = registryvalue_has_any, registrydata_has_any = registrydata_has_any, dvchostname_has_any= dvchostname_has_any, disabled=(vimBuiltInDisabled or('ExcludevimRegistryEventMicrosoftSysmonWindowsEvent'   in (DisabledParsers) ))),
+  vimRegistryEventMicrosoftWindowsEvent (starttime = starttime, endtime = endtime, eventtype_in = eventtype_in, actorusername_has_any = actorusername_has_any, registrykey_has_any = registrykey_has_any, registryvalue_has_any = registryvalue_has_any, registrydata_has_any = registrydata_has_any, dvchostname_has_any= dvchostname_has_any, disabled=(vimBuiltInDisabled or('ExcludevimRegistryEventMicrosoftWindowsEvent'   in (DisabledParsers) ))),
+  vimRegistryEventMicrosoftSecurityEvent (starttime = starttime, endtime = endtime, eventtype_in = eventtype_in, actorusername_has_any = actorusername_has_any, registrykey_has_any = registrykey_has_any, registryvalue_has_any = registryvalue_has_any, registrydata_has_any = registrydata_has_any, dvchostname_has_any= dvchostname_has_any, disabled=(vimBuiltInDisabled or('ExcludevimRegistryEventMicrosoftSecurityEvent'   in (DisabledParsers) ))),
+  vimRegistryEventSentinelOne (starttime = starttime, endtime = endtime, eventtype_in = eventtype_in, actorusername_has_any = actorusername_has_any, registrykey_has_any = registrykey_has_any, registryvalue_has_any = registryvalue_has_any, registrydata_has_any = registrydata_has_any, dvchostname_has_any= dvchostname_has_any, disabled=(vimBuiltInDisabled or('ExcludevimRegistryEventSentinelOne'   in (DisabledParsers) ))),
+  vimRegistryEventNative (starttime = starttime, endtime = endtime, eventtype_in = eventtype_in, actorusername_has_any = actorusername_has_any, registrykey_has_any = registrykey_has_any, registryvalue_has_any = registryvalue_has_any, registrydata_has_any = registrydata_has_any, dvchostname_has_any= dvchostname_has_any, disabled=(vimBuiltInDisabled or('ExcludevimRegistryEventNative'   in (DisabledParsers) ))),
+  vimRegistryEventVMwareCarbonBlackCloud(starttime = starttime, endtime = endtime, eventtype_in = eventtype_in, actorusername_has_any = actorusername_has_any, registrykey_has_any = registrykey_has_any, registryvalue_has_any = registryvalue_has_any, registryvaluedata_has_any = registrydata_has_any, dvchostname_has_any= dvchostname_has_any, disabled=(vimBuiltInDisabled or('ExcludevimRegistryEventVMwareCarbonBlackCloud'   in (DisabledParsers) ))),
+  vimRegistryEventTrendMicroVisionOne (starttime=starttime, endtime=endtime, eventtype_in=eventtype_in, actorusername_has_any=actorusername_has_any, registrykey_has_any=registrykey_has_any, registryvalue_has_any=registryvalue_has_any, registryvaluedata_has_any=registrydata_has_any, dvchostname_has_any=dvchostname_has_any, disabled= (vimBuiltInDisabled or('ExcludevimRegistryEventTrendMicroVisionOne' in (DisabledParsers) )))
+  };
+  parser(starttime = starttime, endtime = endtime, eventtype_in = eventtype_in, actorusername_has_any = actorusername_has_any, registrykey_has_any = registrykey_has_any, registryvalue_has_any = registryvalue_has_any, registrydata_has_any = registrydata_has_any, dvchostname_has_any= dvchostname_has_any, pack=pack)
+}
+
+
+
+//
+// Function Name: vimRegistryEventEmpty
+// Description: This function returns an empty ASIM Registry Event schema
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimRegistryEventEmpty
+{
+let EmptyNewRegistryEvents = datatable(
+// ****** Mandatory LA fields ******
+    TimeGenerated:datetime, // => EventEndTime
+    _ResourceId:string,
+    Type:string,
+// ****** Event fields ******
+    EventType:string,
+    EventSubType:string,
+    EventProduct:string,
+    EventResult:string,
+    EventResultDetails:string,
+    EventOriginalSubType:string,
+    EventOriginalResultDetails:string,
+    EventSeverity:string,
+    EventOriginalSeverity:string,
+    EventSchema:string,
+    EventOwner:string,
+    EventProductVersion:string, 
+    EventCount:int, 
+    EventMessage:string, 
+    EventVendor:string, 
+    EventSchemaVersion:string, 
+    EventOriginalUid:string, 
+    EventOriginalType:string,
+    EventStartTime:datetime, 
+    EventEndTime:datetime, 
+    EventReportUrl:string, 
+    AdditionalFields:dynamic, 
+    //****** RegistryFields ****** 
+    RegistryKey:string,
+    RegistryValue:string,
+    RegistryValueType:string,
+    RegistryValueData:string,
+    RegistryPreviousKey:string,
+    RegistryPreviousValue:string,
+    RegistryPreviousValueType:string,
+    RegistryPreviousValueData:string,
+    //****** Device fields ******
+    DvcId:string, 
+    DvcHostname:string, 
+    DvcIpAddr:string, 
+    DvcOs:string, 
+    DvcOsVersion:string, 
+    DvcMacAddr:string,
+    DvcFQDN:string,
+    DvcDomain:string,
+    DvcDomainType:string,
+    DvcDescription:string,
+    DvcZone:string,
+    DvcAction:string,
+    DvcOriginalAction:string,
+    DvcInterface:string,
+    DvcScopeId:string,
+    DvcScope:string,
+    DvcIdType:string,
+    // -- User fields
+    ActorUsername:string, 
+    ActorUsernameType:string, 
+    ActorUserId:string, 
+    ActorUserIdType:string, 
+    ActorSessionId:string,
+    ActorUserAadId:string,
+    ActorUserSid:string,
+    ActorScopeId:string,
+    ActorScope:string,
+    ActorUserType:string,
+    ActorOriginalUserType:string,
+    ActingProcessCommandLine:string,
+    //****** Process fields ******
+    ActingProcessName:string,
+    ActingProcessId:string,
+    ActingProcessGuid:string,
+    ParentProcessName:string,
+    ParentProcessId:string,
+    ParentProcessGuid:string,
+    ParentProcessCommandLine:string,
+    //****** Inspection fields ******
+    RuleName:string,
+    RuleNumber:int,
+    ThreatId:string,
+    ThreatName:string,
+    ThreatCategory:string,
+    ThreatRiskLevel:int,
+    ThreatOriginalRiskLevel:string,
+    ThreatConfidence:int,
+    ThreatOriginalConfidence:string,
+    ThreatIsActive:bool,
+    ThreatFirstReportedTime:datetime,
+    ThreatLastReportedTime:datetime,
+    ThreatField:string,
+    //****** aliases ****** 
+    Dvc:string,
+    User:string,
+    Process:string,
+    Src:string,
+    Dst:string
+    )[];
+    EmptyNewRegistryEvents
+}
+
+
+
+//
+// Function Name: vimRegistryEventMicrosoft365D
+// Description: This ASIM parser supports normalizing Microsoft 365 Defender for endpoint logs, produced by the Microsoft Sentinel Microsoft 365 Defender connector, to the ASIM Registry Event normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimRegistryEventMicrosoft365D(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['registrykey_has_any']:dynamic=dynamic([]),
+    ['registryvalue_has_any']:dynamic=dynamic([]),
+    ['registrydata_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=false)
+{
+let RegistryType = datatable (TypeCode: string, TypeName: string)
+  [
+  "None", "Reg_None",
+  "String", "Reg_Sz",
+  "ExpandString", "Reg_Expand_Sz",
+  "Binary", "Reg_Binary",
+  "Dword", "Reg_DWord",
+  "MultiString", "Reg_Multi_Sz",
+  "QWord", "Reg_QWord"
+];
+let parser = (
+    starttime: datetime=datetime(null), 
+    endtime: datetime=datetime(null),
+    eventtype_in: dynamic=dynamic([]),
+    actorusername_has_any: dynamic=dynamic([]),
+    registrykey_has_any: dynamic =dynamic([]),
+    registryvalue_has_any: dynamic =dynamic([]),
+    registrydata_has_any: dynamic =dynamic([]),
+    dvchostname_has_any: dynamic=dynamic([]),
+    disabled: bool=false
+    ) {
+    DeviceRegistryEvents
+    | where not(disabled)
+    | where (isnull(starttime) or TimeGenerated >= starttime) 
+        and (isnull(endtime) or TimeGenerated <= endtime)
+    | where (array_length(eventtype_in) == 0 or ActionType in~ (eventtype_in)) and
+        (array_length(actorusername_has_any) == 0 or (InitiatingProcessAccountName has_any (actorusername_has_any)) or (InitiatingProcessAccountDomain has_any (actorusername_has_any)) or (strcat(InitiatingProcessAccountDomain, '\\', InitiatingProcessAccountName) has_any (actorusername_has_any))) and
+        ((array_length(registrykey_has_any)) == 0 or (RegistryKey has_any (registrykey_has_any)) or (PreviousRegistryKey has_any (registrykey_has_any))) and 
+        ((array_length(registryvalue_has_any)) == 0 or (RegistryValueName has_any (registryvalue_has_any)) or (PreviousRegistryValueName has_any (registryvalue_has_any))) and 
+        (array_length(registrydata_has_any) == 0 or RegistryValueData has_any (registrydata_has_any)) and
+        (array_length(dvchostname_has_any) == 0 or DeviceName has_any (dvchostname_has_any))
+    | extend
+        // Event
+        EventOriginalUid = tostring(ReportId), 
+        EventCount = int(1), 
+        EventProduct = 'M365 Defender for Endpoint', 
+        EventVendor = 'Microsoft', 
+        EventSchemaVersion = '0.1.0', 
+        EventStartTime = TimeGenerated, 
+        EventEndTime = TimeGenerated, 
+        EventType = ActionType,
+        // Registry
+        RegistryKey = iff (ActionType in ("RegistryKeyDeleted", "RegistryValueDeleted"), PreviousRegistryKey, RegistryKey),
+        RegistryValue = iff (ActionType == "RegistryValueDeleted", PreviousRegistryValueName, RegistryValueName),
+        // RegistryValueType -- original name is fine 
+        // RegistryValueData -- original name is fine 
+        RegistryKeyModified = iff (ActionType == "RegistryKeyRenamed", PreviousRegistryKey, ""),
+        RegistryValueModified = iff (ActionType == "RegistryValueSet", PreviousRegistryValueName, ""),
+        // RegistryValueTypeModified -- Not provided by Defender
+        RegistryValueDataModified = PreviousRegistryValueData
+    | where ((array_length(registrykey_has_any)) == 0 or (RegistryKey has_any (registrykey_has_any))) and
+        ((array_length(registryvalue_has_any)) == 0 or (RegistryValue has_any (registryvalue_has_any)))
+    | lookup RegistryType on $left.RegistryValueType == $right.TypeCode
+    | extend RegistryValueType = TypeName
+    | project-away
+        TypeName,
+        PreviousRegistryKey,
+        PreviousRegistryValueName,
+        PreviousRegistryValueData
+    // Device
+    | extend
+        DvcHostname = DeviceName, 
+        DvcId = DeviceId, 
+        Dvc = DeviceName 
+    // Users
+    | extend
+        ActorUsername = iff (InitiatingProcessAccountDomain == '', InitiatingProcessAccountName, strcat(InitiatingProcessAccountDomain, '\\', InitiatingProcessAccountName)), 
+        ActorUsernameType = iff(InitiatingProcessAccountDomain == '', 'Simple', 'Windows'), 
+        ActorUserIdType = 'SID'
+    //| project-away InitiatingProcessAccountDomain, InitiatingProcessAccountName
+    | project-rename
+        ActorUserId = InitiatingProcessAccountSid, 
+        ActorUserAadId = InitiatingProcessAccountObjectId, 
+        ActorUserUpn = InitiatingProcessAccountUpn
+    // Processes
+    | extend
+        ActingProcessId = tostring(InitiatingProcessId), 
+        ParentProcessId = tostring(InitiatingProcessParentId) 
+    | project-away InitiatingProcessId, InitiatingProcessParentId
+    | project-rename
+        ParentProcessName = InitiatingProcessParentFileName, 
+        ParentProcessCreationTime = InitiatingProcessParentCreationTime, 
+        ActingProcessName = InitiatingProcessFolderPath, 
+        ActingProcessFileName = InitiatingProcessFileName,
+        ActingProcessCommandLine = InitiatingProcessCommandLine, 
+        ActingProcessMD5 = InitiatingProcessMD5, 
+        ActingProcessSHA1 = InitiatingProcessSHA1, //OK
+        ActingProcessSHA256 = InitiatingProcessSHA256, 
+        ActingProcessIntegrityLevel = InitiatingProcessIntegrityLevel, 
+        ActingProcessTokenElevation = InitiatingProcessTokenElevation, 
+        ActingProcessCreationTime = InitiatingProcessCreationTime 
+    // -- aliases
+    | extend 
+        Username = ActorUsername,
+        UserId = ActorUserId,
+        UserIdType = ActorUserIdType,
+        User = ActorUsername,
+        CommandLine = ActingProcessCommandLine,
+        Process = ActingProcessName
+};
+parser (
+    starttime                = starttime,
+    endtime                  = endtime,
+    eventtype_in             = eventtype_in,
+    actorusername_has_any    = actorusername_has_any,
+    registrykey_has_any = registrykey_has_any,
+    registryvalue_has_any = registryvalue_has_any,
+    registrydata_has_any = registrydata_has_any,
+    dvchostname_has_any= dvchostname_has_any,
+    disabled                 = disabled
+)
+}
+
+
+
+//
+// Function Name: vimRegistryEventMicrosoftSecurityEvent
+// Description: This ASIM parser supports normalizing Microsoft Windows events (event numbers 4657 and 4663), logs ingested in 'SecurityEvent' table to the ASIM Registry Event normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimRegistryEventMicrosoftSecurityEvent(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['registrykey_has_any']:dynamic=dynamic([]),
+    ['registryvalue_has_any']:dynamic=dynamic([]),
+    ['registrydata_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=false)
+{
+let parser = (
+starttime: datetime=datetime(null),
+endtime: datetime=datetime(null),
+eventtype_in: dynamic=dynamic([]),
+actorusername_has_any: dynamic=dynamic([]),
+registrykey_has_any: dynamic =dynamic([]),
+registryvalue_has_any: dynamic =dynamic([]),
+registrydata_has_any: dynamic =dynamic([]),
+dvchostname_has_any: dynamic=dynamic([]),
+disabled: bool=false
+) {
+let ASIM_GetAccountType = (sid: string) {
+iif (
+sid in ("S-1-0-0", "S-1-5-18", "S-1-5-19", "S-1-5-20"),
+"Simple"
+    ,
+"Windows"
+)
+};
+    let ASIM_ParseSecurityEvents = (SecurityEvent: (SubjectDomainName: string, SubjectUserName: string, ProcessId: string, ObjectName: string, SubjectUserSid: string, SubjectLogonId: string, ProcessName: string)) {
+    SecurityEvent
+        | project-rename
+            ActorUsername = SubjectUserName
+            ,
+            ActorUserId = SubjectUserSid
+            ,
+            ActorSessionId = SubjectLogonId
+            ,
+            ActingProcessName = ProcessName
+            ,
+            ActorDomainName = SubjectDomainName
+        | extend
+            ActorUsername = iif(isnotempty(ActorDomainName), strcat(ActorDomainName, @'\', ActorUsername), ActorUsername)
+            ,
+            ActingProcessId = tostring(toint(tolong(ProcessId)))
+            ,
+            RegistryKey = iif(
+                ObjectName startswith @"\REGISTRY\MACHINE",
+                replace_string(ObjectName, @"\REGISTRY\MACHINE", "HKEY_LOCAL_MACHINE")
+            ,
+                replace_string(ObjectName, @"\REGISTRY\USER", "HKEY_USERS")
+            )
+};
+    let Event4663TypeLookup = datatable (AccessMask: string, EventType: string)
+        [
+    "0x1", "RegistryValueRead"
+        ,
+    "0x10", "RegistryKeyNotify"
+        ,
+    "0x10000", "RegistryKeyDeleted"
+        ,
+    "0x2", "RegistryValueSet"
+        ,
+    "0x20000", "MetadataAccessed"
+        ,
+    "0x20006", "RegistryValueSet"
+        ,
+    "0x40000", "MetadataModified"
+        ,
+    "0x8", "RegistrySubkeyEnumerated"
+];
+    let Event4567TypeLookup = datatable (EventOriginalSubType: string, EventType: string)
+        [
+    "%%1904", "RegistryValueSet"
+        ,
+    "%%1905", "RegistryValueSet"
+        ,
+    "%%1906", "RegistryValueDeleted"
+];
+    let RegistryType = datatable (TypeCode: string, TypeName: string)
+        [
+    "%%1872", "REG_NONE"
+        ,
+    "%%1873", "REG_SZ"
+        ,
+    "%%1874", "REG_EXPAND_SZ"
+        ,
+    "%%1875", "REG_BINARY"
+        ,
+    "%%1876", "REG_DWORD"
+        ,
+    "%%1879", "REG_MULTI_SZ"
+        ,
+    "%%1883", "REG_QWORD"
+];
+    union isfuzzy=false
+        (
+        SecurityEvent
+        | where not(disabled)
+        | where (isnull(starttime) or TimeGenerated >= starttime)
+            and (isnull(endtime) or TimeGenerated <= endtime)
+        | where EventID == 4663 and ObjectType == "Key"
+        | where (array_length(actorusername_has_any) == 0 or (SubjectDomainName has_any (actorusername_has_any)) or (SubjectUserName has_any (actorusername_has_any)) or (strcat(SubjectDomainName, '\\', SubjectUserName) has_any (actorusername_has_any))) and
+            (array_length(registryvalue_has_any) == 0) and
+            (array_length(registrydata_has_any) == 0) and
+            (array_length(dvchostname_has_any) == 0 or Computer has_any (dvchostname_has_any))
+        | lookup Event4663TypeLookup on AccessMask
+        | extend EventType = iif(isempty(EventType), "Other", EventType)
+        | where (array_length(eventtype_in) == 0 or EventType in~ (eventtype_in))
+        | invoke ASIM_ParseSecurityEvents()
+        | where (array_length(registrykey_has_any) == 0 or RegistryKey has_any (registrykey_has_any))
+        | project
+            TimeGenerated,
+            Computer,
+            EventID,
+            EventType,
+            ActorUsername,
+            ActorDomainName,
+            ActorUserId,
+            ActorSessionId,
+            ActingProcessName,
+            ActingProcessId,
+            RegistryKey,
+            _ResourceId,
+            Type
+        ),
+            (
+            SecurityEvent
+            | where not(disabled)
+            | where (isnull(starttime) or TimeGenerated >= starttime)
+                and (isnull(endtime) or TimeGenerated <= endtime)
+            | where EventID == 4657
+            | where (array_length(actorusername_has_any) == 0 or (SubjectDomainName has_any (actorusername_has_any)) or (SubjectUserName has_any (actorusername_has_any)) or (strcat(SubjectDomainName, '\\', SubjectUserName) has_any (actorusername_has_any))) and
+                (array_length(registryvalue_has_any) == 0 or (ObjectValueName) has_any (registrydata_has_any)) and
+                (array_length(registrydata_has_any) == 0 or (NewValue) has_any (registrydata_has_any)) and
+                (array_length(dvchostname_has_any) == 0 or Computer has_any (dvchostname_has_any))
+            | invoke ASIM_ParseSecurityEvents()
+            | where (array_length(registrykey_has_any) == 0 or RegistryKey has_any (registrykey_has_any))
+            | extend
+                EventOriginalSubType = OperationType
+                ,
+                RegistryValue = ObjectValueName
+            | lookup Event4567TypeLookup on EventOriginalSubType
+            | extend EventType = iif(isempty(EventType), "Other", EventType)
+            | where (array_length(eventtype_in) == 0 or EventType in~ (eventtype_in))
+            | project
+                TimeGenerated,
+                Computer,
+                EventID,
+                EventType,
+                ActorUsername,
+                ActorDomainName,
+                ActorUserId,
+                ActorSessionId,
+                ActingProcessName,
+                ActingProcessId,
+                RegistryKey,
+                _ResourceId,
+                Type,
+                NewValueType,
+                OldValueType,
+                EventOriginalSubType,
+                OldValue,
+                NewValue,
+                RegistryValue
+            )
+        | lookup RegistryType on $left.NewValueType == $right.TypeCode
+        | project-rename RegistryValueType = TypeName
+        | lookup RegistryType on $left.OldValueType == $right.TypeCode
+        | project-rename RegistryPreviousValueType = TypeName
+        | extend
+            RegistryValueData = iff (EventOriginalSubType == "%%1906", OldValue, NewValue)
+            ,
+            RegistryPreviousKey = iff (EventOriginalSubType == "%%1905", RegistryKey, "")
+            ,
+            RegistryPreviousValue = iff (EventOriginalSubType == "%%1905", RegistryValue, "")
+            ,
+            RegistryPreviousValueData = iff (EventOriginalSubType == "%%1905", OldValue, "")
+        | project-away
+            NewValueType,
+            OldValueType,
+            EventOriginalSubType,
+            OldValue,
+            NewValue
+    | invoke _ASIM_ResolveFQDN ("Computer")
+    | extend
+        ActorUserIdType = iff (ActorUserId <> "S-1-0-0", "SID", ""),
+        ActorUserId = iff (ActorUserId <> "S-1-0-0", ActorUserId, "")
+    | project-rename
+        DvcDomainType = DomainType
+        ,
+        DvcHostname = ExtractedHostname
+    | extend
+        DvcFQDN = iif(DvcDomainType == "FQDN", FQDN, "")
+        ,
+        DvcDomain = iif(isnotempty(Domain), Domain, "")
+        ,
+        Dvc = iif(DvcDomainType == "FQDN", FQDN, "DvcHostname")
+    | extend
+        ActorUserType = _ASIM_GetWindowsUserType(ActorUsername, ActorUserId)
+        ,
+        ActorUsernameType = ASIM_GetAccountType(ActorUserId)
+    | extend
+        User = ActorUsername
+        ,
+        UserId = ActorUserId
+        ,
+        ActorUserSid = ActorUserId
+        ,
+        Process = ActingProcessName
+        ,
+        Dvc = iif(DvcDomainType == "FQDN", Computer, "")
+        ,
+        EventStartTime = TimeGenerated
+        ,
+        EventEndTime = TimeGenerated
+        ,
+        EventOriginalType = tostring(EventID)
+    | extend
+        EventSchemaVersion = "0.1"
+        ,
+        EventSchema = "RegistryEvent"
+        ,
+        EventCount = toint(1)
+        ,
+        EventResult = "Success"
+        ,
+        EventVendor = "Microsoft"
+        ,
+        EventProduct = "Security Events"
+        ,
+        DvcOs = "Windows"
+        | project-away ActorDomainName,ActorUserSid,ActorUserType,Computer,Domain,DvcDomainType,DvcDomain,DvcFQDN,EventID,FQDN,UserId,_ResourceId
+};
+parser (
+    starttime                = starttime,
+    endtime                  = endtime,
+    eventtype_in             = eventtype_in,
+    actorusername_has_any    = actorusername_has_any,
+    registrykey_has_any = registrykey_has_any,
+    registryvalue_has_any = registryvalue_has_any,
+    registrydata_has_any = registrydata_has_any,
+    dvchostname_has_any= dvchostname_has_any,
+    disabled                 = disabled
+)
+}
+
+
+
+//
+// Function Name: vimRegistryEventMicrosoftSysmon
+// Description: This ASIM parser supports normalizing Microsoft Sysmon events (event number 12, 13, 14) logs ingested in 'Event' table to the ASIM Registry Event normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimRegistryEventMicrosoftSysmon(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['registrykey_has_any']:dynamic=dynamic([]),
+    ['registryvalue_has_any']:dynamic=dynamic([]),
+    ['registrydata_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=false)
+{
+let parser = (
+  starttime: datetime=datetime(null), 
+  endtime: datetime=datetime(null),
+  eventtype_in: dynamic=dynamic([]),
+  actorusername_has_any: dynamic=dynamic([]),
+  registrykey_has_any: dynamic =dynamic([]),
+  registryvalue_has_any: dynamic =dynamic([]),
+  registrydata_has_any: dynamic =dynamic([]),
+  dvchostname_has_any: dynamic=dynamic([]),
+  disabled: bool=false
+  ) {
+  let RegistryAction = datatable (EventType: string, NewEventType: string)
+      [
+  "CreateKey", "RegistryKeyCreated",
+  "DeleteKey", "RegistryKeyDeleted",
+  "DeleteValue", "RegistryValueDeleted", 
+  "SetValue", "RegistryValueSet",
+  "RenameKey", "RegistryKeyRenamed"
+  ];     
+      let Hives = datatable (KeyPrefix: string, Hive: string)
+          [
+      "HKLM", "HKEY_LOCAL_MACHINE",
+      "HKU", "HKEY_USERS", 
+      "HKCR", "HKEY_LOCAL_MACHINE\\Classes" 
+  ];
+      // this is the parser for sysmon from Event table
+      // Create the raw table from the raw XML file structure
+      let ParsedRegistryEvent_Event=() {
+      Event
+          | where not(disabled)
+          | where (isnull(starttime) or TimeGenerated >= starttime) 
+              and (isnull(endtime) or TimeGenerated <= endtime)
+          | where Source == "Microsoft-Windows-Sysmon" and EventID in (12, 13, 14)
+          | where (array_length(actorusername_has_any) == 0 or (EventData has_any (actorusername_has_any))) and
+              (array_length(registrydata_has_any) == 0 or EventData has_any (registrydata_has_any)) and
+              (array_length(dvchostname_has_any) == 0 or Computer has_any (dvchostname_has_any))
+          | parse EventData with 
+              * '<Data Name="RuleName">'RuleName // parsing the XML using the original fields name - for readibliy 
+              '</Data><Data Name="EventType">'EventType
+              '</Data><Data Name="UtcTime">'UtcTime
+              '</Data><Data Name="ProcessGuid">{'ProcessGuid
+              '}</Data><Data Name="ProcessId">'ProcessId
+              '</Data><Data Name="Image">'Image
+              '</Data><Data Name="TargetObject">'TargetObject
+              '</Data>' EventDataRemainder 
+          | parse EventDataRemainder with '<Data Name="Details">' Parameter '</Data><Data Name="User">' ActorUsername '</Data>' *
+          | where (array_length(actorusername_has_any) == 0 or (ActorUsername has_any (actorusername_has_any)))
+          | project-away EventDataRemainder
+          // End of XML parse
+          | extend 
+              EventStartTime = todatetime(TimeGenerated), 
+              EventEndTime = todatetime(TimeGenerated), 
+              EventCount = int(1), 
+              EventVendor = "Microsoft",
+              EventSchemaVersion = "0.1.0", 
+              EventProduct = "Sysmon",
+              EventOriginalType = tostring(EventID), 
+              DvcOs = "Windows",
+              ActorUsernameType = iff(isnotempty(ActorUsername), 'Windows', '')
+          | project-rename 
+              EventMessage = RenderedDescription, 
+              DvcHostName = Computer, 
+              ActingProcessId = ProcessId,
+              ActingProcessGuid = ProcessGuid, 
+              ActingProcessName = Image 
+          // Lookup Event Type
+          | lookup RegistryAction on EventType 
+          | project-rename EventOriginalSubType = EventType
+          | project-rename EventType = NewEventType
+          | where (array_length(eventtype_in) == 0 or EventType in~ (eventtype_in))
+          // Normalize Key Hive
+          | parse TargetObject with KeyPrefix "\\" KeyMain
+          | lookup Hives on KeyPrefix
+          | extend Key = strcat (Hive, "\\", KeyMain)
+          | parse Parameter with KeyPrefix "\\" KeyMain
+          | lookup Hives on KeyPrefix
+          | extend NewName = strcat (Hive, "\\", KeyMain)
+          | project-away KeyPrefix, KeyMain, Hive
+          // Split Key and Value for relevant events 
+          | extend ParsedKey = extract_all (@"^(.+)\\(.+)$", Key)
+          | extend Key = iff (EventType in ("RegistryValueSet", "RegistryValueDeleted"), ParsedKey[0][0], Key)
+          | extend Value = iff (EventType in ("RegistryValueSet", "RegistryValueDeleted"), ParsedKey[0][1], "")
+          | extend ParsedKey = extract_all (@"^(.+)\\(.+)$", NewName)
+          | extend NewKey = ParsedKey[0][0]
+          | extend NewValue = ParsedKey[0][1]
+          | project-away ParsedKey, TargetObject, NewName
+          // Set normalized registry fields
+          | extend
+              RegistryKey = iff (EventType == "RegistryKeyRenamed", NewKey, Key),
+              RegistryKeyModified = iff (EventType in ("RegistryKeyRenamed", "RegistryValueSet"), Key, ""),
+              RegistryValue = iff (EventType in ("RegistryValueSet", "RegistryValueDeleted"), Value, ""),
+              RegistryValueModified = iff (EventType == "RegistryValueSet", Value, ""),
+              RegistryValueData = iff (EventType == "RegistryValueSet", Parameter, "")
+          | where (array_length(registrykey_has_any) == 0 or (RegistryKey has_any (registrykey_has_any))) and 
+              (array_length(registryvalue_has_any) == 0 or (RegistryValue has_any (registryvalue_has_any))) and 
+              (array_length(registrydata_has_any) == 0 or RegistryValueData has_any (registrydata_has_any))
+          | extend // aliases
+              User = ActorUsername,
+              Process = ActingProcessName,
+              Dvc = DvcHostName,
+              EventResult = "Success",
+              EventSchema = "RegistryEvent",
+              Rule = RuleName
+          | project-away
+              Parameter,
+              Value,
+              Key,
+              NewKey,
+              NewValue,
+              EventData,
+              ParameterXml,
+              AzureDeploymentID,DvcHostName,EventCategory,EventID,EventLevelName,EventLevel,EventLog,Hive1,MG,ManagementGroupName,Message,RegistryKeyModified,_ResourceId,RegistryValueModified,Role,SourceSystem,Source,TenantId,UserName,UtcTime
+  };
+          ParsedRegistryEvent_Event  
+  };
+  parser (
+      starttime                = starttime,
+      endtime                  = endtime,
+      eventtype_in             = eventtype_in,
+      actorusername_has_any    = actorusername_has_any,
+      registrykey_has_any = registrykey_has_any,
+      registryvalue_has_any = registryvalue_has_any,
+      registrydata_has_any = registrydata_has_any,
+      dvchostname_has_any= dvchostname_has_any,
+      disabled                 = disabled
+  )
+}
+
+
+
+//
+// Function Name: vimRegistryEventMicrosoftSysmonWindowsEvent
+// Description: This ASIM parser supports normalizing Microsoft Sysmon events (event number 12, 13, 14) logs ingested in 'WindowsEvent' table to the ASIM Registry Event normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimRegistryEventMicrosoftSysmonWindowsEvent(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['registrykey_has_any']:dynamic=dynamic([]),
+    ['registryvalue_has_any']:dynamic=dynamic([]),
+    ['registrydata_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=false)
+{
+let parser = (
+  starttime: datetime=datetime(null), 
+  endtime: datetime=datetime(null),
+  eventtype_in: dynamic=dynamic([]),
+  actorusername_has_any: dynamic=dynamic([]),
+  registrykey_has_any: dynamic =dynamic([]),
+  registryvalue_has_any: dynamic =dynamic([]),
+  registrydata_has_any: dynamic =dynamic([]),
+  dvchostname_has_any: dynamic=dynamic([]),
+  disabled: bool=false
+  ) {
+  let RegistryAction = datatable (EventType: string, NewEventType: string)
+      [
+  "CreateKey", "RegistryKeyCreated",
+  "DeleteKey", "RegistryKeyDeleted",
+  "DeleteValue", "RegistryValueDeleted", 
+  "SetValue", "RegistryValueSet",
+  "RenameKey", "RegistryKeyRenamed"
+  ];     
+      let Hives = datatable (KeyPrefix: string, Hive: string)
+          [
+      "HKLM", "HKEY_LOCAL_MACHINE",
+      "HKU", "HKEY_USERS", 
+      "HKCR", "HKEY_LOCAL_MACHINE\\Classes" 
+  ];
+      // this is the parser for sysmon from WindowsEvent table
+      let ParsedRegistryEvent_WindowsEvent=() {
+      WindowsEvent
+          | where not(disabled)
+          | where (isnull(starttime) or TimeGenerated >= starttime) 
+              and (isnull(endtime) or TimeGenerated <= endtime)
+          | where Provider == "Microsoft-Windows-Sysmon" and EventID in (12, 13, 14)
+          | where (array_length(actorusername_has_any) == 0 or (tostring(EventData.User) has_any (actorusername_has_any))) and
+              (array_length(registrydata_has_any) == 0 or (tostring(EventData.Parameter) has_any (registrydata_has_any))) and
+              (array_length(dvchostname_has_any) == 0 or Computer has_any (dvchostname_has_any))
+          | extend 
+              EventStartTime = todatetime(TimeGenerated), 
+              EventEndTime = todatetime(TimeGenerated), 
+              EventCount = int(1), 
+              EventVendor = "Microsoft",
+              EventSchemaVersion = "0.1.0", 
+              EventProduct = "Sysmon",
+              EventOriginalType = tostring(EventID),
+              EventType = tostring(EventData.EventType),
+              DvcOs = "Windows",
+              EventMessage = tostring(EventData.RenderedDescription), 
+              ActorUsername = tostring(EventData.User),
+              ActingProcessId = tostring(EventData.ProcessId),
+              ActingProcessGuid = extract ('^{(.*)}$', 1, tostring(EventData.ProcessGuid), typeof(string)),
+              ActingProcessName = tostring(EventData.Image),
+              TargetObject = tostring(EventData.TargetObject),
+              Parameter = tostring(EventData.Parameter)
+          | project-rename
+              DvcHostName = Computer 
+          | lookup RegistryAction on EventType
+          | where (array_length(eventtype_in) == 0 or EventType in~ (eventtype_in))
+          | project-rename EventOriginalSubType = EventType
+          | project-rename EventType = NewEventType
+          // Normalize Key Hive
+          | parse TargetObject with KeyPrefix "\\" KeyMain
+          | lookup Hives on KeyPrefix
+          | extend Key = strcat (Hive, "\\", KeyMain)
+          | parse Parameter with KeyPrefix "\\" KeyMain
+          | lookup Hives on KeyPrefix
+          | extend NewName = strcat (Hive, "\\", KeyMain)
+          | project-away KeyPrefix, KeyMain, Hive
+          // Split Key and Value for relevant events 
+          | extend ParsedKey = extract_all (@"^(.+)\\(.+)$", Key)
+          | extend Key = iff (EventType in ("RegistryValueSet", "RegistryValueDeleted"), ParsedKey[0][0], Key)
+          | extend Value = iff (EventType in ("RegistryValueSet", "RegistryValueDeleted"), ParsedKey[0][1], "")
+          | extend ParsedKey = extract_all (@"^(.+)\\(.+)$", NewName)
+          | extend NewKey = ParsedKey[0][0]
+          | extend NewValue = ParsedKey[0][1]
+          | project-away ParsedKey, TargetObject, NewName
+          // Set normalized registry fields
+          | extend
+              RegistryKey = iff (EventType == "RegistryKeyRenamed", NewKey, Key),
+              RegistryKeyModified = iff (EventType in ("RegistryKeyRenamed", "RegistryValueSet"), Key, ""),
+              RegistryValue = iff (EventType in ("RegistryValueSet", "RegistryValueDeleted"), Value, ""),
+              RegistryValueModified = iff (EventType == "RegistryValueSet", Value, ""),
+              RegistryValueData = iff (EventType == "RegistryValueSet", Parameter, ""),
+              ActorUsernameType =  iff(isnotempty(ActorUsername), 'Windows', '')
+          | where (array_length(registrykey_has_any) == 0 or (RegistryKey has_any (registrykey_has_any))) and 
+              (array_length(registryvalue_has_any) == 0 or (RegistryValue has_any (registryvalue_has_any))) and 
+              (array_length(registrydata_has_any) == 0 or RegistryValueData has_any (registrydata_has_any))
+          | extend // aliases
+              User = ActorUsername,
+              Process = ActingProcessName,
+              Dvc = DvcHostName,
+              EventResult = "Success",
+              EventSchema = "RegistryEvent"
+          | project-away
+              Parameter,
+              Value,
+              Key,
+              NewKey,
+              NewValue,
+              EventData,
+              Channel,Correlation,Data,DvcHostName,EventID,EventLevelName,EventLevel,EventOriginId,EventRecordId,Hive1,Keywords,ManagementGroupName,_ResourceId,Opcode,Provider,RawEventData,RegistryKeyModified,RegistryValueModified,SourceSystem,SystemProcessId,SystemThreadId,SystemUserId,Task,TenantId,TimeCreated,Version,_ResourceId
+  };
+          ParsedRegistryEvent_WindowsEvent
+  };
+  parser (
+      starttime                = starttime,
+      endtime                  = endtime,
+      eventtype_in             = eventtype_in,
+      actorusername_has_any    = actorusername_has_any,
+      registrykey_has_any = registrykey_has_any,
+      registryvalue_has_any = registryvalue_has_any,
+      registrydata_has_any = registrydata_has_any,
+      dvchostname_has_any= dvchostname_has_any,
+      disabled                 = disabled
+  )
+}
+
+
+
+//
+// Function Name: vimRegistryEventMicrosoftWindowsEvent
+// Description: This ASIM parser supports normalizing Microsoft Windows events (event numbers 4657 and 4663), logs ingested in 'WindowsEvent' table to the ASIM Registry Event normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimRegistryEventMicrosoftWindowsEvent(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['registrykey_has_any']:dynamic=dynamic([]),
+    ['registryvalue_has_any']:dynamic=dynamic([]),
+    ['registrydata_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=false)
+{
+let parser = (
+starttime: datetime=datetime(null), 
+endtime: datetime=datetime(null),
+eventtype_in: dynamic=dynamic([]),
+actorusername_has_any: dynamic=dynamic([]),
+registrykey_has_any: dynamic =dynamic([]),
+registryvalue_has_any: dynamic =dynamic([]),
+registrydata_has_any: dynamic =dynamic([]),
+dvchostname_has_any: dynamic=dynamic([]),
+disabled: bool=false
+) {
+let ASIM_GetAccountType = (sid: string) { 
+iif ( 
+sid in ("S-1-0-0", "S-1-5-18", "S-1-5-19", "S-1-5-20"),
+"Simple"
+    ,
+"Windows"
+)
+};
+    let ASIM_ParseWindowsEvents = (WindowsEvent: (EventData: dynamic)) {
+    WindowsEvent
+        | extend
+            ActorUsername = iif(isnotempty(EventData.SubjectDomainName), strcat(EventData.SubjectDomainName, @'\', EventData.SubjectUserName), EventData.SubjectUserName)
+            ,
+            ActorDomainName = tostring(EventData.SubjectDomainName)
+            ,
+            ActorUserId = tostring(EventData.SubjectUserSid)
+            ,
+            ActorSessionId = tostring(EventData.SubjectLogonId)
+            ,
+            ActingProcessName = tostring(EventData.ProcessName)
+            ,
+            ActingProcessId = tostring(toint(tolong(EventData.ProcessId)))
+            ,
+            RegistryKey = iif(
+                EventData.ObjectName startswith @"\REGISTRY\MACHINE",
+                replace_string(tostring(EventData.ObjectName), @"\REGISTRY\MACHINE", "HKEY_LOCAL_MACHINE")
+            ,
+                replace_string(tostring(EventData.ObjectName), @"\REGISTRY\USER", "HKEY_USERS")
+            )
+};
+    let Event4663TypeLookup = datatable (AccessMask: string, EventType: string)
+        [
+    "0x1", "RegistryValueRead"
+        ,
+    "0x10", "RegistryKeyNotify"
+        ,
+    "0x10000", "RegistryKeyDeleted"
+        ,
+    "0x2", "RegistryValueSet"
+        ,
+    "0x20000", "MetadataAccessed"
+        ,
+    "0x20006", "RegistryValueSet"
+        ,
+    "0x40000", "MetadataModified"
+        ,
+    "0x8", "RegistrySubkeyEnumerated"
+];
+    let Event4567TypeLookup = datatable (EventOriginalSubType: string, EventType: string)
+        [
+    "%%1904", "RegistryValueSet"
+        ,
+    "%%1905", "RegistryValueSet"
+        ,
+    "%%1906", "RegistryValueDeleted"
+];
+    let RegistryType = datatable (TypeCode: string, TypeName: string)
+        [
+    "%%1872", "REG_NONE"
+        ,
+    "%%1873", "REG_SZ"
+        ,
+    "%%1874", "REG_EXPAND_SZ"
+        ,
+    "%%1875", "REG_BINARY"
+        ,
+    "%%1876", "REG_DWORD"
+        ,
+    "%%1879", "REG_MULTI_SZ"
+        ,
+    "%%1883", "REG_QWORD"
+];
+    union isfuzzy=false
+        (
+        WindowsEvent
+        | where not(disabled)
+        | where (isnull(starttime) or TimeGenerated >= starttime) 
+            and (isnull(endtime) or TimeGenerated <= endtime)
+        | where EventID == 4663 and EventData.ObjectType == "Key"
+        | where (array_length(actorusername_has_any) == 0 or (EventData.SubjectDomainName has_any (actorusername_has_any)) or (EventData.SubjectUserName has_any (actorusername_has_any)) or (strcat(EventData.SubjectDomainName, '\\', EventData.SubjectUserName) has_any (actorusername_has_any))) and
+            (array_length(registryvalue_has_any) == 0) and 
+            (array_length(registrydata_has_any) == 0) and
+            (array_length(dvchostname_has_any) == 0 or Computer has_any (dvchostname_has_any))
+        | extend
+            AccessMask = tostring(EventData.AccessMask)
+            ,
+            Type = "WindowsEvent"
+        | lookup Event4663TypeLookup on AccessMask
+        | extend EventType = iif(isempty(EventType), "Other", EventType)
+        | where (array_length(eventtype_in) == 0 or EventType in~ (eventtype_in))
+        | invoke ASIM_ParseWindowsEvents()
+        | where (array_length(registrykey_has_any) == 0 or RegistryKey has_any (registrykey_has_any))
+        | project
+            TimeGenerated,
+            Computer,
+            EventID,
+            EventType,
+            ActorUsername,
+            ActorDomainName,
+            ActorUserId,
+            ActorSessionId,
+            ActingProcessName,
+            ActingProcessId,
+            RegistryKey,
+            _ResourceId,
+            Type
+        ),
+        (
+        union isfuzzy=false
+            (
+            WindowsEvent
+            | where not(disabled)
+            | where (isnull(starttime) or TimeGenerated >= starttime) 
+                and (isnull(endtime) or TimeGenerated <= endtime)
+            | where EventID == 4657
+            | where (array_length(actorusername_has_any) == 0 or (EventData.SubjectDomainName has_any (actorusername_has_any)) or (EventData.SubjectUserName has_any (actorusername_has_any)) or (strcat(EventData.SubjectDomainName, '\\', EventData.SubjectUserName) has_any (actorusername_has_any))) and
+                (array_length(registryvalue_has_any) == 0 or (EventData.ObjectValueName) has_any (registryvalue_has_any)) and 
+                (array_length(registrydata_has_any) == 0 or (EventData.NewValue) has_any (registrydata_has_any)) and
+                (array_length(dvchostname_has_any) == 0 or Computer has_any (dvchostname_has_any))
+            | invoke ASIM_ParseWindowsEvents()
+            | where (array_length(registrykey_has_any) == 0 or RegistryKey has_any (registrykey_has_any))
+            | extend
+                EventOriginalSubType = tostring(EventData.OperationType)
+                ,
+                OldValue = tostring(EventData.OldValue)
+                ,
+                NewValue = tostring(EventData.NewValue)
+                ,
+                RegistryValue = tostring(EventData.ObjectValueName)
+                ,
+                NewValueType = tostring(EventData.NewValueType)
+                ,
+                OldValueType = tostring(EventData.OldValueType)
+            | lookup Event4567TypeLookup on EventOriginalSubType
+            | extend EventType = iif(isempty(EventType), "Other", EventType)
+            | where (array_length(eventtype_in) == 0 or EventType in~ (eventtype_in))
+            | project
+                TimeGenerated,
+                Computer,
+                EventID,
+                EventType,
+                ActorUsername,
+                ActorDomainName,
+                ActorUserId,
+                ActorSessionId,
+                ActingProcessName,
+                ActingProcessId,
+                RegistryKey,
+                _ResourceId,
+                RegistryValue,
+                Type,
+                NewValueType,
+                OldValueType,
+                EventOriginalSubType,
+                OldValue,
+                NewValue
+            )
+        | lookup RegistryType on $left.NewValueType == $right.TypeCode
+        | project-rename RegistryValueType = TypeName
+        | lookup RegistryType on $left.OldValueType == $right.TypeCode
+        | project-rename RegistryPreviousValueType = TypeName
+        | extend
+            RegistryValueData = iff (EventOriginalSubType == "%%1906", OldValue, NewValue)
+            ,
+            RegistryPreviousKey = iff (EventOriginalSubType == "%%1905", RegistryKey, "")
+            ,
+            RegistryPreviousValue = iff (EventOriginalSubType == "%%1905", RegistryValue, "")
+            ,
+            RegistryPreviousValueData = iff (EventOriginalSubType == "%%1905", OldValue, "")
+        | project-away
+            NewValueType,
+            OldValueType,
+            EventOriginalSubType,
+            OldValue,
+            NewValue
+        )
+    | invoke _ASIM_ResolveFQDN ("Computer")
+    | extend
+        ActorUserIdType = iff (ActorUserId <> "S-1-0-0", "SID", ""),
+        ActorUserId = iff (ActorUserId <> "S-1-0-0", ActorUserId, "")
+    | project-rename
+        DvcDomainType = DomainType
+        ,
+        DvcHostname = ExtractedHostname
+    | extend
+        DvcFQDN = iif(DvcDomainType == "FQDN", FQDN, "")
+        ,
+        DvcDomain = iif(isnotempty(Domain), Domain, "")
+        ,
+        Dvc = iif(DvcDomainType == "FQDN", FQDN, "DvcHostname")
+    | extend
+        ActorUserType = _ASIM_GetWindowsUserType(ActorUsername, ActorUserId)
+        ,
+        ActorUsernameType = ASIM_GetAccountType(ActorUserId)
+    | extend
+        User = ActorUsername
+        ,
+        UserId = ActorUserId
+        ,
+        ActorUserSid = ActorUserId
+        ,
+        Process = ActingProcessName
+        ,
+        Dvc = iif(DvcDomainType == "FQDN", Computer, "")
+        ,
+        EventStartTime = TimeGenerated
+        ,
+        EventEndTime = TimeGenerated
+        ,
+        EventOriginalType = tostring(EventID)
+    | extend
+        EventSchemaVersion = "0.1" 
+        ,
+        EventSchema = "RegistryEvent"
+        ,
+        EventCount = toint(1)
+        ,
+        EventResult = "Success"
+        ,
+        EventVendor = "Microsoft"
+        ,
+        EventProduct = "Security Events" 
+        ,
+        DvcOs = "Windows"
+    | project-away ActorDomainName,ActorUserSid,ActorUserType,Computer,Domain,DvcDomainType,DvcDomain,DvcFQDN,EventID,FQDN,UserId,_ResourceId
+};
+parser (
+    starttime                = starttime,
+    endtime                  = endtime,
+    eventtype_in             = eventtype_in,
+    actorusername_has_any    = actorusername_has_any,
+    registrykey_has_any = registrykey_has_any,
+    registryvalue_has_any = registryvalue_has_any,
+    registrydata_has_any = registrydata_has_any,
+    dvchostname_has_any= dvchostname_has_any,
+    disabled                 = disabled
+)
+}
+
+
+
+//
+// Function Name: vimRegistryEventNative
+// Description: This ASIM parser supports normalizing the native Registry Event table (ASimRegistryEventLogs) to the ASIM Registry Event normalized schema. While the native table is ASIM compliant, the parser is needed to add capabilities, such as aliases, available only at query time.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimRegistryEventNative(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['registrykey_has_any']:dynamic=dynamic([]),
+    ['registryvalue_has_any']:dynamic=dynamic([]),
+    ['registrydata_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=false)
+{
+let parser = (
+  starttime: datetime=datetime(null), 
+  endtime: datetime=datetime(null),
+  eventtype_in: dynamic=dynamic([]),
+  actorusername_has_any: dynamic=dynamic([]),
+  registrykey_has_any: dynamic =dynamic([]),
+  registryvalue_has_any: dynamic =dynamic([]),
+  registrydata_has_any: dynamic =dynamic([]),
+  dvchostname_has_any: dynamic=dynamic([]),
+  disabled: bool=false
+  ) {
+  ASimRegistryEventLogs
+  | where not(disabled)
+  | where (isnull(starttime) or TimeGenerated >= starttime) 
+      and (isnull(endtime) or TimeGenerated <= endtime)
+  | where (array_length(eventtype_in) == 0 or EventType in~ (eventtype_in)) and
+      (array_length(actorusername_has_any) == 0 or (ActorUsername has_any (actorusername_has_any))) and
+      ((array_length(registrykey_has_any)) == 0 or (RegistryKey has_any (registrykey_has_any))) and 
+      ((array_length(registryvalue_has_any)) == 0 or (RegistryValue has_any (registryvalue_has_any))) and 
+      (array_length(registrydata_has_any) == 0 or RegistryValueData has_any (registrydata_has_any)) and
+      (array_length(dvchostname_has_any) == 0 or DvcHostname has_any (dvchostname_has_any))
+  | project-rename
+      EventUid = _ItemId
+  | extend          
+      EventSchema = "RegistryEvent",
+      DvcScopeId = iff(isempty(DvcScopeId), _SubscriptionId, DvcScopeId)
+  //  -- Aliases
+  | extend
+      EventEndTime = iff (isnull(EventEndTime), TimeGenerated, EventEndTime),
+      EventStartTime = iff (isnull(EventEndTime), TimeGenerated, EventStartTime),
+      Dvc = coalesce (DvcFQDN, DvcHostname, DvcIpAddr, DvcId, _ResourceId),
+      User =  ActorUsername,
+      Rule = coalesce(RuleName, tostring(RuleNumber)),
+      Process =  ActingProcessName
+  | project-away
+      TenantId,
+      SourceSystem,
+      _SubscriptionId,
+      _ResourceId
+};
+parser (
+    starttime                = starttime,
+    endtime                  = endtime,
+    eventtype_in             = eventtype_in,
+    actorusername_has_any    = actorusername_has_any,
+    registrykey_has_any = registrykey_has_any,
+    registryvalue_has_any = registryvalue_has_any,
+    registrydata_has_any = registrydata_has_any,
+    dvchostname_has_any= dvchostname_has_any,
+    disabled                 = disabled
+)
+}
+
+
+

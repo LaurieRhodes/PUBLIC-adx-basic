@@ -1,0 +1,2341 @@
+//
+// Function Name: vimAuthenticationM365Defender
+// Description: This ASIM parser supports filtering and normalizing endpoint authentication events, collected by Microsoft 365 Defender for Endpoint, stored in the  DeviceLogonEvents table, to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimAuthenticationM365Defender(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['username_has_any']:dynamic=dynamic([]),
+    ['targetappname_has_any']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False)
+{
+let EventResultDetailsLookup=datatable
+(
+    EventOriginalResultDetails: string,
+    EventResultDetails: string
+)
+[
+    'InvalidUserNameOrPassword', 'No such user or password'
+];
+let EventSubTypeLookup = datatable (EventOriginalType: string, EventSubType: string)
+[ 
+    'Interactive', 'Interactive',
+    'Remote interactive (RDP) logons', 'RemoteInteractive',
+    'Network', 'Remote',
+    'Batch', 'Service',
+    'Service', 'Service',
+    'Unknown', '',
+    'RemoteInteractive', 'RemoteInteractive',
+    'CachedInteractive', 'Interactive'
+];
+let EventResultLookup = datatable (ActionType: string, EventResult: string)
+[ 
+    'LogonSuccess', 'Success',
+    'LogonFailed', 'Failure',
+    'LogonAttempted', 'NA'
+];
+let parser = (
+    starttime: datetime=datetime(null), 
+    endtime: datetime=datetime(null), 
+    username_has_any: dynamic = dynamic([]),
+    targetappname_has_any: dynamic = dynamic([]),
+    srcipaddr_has_any_prefix: dynamic = dynamic([]),
+    srchostname_has_any: dynamic = dynamic([]),
+    eventtype_in: dynamic = dynamic([]),
+    eventresultdetails_in: dynamic = dynamic([]),
+    eventresult: string = '*',
+    disabled: bool=false
+    )
+{
+    let UnixDeviceLogonEvents = (disabled: bool=false)
+{
+    DeviceLogonEvents  
+        | where not(disabled)
+        // -- prefilter
+        | where
+            (isnull(starttime) or TimeGenerated >= starttime) 
+            and (isnull(endtime) or TimeGenerated <= endtime) 
+            and ((array_length(username_has_any) == 0) or (InitiatingProcessAccountName has_any (username_has_any)) or AccountName has_any (username_has_any))
+            and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+            and ((array_length(srcipaddr_has_any_prefix) == 0) or has_any_ipv4_prefix(RemoteIP, srcipaddr_has_any_prefix))
+            and ((array_length(srchostname_has_any) == 0) or (RemoteDeviceName has_any (srchostname_has_any)))
+            and ((array_length(eventtype_in) == 0) or "Logon" in~ (eventtype_in))
+        // eventresultdetails_in filtering done later in the parser
+        // eventresult filtering done later in the parser
+        // -- end prefilter
+        | where InitiatingProcessFolderPath startswith "/"
+        | extend 
+            TargetDvcOs        = "Linux"
+            ,
+            ActorUsernameType  = "Simple"
+            ,
+            TargetUsernameType = "Simple"
+        | project-rename 
+            ActorUsername      = InitiatingProcessAccountName
+            ,
+            ActingProcessName  = InitiatingProcessFolderPath
+            ,
+            TargetUsername     = AccountName
+        | project-away 
+            InitiatingProcessAccountSid,
+            AccountDomain,
+            InitiatingProcessAccountDomain,
+            InitiatingProcessFileName,
+            AccountSid
+};
+    let WindowsDeviceLogonEvents = (disabled: bool=false)
+{
+    DeviceLogonEvents  
+        | where not(disabled)
+        // -- prefilter
+        | where
+            (isnull(starttime) or TimeGenerated >= starttime) 
+            and (isnull(endtime) or TimeGenerated <= endtime) 
+            and ((array_length(username_has_any) == 0) or (AccountName has_any (username_has_any)) or (AccountDomain has_any (username_has_any)) or (strcat(AccountDomain, '\\', AccountName) has_any (username_has_any)) or (InitiatingProcessAccountName has_any (username_has_any)) or (InitiatingProcessAccountDomain has_any (username_has_any)) or (strcat(InitiatingProcessAccountDomain, '\\', InitiatingProcessAccountName) has_any (username_has_any)))
+            and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+            and ((array_length(srcipaddr_has_any_prefix) == 0) or has_any_ipv4_prefix(RemoteIP, srcipaddr_has_any_prefix))
+            and ((array_length(srchostname_has_any) == 0) or (RemoteDeviceName has_any (srchostname_has_any)))
+            and ((array_length(eventtype_in) == 0) or "Logon" in~ (eventtype_in))
+        // eventresultdetails_in filtering done later in the parser
+        // eventresult filtering done later in the parser
+        // -- end prefilter
+        | where InitiatingProcessFolderPath !startswith "/"
+        | extend 
+            TargetDvcOs = "Windows"
+            ,
+            TargetUserIdType            = 'SID'
+            ,
+            ActorUserIdType             = 'SID'
+            ,
+            ActorUsername               = case
+                              (
+                                  isempty(InitiatingProcessAccountName),
+                                  "",
+                                  isempty(InitiatingProcessAccountDomain),
+                                  InitiatingProcessAccountName,
+                                  strcat(InitiatingProcessAccountDomain, '\\', InitiatingProcessAccountName)
+                              )
+            ,
+            TargetUsername              = iff
+                              (
+                                  isempty(AccountDomain),
+                                  AccountName,
+                                  strcat(AccountDomain, '\\', AccountName)
+                              )           
+            ,
+            TargetUsernameType          = iff (AccountDomain == '', 'Simple', 'Windows')
+            ,
+            ActorUsernameType           = iff (InitiatingProcessAccountDomain == '', 'Simple', 'Windows')
+            ,
+            ActingProcessName           = strcat (InitiatingProcessFolderPath, '\\', InitiatingProcessFileName)
+        | project-rename 
+            ActorUserId        = InitiatingProcessAccountSid
+            ,
+            TargetUserId       = AccountSid
+        // -- Specific identifiers aliases
+        | extend 
+            TargetUserSid         = TargetUserId
+            ,
+            ActorUserSid          = ActorUserId
+            ,
+            TargetWindowsUsername = TargetUsername
+            ,
+            ActorWindowsUsername  = ActorUsername
+            ,
+            ActorUserType         = _ASIM_GetWindowsUserType (ActorUsername, ActorUserId)
+        | extend 
+            TargetUserType = iff
+                (
+                    IsLocalAdmin, 
+                    'Admin',
+                    _ASIM_GetWindowsUserType (TargetWindowsUsername, TargetUserSid)
+                )
+        | project-away
+            InitiatingProcessAccountName,
+            InitiatingProcessAccountDomain,
+            AccountDomain,
+            AccountName,
+            InitiatingProcessFolderPath,
+            InitiatingProcessFileName
+};
+    union 
+        WindowsDeviceLogonEvents (disabled=disabled),
+        UnixDeviceLogonEvents (disabled=disabled)
+    | project-away SourceSystem, TenantId, Timestamp, MachineGroup
+    // mapping ASimMatchingUsername
+    | extend
+        temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+        ,
+        temp_isMatchActorUsername=ActorUsername has_any(username_has_any)
+    | extend ASimMatchingUsername = case
+                                (
+                                    array_length(username_has_any) == 0,
+                                    "-",
+                                    temp_isMatchTargetUsername and temp_isMatchActorUsername,
+                                    "Both",
+                                    temp_isMatchTargetUsername,
+                                    "TargetUsername",
+                                    temp_isMatchActorUsername,
+                                    "ActorUsername",
+                                    "No match"
+                                )
+    | project-rename 
+        EventOriginalResultDetails  = FailureReason 
+        ,
+        EventOriginalType           = LogonType
+        ,
+        EventUid                    = _ItemId
+        ,
+        LogonProtocol               = Protocol
+        ,
+        TargetDvcId                 = DeviceId
+        ,
+        SrcHostname                 = RemoteDeviceName
+        ,
+        ActingProcessCommandLine    = InitiatingProcessCommandLine
+        ,
+        ActingProcessCreationTime   = InitiatingProcessCreationTime
+        ,
+        ActingProcessMD5            = InitiatingProcessMD5
+        ,
+        ActingProcessSHA1           = InitiatingProcessSHA1 
+        ,
+        ActingProcessSHA256         = InitiatingProcessSHA256
+        ,
+        ActingProcessIntegrityLevel = InitiatingProcessIntegrityLevel
+        ,
+        ActingProcessTokenElevation = InitiatingProcessTokenElevation
+        ,
+        ParentProcessName           = InitiatingProcessParentFileName
+        ,
+        ParentProcessCreationTime   = InitiatingProcessParentCreationTime
+        //??, ActingProcessName           = InitiatingProcessFolderPath 
+        ,
+        ActorUserUpn                = InitiatingProcessAccountUpn
+        ,
+        ActorUserAadId              = InitiatingProcessAccountObjectId
+        ,
+        SrcPortNumber               = RemotePort
+    | extend 
+        EventCount                  = int(1)
+        ,
+        EventStartTime              = TimeGenerated
+        ,
+        EventEndTime                = TimeGenerated
+        ,
+        EventSchemaVersion          = '0.1.3'
+        ,
+        EventType                   = 'Logon'
+        ,
+        EventVendor                 = 'Microsoft'
+        ,
+        EventProduct                = 'M365 Defender for EndPoint'
+        ,
+        EventSchema                 = 'Authentication'
+        ,
+        TargetDvcIdType             = 'MDEid'
+        ,
+        ActingProcessId             = tostring (InitiatingProcessId)
+        ,
+        ParentProcessId             = tostring (InitiatingProcessParentId)
+        ,
+        EventOriginalUid            = tostring (ReportId)
+        ,
+        TargetSessionId             = tostring (LogonId)
+        ,
+        SrcIpAddr                   = iff (RemoteIP == '-', '', RemoteIP)
+    | extend
+        Hash = coalesce
+      (
+          ActingProcessSHA256
+        ,
+          ActingProcessSHA1
+        ,
+          ActingProcessMD5
+      )
+    | extend
+        HashType = tostring(dynamic(["SHA256", "SHA1", "MD5"])[array_index_of(pack_array(ActingProcessSHA256, ActingProcessSHA1, ActingProcessMD5), Hash)])     
+    | invoke _ASIM_ResolveFQDN('DeviceName')
+    | project-rename 
+        TargetFQDN         = FQDN
+        ,
+        TargetHostname     = ExtractedHostname
+        ,
+        TargetDomainType   = DomainType
+        ,
+        TargetDomain       = Domain  
+    | project-away DeviceName
+    | lookup EventResultDetailsLookup on EventOriginalResultDetails
+    // filtering on 'eventresultdetails_in', 'TargetUsername' and 'ActorUsername'
+    | where (array_length(eventresultdetails_in) == 0 or EventResultDetails in~ (eventresultdetails_in))
+        and ((array_length(username_has_any) == 0) or (TargetUsername has_any (username_has_any)) or (ActorUsername has_any (username_has_any)))
+    | lookup EventSubTypeLookup on EventOriginalType
+    | lookup EventResultLookup on ActionType
+    // Filtering on 'eventresult'
+    | where (eventresult == "*" or (EventResult == eventresult))
+    | extend
+        EventSeverity = iff (EventResult == "Success", "Informational", "Low")
+    // -- Specific identifiers aliases
+    | extend
+        TargetDvcMDEid        = TargetDvcId
+        ,
+        DvcMDEid              = TargetDvcId
+    // --  Aliases
+    | extend 
+        User          = TargetUsername 
+        ,
+        Prcess        = ActingProcessName
+        ,
+        IpAddr        = SrcIpAddr
+        ,
+        ActingAppName = ActingProcessName
+        ,
+        ActingAppType = "Process"
+        ,
+        Dvc           = coalesce (TargetFQDN, TargetHostname)
+        ,
+        Src           = coalesce (SrcIpAddr, SrcHostname)
+        // -- Alias Dvc to Target
+        ,
+        DvcFQDN       = TargetFQDN
+        ,
+        DvcHostname   = TargetHostname
+        ,
+        DvcDomain     = TargetDomain
+        ,
+        DvcDomainType = TargetDomainType
+        ,
+        DvcId         = TargetDvcId
+        ,
+        DvcIdType     = TargetDvcIdType
+        ,
+        DvcOs         = TargetDvcOs
+    | extend 
+        LogonTarget   = Dvc
+        ,
+        Dst = Dvc
+    | project-away
+        ReportId,
+        LogonId,
+        InitiatingProcessId,
+        InitiatingProcessParentId,
+        ActionType,
+        InitiatingProcessFileSize,
+        InitiatingProcessVersionInfoCompanyName,
+        InitiatingProcessVersionInfoFileDescription,
+        InitiatingProcessVersionInfoInternalFileName,
+        InitiatingProcessVersionInfoOriginalFileName,
+        InitiatingProcessVersionInfoProductName,
+        InitiatingProcessVersionInfoProductVersion,
+        AppGuardContainerId,
+        RemoteIPType,
+        IsLocalAdmin,
+        RemoteIP,
+        temp*
+};
+parser (
+  starttime=starttime,
+  endtime=endtime,
+  username_has_any=username_has_any,
+  targetappname_has_any=targetappname_has_any,
+  srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+  srchostname_has_any=srchostname_has_any,
+  eventtype_in=eventtype_in,
+  eventresultdetails_in=eventresultdetails_in,
+  eventresult=eventresult,
+  disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimAuthenticationMD4IoT
+// Description: This ASIM parser supports filtering and normalizing Microsoft Defender for IoT endpoint logs to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimAuthenticationMD4IoT(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['username_has_any']:dynamic=dynamic([]),
+    ['targetappname_has_any']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False)
+{
+let Authentication_MD4IoT=(
+  starttime: datetime=datetime(null), 
+  endtime: datetime=datetime(null), 
+  username_has_any: dynamic = dynamic([]),
+  targetappname_has_any: dynamic = dynamic([]),
+  srcipaddr_has_any_prefix: dynamic = dynamic([]),
+  srchostname_has_any: dynamic = dynamic([]),
+  eventtype_in: dynamic = dynamic([]),
+  eventresultdetails_in: dynamic = dynamic([]),
+  eventresult: string = '*',
+  disabled: bool=false
+  ) {
+  SecurityIoTRawEvent
+  | where not(disabled)
+  | where RawEventName == "Login"
+  // ************************************************************************* 
+  //       <Prefilterring>
+  // *************************************************************************
+  | where 
+      (isnull(starttime) or TimeGenerated >= starttime) 
+      and (isnull(endtime) or TimeGenerated <= endtime)
+      and ((array_length(username_has_any) == 0) or EventDetails has_any (username_has_any))
+      and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+      and ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(EventDetails, srcipaddr_has_any_prefix)))
+      and (array_length(srchostname_has_any) == 0) // SrcHostname not available in source
+      // Filtering for eventtype_in done later in the parser
+      and (array_length(eventresultdetails_in) == 0) // EventResultDetails not available in source
+  // Filtering for eventresult done later in the parser
+  // ************************************************************************* 
+  //       </Prefilterring>
+  // ************************************************************************* 
+  | extend
+      EventDetails = todynamic(EventDetails)
+  //
+  | extend
+      EventOriginalUid = tostring(EventDetails.OriginalEventId), 
+      EventProduct = 'Microsoft Defender for IoT',
+      EventCount=int(1),
+      EventVendor = 'Microsoft', 
+      EventSchemaVersion = '0.1.0', 
+      EventStartTime = todatetime(EventDetails.TimestampUTC), 
+      EventEndTime = todatetime(TimeGenerated), 
+      EventType = iff (EventDetails.Operation == 'Logout', 'Logoff', 'Logon'),  
+      EventResult = iff (EventDetails.Operation == 'LoginFailed', 'Failure', 'Success')  
+  // Filtering on 'eventtype_in' and 'eventresult'
+  | where ((array_length(eventtype_in) == 0) or EventType in~ (eventtype_in))
+      and (eventresult == "*" or (EventResult == eventresult))
+  | extend
+      ActingProcessId = tostring(EventDetails.ProcessId),  
+      ActingProcessName = tostring(EventDetails.Executable),  // -- Linux input device or service used to authenticate, for example pts/1, tty1, pts/0, ssh:notty 
+      DvcOs = iif (EventDetails.MessageSource == "Linux", "Linux", "Windows"),  // -- Intermediate fix
+      TargetUsernameType = "Simple",
+      TargetUsername = tostring(EventDetails.UserName)
+  | extend SrcIpAddr = tostring(EventDetails.RemoteAddress)
+  // Post-filtering on username_has_any and srcipaddr_has_any_prefix
+  | where ((array_length(username_has_any) == 0) or TargetUsername has_any (username_has_any))
+      and ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(SrcIpAddr, srcipaddr_has_any_prefix)))
+  // mapping ASimMatchingUsername
+  | extend temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+  // ActorUsername not coming from source. Hence, not mapped.
+  | extend ASimMatchingUsername = case
+      (
+                                  array_length(username_has_any) == 0,
+                                  "-",
+                                  temp_isMatchTargetUsername,
+                                  "TargetUsername",
+                                  "No match"
+                              )
+  | project-rename
+      DvcHostname = DeviceId, 
+      EventProductVersion = AgentVersion,  // -- Not available in Windows
+      _ResourceId = AssociatedResourceId, 
+      _SubscriptionId = AzureSubscriptionId 
+  //
+  // -- aliases
+  | extend 
+      User = TargetUsername, 
+      Process = ActingProcessName, 
+      Dvc = DvcHostname,
+      SrcDvcIpAddr = SrcIpAddr,
+      IpAddr = SrcIpAddr
+};
+  Authentication_MD4IoT(
+  starttime=starttime,
+  endtime=endtime,
+  username_has_any=username_has_any,
+  targetappname_has_any=targetappname_has_any,
+  srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+  srchostname_has_any=srchostname_has_any,
+  eventtype_in=eventtype_in,
+  eventresultdetails_in=eventresultdetails_in,
+  eventresult=eventresult,
+  disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimAuthenticationMicrosoftWindowsEvent
+// Description: This ASIM parser supports filtering and normalizing Windows Authentication events (4624, 4625, 4634, and 4647), collected either by the Log Analytics Agent or the Azure Monitor Agent, into either the WindowsEvent (WEF) or SecurityEvent tables, to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimAuthenticationMicrosoftWindowsEvent(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['username_has_any']:dynamic=dynamic([]),
+    ['targetappname_has_any']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False)
+{
+let LogonEvents=dynamic([4624, 4625]);
+let LogoffEvents=dynamic([4634, 4647]);
+let LogonTypes=datatable(LogonType: int, EventSubType: string)
+[
+    2, 'Interactive',
+    3, 'Network',
+    4, 'Batch',
+    5, 'Service',
+    7, 'Unlock',
+    8, 'NetworkCleartext',
+    9, 'NewCredentials',
+    10, 'RemoteInteractive',
+    11, 'CachedInteractive'
+];
+// https://techcommunity.microsoft.com/t5/core-infrastructure-and-security/quick-reference-troubleshooting-netlogon-error-codes/ba-p/256000
+let LogonStatus=datatable 
+(
+    EventStatus: string,
+    EventOriginalResultDetails: string,
+    EventResultDetails: string
+)
+[
+    '0x80090325', 'SEC_E_UNTRUSTED_ROOT', 'Other',
+    '0xc0000064', 'STATUS_NO_SUCH_USER', 'No such user or password',
+    '0xc000006f', 'STATUS_INVALID_LOGON_HOURS', 'Logon violates policy',
+    '0xc0000070', 'STATUS_INVALID_WORKSTATION', 'Logon violates policy',
+    '0xc0000071', 'STATUS_PASSWORD_EXPIRED', 'Password expired',
+    '0xc0000072', 'STATUS_ACCOUNT_DISABLED', 'User disabled',
+    '0xc0000133', 'STATUS_TIME_DIFFERENCE_AT_DC', 'Other',
+    '0xc000018d', 'STATUS_TRUSTED_RELATIONSHIP_FAILURE', 'Other',
+    '0xc0000193', 'STATUS_ACCOUNT_EXPIRED', 'Account expired',
+    '0xc0000380', 'STATUS_SMARTCARD_WRONG_PIN', 'Other',
+    '0xc0000381', 'STATUS_SMARTCARD_CARD_BLOCKED', 'Other',
+    '0xc0000382', 'STATUS_SMARTCARD_CARD_NOT_AUTHENTICATED', 'Other',
+    '0xc0000383', 'STATUS_SMARTCARD_NO_CARD', 'Other',
+    '0xc0000384', 'STATUS_SMARTCARD_NO_KEY_CONTAINER', 'Other',
+    '0xc0000385', 'STATUS_SMARTCARD_NO_CERTIFICATE', 'Other',
+    '0xc0000386', 'STATUS_SMARTCARD_NO_KEYSET', 'Other',
+    '0xc0000387', 'STATUS_SMARTCARD_IO_ERROR', 'Other',
+    '0xc0000388', 'STATUS_DOWNGRADE_DETECTED', 'Other',
+    '0xc0000389', 'STATUS_SMARTCARD_CERT_REVOKED', 'Other',
+    '0x80090302', 'SEC_E_UNSUPPORTED_FUNCTION', 'Other',
+    '0x80090308', 'SEC_E_INVALID_TOKEN', 'Other',
+    '0x8009030e', 'SEC_E_NO_CREDENTIALS', 'Other',
+    '0xc0000008', 'STATUS_INVALID_HANDLE', 'Other',
+    '0xc0000017', 'STATUS_NO_MEMORY', 'Other',
+    '0xc0000022', 'STATUS_ACCESS_DENIED', 'Other',
+    '0xc0000034', 'STATUS_OBJECT_NAME_NOT_FOUND', 'Other',
+    '0xc000005e', 'STATUS_NO_LOGON_SERVERS', 'Other',
+    '0xc000006a', 'STATUS_WRONG_PASSWORD', 'Incorrect password',
+    '0xc000006d', 'STATUS_LOGON_FAILURE', 'Other',
+    '0xc000006e', 'STATUS_ACCOUNT_RESTRICTION', 'Logon violates policy',
+    '0xc0000073', 'STATUS_NONE_MAPPED', 'Other',
+    '0xc00000fe', 'STATUS_NO_SUCH_PACKAGE', 'Other',
+    '0xc000009a', 'STATUS_INSUFFICIENT_RESOURCES', 'Other',
+    '0xc00000dc', 'STATUS_INVALID_SERVER_STATE', 'Other',
+    '0xc0000106', 'STATUS_NAME_TOO_LONG', 'Other',
+    '0xc000010b', 'STATUS_INVALID_LOGON_TYPE', 'Logon violates policy',
+    '0xc000015b', 'STATUS_LOGON_TYPE_NOT_GRANTED', 'Logon violates policy',
+    '0xc000018b', 'STATUS_NO_TRUST_SAM_ACCOUNT', 'Logon violates policy',
+    '0xc0000224', 'STATUS_PASSWORD_MUST_CHANGE', 'Other',
+    '0xc0000234', 'STATUS_ACCOUNT_LOCKED_OUT', 'User locked',
+    '0xc00002ee', 'STATUS_UNFINISHED_CONTEXT_DELETED', 'Other'
+];
+let WinLogon=(
+    starttime: datetime=datetime(null), 
+    endtime: datetime=datetime(null), 
+    username_has_any: dynamic = dynamic([]),
+    targetappname_has_any: dynamic = dynamic([]),
+    srcipaddr_has_any_prefix: dynamic = dynamic([]),
+    srchostname_has_any: dynamic = dynamic([]),
+    eventtype_in: dynamic = dynamic([]),
+    eventresultdetails_in: dynamic = dynamic([]),
+    eventresult: string = '*',
+    disabled: bool=false)
+{ 
+    WindowsEvent
+    | where not(disabled)
+    // ************************************************************************* 
+    //       <Prefilterring>
+    // *************************************************************************
+    | where 
+        (isnull(starttime) or TimeGenerated >= starttime)
+        and (isnull(endtime) or TimeGenerated <= endtime)
+        and ((array_length(username_has_any) == 0) or (tostring(EventData.TargetUserName) has_any (username_has_any)) or (tostring(EventData.TargetDomainName) has_any (username_has_any)) or (strcat(tostring(EventData.TargetDomainName), '\\', tostring(EventData.TargetUserName)) has_any (username_has_any)) or (tostring(EventData.SubjectUserName) has_any (username_has_any)) or (tostring(EventData.SubjectDomainName) has_any (username_has_any)) or (strcat(tostring(EventData.SubjectDomainName), '\\', tostring(EventData.SubjectUserName)) has_any (username_has_any)))
+        and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+        and ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(tostring(EventData.IpAddress), srcipaddr_has_any_prefix)))
+        and (array_length(srchostname_has_any) == 0 or tostring(EventData.WorkstationName) has_any (srchostname_has_any))
+    // eventtype_in filtering done later in the parser
+    // eventresultdetails_in filtering done later in the parser
+    // eventresult filtering done later in the parser
+    // ************************************************************************* 
+    //       </Prefilterring>
+    // ************************************************************************* 
+    | where Provider == 'Microsoft-Windows-Security-Auditing'
+    | where EventID in (LogonEvents) or EventID in (LogoffEvents)
+    | extend
+        LogonProtocol = tostring(EventData.AuthenticationPackageName),
+        SrcDvcIpAddr = tostring(EventData.IpAddress), // Backword Compatibility. Will be removed by July 2024
+        SrcIpAddr = tostring(EventData.IpAddress),
+        TargetPortNumber = toint(EventData.IpPort),
+        LogonGuid = tostring(EventData.LogonGuid),
+        LogonType = toint(EventData.LogonType),
+        ActingProcessCreationTime = EventData.ProcessCreationTime,
+        ActingProcessId = tostring(toint(EventData.ProcessId)),
+        ActingProcessName = tostring(EventData.ProcessName),
+        Status = tostring(EventData.Status),
+        ActorSessionId = tostring(EventData.SubjectLogonId),
+        ActorUsername = tostring(iff (EventData.SubjectDomainName in ('-', ''), EventData.SubjectUserName, strcat(EventData.SubjectDomainName, @"\", EventData.SubjectUserName))),
+        ActorUserId = tostring(EventData.SubjectUserSid),
+        SubStatus = tostring(EventData.SubStatus),
+        TargetDomainName = tostring(EventData.TargetDomainName),
+        TargetSessionId = tostring(EventData.TargetLogonId),
+        TargetUserId = tostring(EventData.TargetUserSid),
+        TargetUsername = tostring(iff (EventData.TargetDomainName in ('-', ''), EventData.TargetUserName, strcat(EventData.TargetDomainName, @"\", EventData.TargetUserName)))
+    // mapping ASimMatchingUsername
+    | extend
+        temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+        ,
+        temp_isMatchActorUsername=ActorUsername has_any(username_has_any)
+    | extend ASimMatchingUsername = case
+                                (
+                                    array_length(username_has_any) == 0,
+                                    "-",
+                                    temp_isMatchTargetUsername and temp_isMatchActorUsername,
+                                    "Both",
+                                    temp_isMatchTargetUsername,
+                                    "TargetUsername",
+                                    temp_isMatchActorUsername,
+                                    "ActorUsername",
+                                    "No match"
+                                )
+    | extend 
+        SrcDvcHostname = tostring(EventData.WorkstationName), // Backword Compatibility. Will be removed by July 2024
+        SrcHostname = tostring(EventData.WorkstationName),
+        EventProduct = "Security Events"
+    | extend EventStatus= iff(SubStatus == '0x0', Status, SubStatus)
+    // -- creating EventMessage matching EventMessage in SecurityEvent table
+    | extend
+        EventMessage = case
+              (
+                  EventID == 4634,
+                  "4634 - An account was logged off.", 
+                  EventID == 4625,
+                  "4625 - An account failed to log on.",
+                  EventID == 4624,
+                  "4624 - An account was successfully logged on.",
+                  "4647 - User initiated logoff."
+              ),
+        EventResult = iff(EventID == 4625, 'Failure', 'Success')
+    // Filtering on 'eventresult' and 'username_has_any'
+    | where (eventresult == "*" or (EventResult == eventresult))
+        and ((array_length(username_has_any) == 0) or (TargetUsername has_any (username_has_any)) or (ActorUsername has_any (username_has_any)))
+    | project-rename 
+        TargetDvcHostname = Computer
+        ,
+        EventOriginalUid = EventOriginId
+        ,
+        EventOriginalType=EventID
+    | extend
+        EventCount=int(1)
+        ,
+        EventSchemaVersion='0.1.3'
+        ,
+        ActorUserIdType='SID'
+        ,
+        TargetUserIdType='SID'
+        ,
+        EventVendor='Microsoft'  
+        ,
+        EventStartTime =TimeGenerated
+        ,
+        EventEndTime=TimeGenerated
+        ,
+        EventType=iff(EventOriginalType in (LogoffEvents), 'Logoff', 'Logon')                  
+        ,
+        ActorUsernameType= iff(EventData.SubjectDomainName in ('-', ''), 'Simple', 'Windows')                  
+        ,
+        TargetUsernameType=iff (TargetDomainName in ('-', ''), 'Simple', 'Windows')
+        ,
+        SrcDvcOs = 'Windows'
+        ,
+        EventStatus= iff(SubStatus == '0x0', Status, SubStatus)
+    // filtering on 'eventtype_in'
+    | where (array_length(eventtype_in) == 0 or EventType in~ (eventtype_in))
+    | extend
+        ActorUserType = _ASIM_GetWindowsUserType (ActorUsername, ActorUserId)
+        ,
+        TargetUserType = _ASIM_GetWindowsUserType (TargetUsername, TargetUserId)
+    | lookup LogonStatus on EventStatus
+    // filtering on 'eventresultdetails_in'
+    | where (array_length(eventresultdetails_in) == 0 or EventResultDetails in~ (eventresultdetails_in))
+    | lookup LogonTypes on LogonType
+    /// ** Aliases 
+    | extend
+        User=TargetUsername
+        ,
+        LogonTarget=TargetDvcHostname
+        ,
+        Dvc=SrcHostname
+};
+let SecEventLogon =(starttime: datetime=datetime(null), 
+    endtime: datetime=datetime(null), 
+    username_has_any: dynamic = dynamic([]),
+    targetappname_has_any: dynamic = dynamic([]),
+    srcipaddr_has_any_prefix: dynamic = dynamic([]),
+    srchostname_has_any: dynamic = dynamic([]),
+    eventtype_in: dynamic = dynamic([]),
+    eventresultdetails_in: dynamic = dynamic([]),
+    eventresult: string = '*',
+    disabled: bool=false)
+{
+    SecurityEvent
+    | where not(disabled)
+    // ************************************************************************* 
+    //       <Prefilterring>
+    // *************************************************************************
+    | where 
+        (isnull(starttime) or TimeGenerated >= starttime)
+        and (isnull(endtime) or TimeGenerated <= endtime)
+        and ((array_length(username_has_any) == 0) or (TargetUserName has_any (username_has_any)) or (TargetDomainName has_any (username_has_any)) or (strcat(TargetDomainName, '\\', TargetUserName) has_any (username_has_any)) or (SubjectUserName has_any (username_has_any)) or (SubjectDomainName has_any (username_has_any)) or (strcat(SubjectDomainName, '\\', SubjectUserName) has_any (username_has_any)))
+        and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+        and ((array_length(srcipaddr_has_any_prefix) == 0) or has_any_ipv4_prefix(IpAddress, srcipaddr_has_any_prefix))
+        and ((array_length(srchostname_has_any) == 0) or (WorkstationName has_any (srchostname_has_any)))
+    // eventtype_in filtering done later in the parser
+    // eventresultdetails_in filtering done later in the parser
+    // eventresult filtering done later in the parser
+    // ************************************************************************* 
+    //       </Prefilterring>
+    // ************************************************************************* 
+    | where EventID in (LogonEvents) or 
+        EventID in (LogoffEvents)
+    | project-rename 
+        EventMessage = Activity
+        ,
+        ActorSessionId=SubjectLogonId
+        ,
+        TargetSessionId=TargetLogonId
+        ,
+        ActorUserId=SubjectUserSid
+        ,
+        TargetUserId =TargetUserSid
+        ,
+        SrcDvcHostname = WorkstationName // Backword Compatibility. Will be removed by July 2024
+        ,
+        TargetDvcHostname = Computer
+        ,
+        EventOriginalUid = EventOriginId
+        ,
+        LogonProtocol=AuthenticationPackageName
+        ,
+        SrcDvcIpAddr=IpAddress // Backword Compatibility. Will be removed by July 2024
+        ,
+        EventOriginalType=EventID
+    | extend
+        EventResult = iff(EventOriginalType == 4625, 'Failure', 'Success')
+        ,
+        EventCount=int(1)
+        ,
+        EventSchemaVersion='0.1.0'
+        ,
+        EventProduct = "Security Events"
+        ,
+        ActorUserIdType='SID'
+        ,
+        TargetUserIdType='SID'
+        ,
+        EventVendor='Microsoft' 
+        ,
+        EventStartTime =TimeGenerated
+        ,
+        EventEndTime=TimeGenerated
+        ,
+        EventType=iff(EventOriginalType in (LogoffEvents), 'Logoff', 'Logon')
+        ,
+        ActorUsername = iff (SubjectDomainName in ('-', ''), SubjectUserName, SubjectAccount)
+        ,
+        ActorUsernameType= iff(SubjectDomainName in ('-', ''), 'Simple', 'Windows')
+        ,
+        TargetUsername = iff (TargetDomainName in ('-', ''), trim(@'\\', TargetUserName), trim(@'\\', TargetAccount))
+        ,
+        TargetUsernameType=iff (TargetDomainName in ('-', ''), 'Simple', 'Windows')
+        ,
+        SrcDvcOs = 'Windows'
+        ,
+        EventStatus= iff(SubStatus == '0x0', Status, SubStatus)
+        ,
+        SrcHostname = SrcDvcHostname // Backword Compatibility. Will be removed by July 2024
+        ,
+        SrcIpAddr = SrcDvcIpAddr // Backword Compatibility. Will be removed by July 2024
+    // mapping ASimMatchingUsername
+    | extend
+        temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+        ,
+        temp_isMatchActorUsername=ActorUsername has_any(username_has_any)
+    | extend ASimMatchingUsername = case
+                                (
+                                    array_length(username_has_any) == 0,
+                                    "-",
+                                    temp_isMatchTargetUsername and temp_isMatchActorUsername,
+                                    "Both",
+                                    temp_isMatchTargetUsername,
+                                    "TargetUsername",
+                                    temp_isMatchActorUsername,
+                                    "ActorUsername",
+                                    "No match"
+                                )
+    // filtering on 'eventtype_in', 'eventresult', 'TargetUsername' and 'ActorUsername'
+    | where (array_length(eventtype_in) == 0 or EventType in~ (eventtype_in))
+        and (eventresult == "*" or (EventResult == eventresult))
+        and ((array_length(username_has_any) == 0) or (TargetUsername has_any (username_has_any)) or (ActorUsername has_any (username_has_any)))
+    | project-away TargetUserName, AccountType
+    | extend
+        ActorUserType = _ASIM_GetWindowsUserType (ActorUsername, ActorUserId)
+        ,
+        TargetUserType = _ASIM_GetWindowsUserType (TargetUsername, TargetUserId)
+    | lookup LogonStatus on EventStatus
+    // filtering on 'eventresultdetails_in'
+    | where (array_length(eventresultdetails_in) == 0 or EventResultDetails in~ (eventresultdetails_in))
+    | lookup LogonTypes on LogonType
+    /// ** Aliases 
+    | extend
+        User=TargetUsername
+        ,
+        LogonTarget=TargetDvcHostname
+        ,
+        Dvc=SrcDvcHostname
+};
+union isfuzzy=true SecEventLogon(starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled=disabled)
+              ,    WinLogon(starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled=disabled)
+}
+
+
+
+//
+// Function Name: vimAuthenticationOktaSSO
+// Description: This ASIM parser supports normalizing Okta sign in logs, stored in the  Okta_CL table to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimAuthenticationOktaSSO(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['username_has_any']:dynamic=dynamic([]),
+    ['targetappname_has_any']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False)
+{
+let OktaSignin = (
+  starttime: datetime=datetime(null), 
+  endtime: datetime=datetime(null), 
+  username_has_any: dynamic = dynamic([]),
+  targetappname_has_any: dynamic = dynamic([]),
+  srcipaddr_has_any_prefix: dynamic = dynamic([]),
+  srchostname_has_any: dynamic = dynamic([]),
+  eventtype_in: dynamic = dynamic([]),
+  eventresultdetails_in: dynamic = dynamic([]),
+  eventresult: string = '*',
+  disabled: bool=false) {
+  let OktaSuccessfulOutcome = dynamic(['SUCCESS', 'ALLOW']);
+  let OktaFailedOutcome = dynamic(['FAILURE', 'SKIPPED', 'DENY']);
+  let OktaSigninEvents=dynamic(['user.session.start', 'user.session.end']);
+  let emptyOctV1Table = datatable(TimeGenerated: datetime)[];
+    // https://developer.okta.com/docs/reference/api/event-types/#catalog
+    let OktaV1 = union isfuzzy=true emptyOctV1Table, Okta_CL 
+        | where not(disabled)
+        // ************************************************************************* 
+        //       <Prefiltering>
+        // *************************************************************************
+        | extend 
+            outcome_result_s=column_ifexists('outcome_result_s', ""),
+            eventType_s=column_ifexists('eventType_s', ""),
+            legacyEventType_s=column_ifexists('legacyEventType_s', ""),
+            client_geographicalContext_geolocation_lat_d = column_ifexists('client_geographicalContext_geolocation_lat_d', ""),
+            client_geographicalContext_geolocation_lon_d = column_ifexists('client_geographicalContext_geolocation_lon_d', ""),
+            actor_alternateId_s = column_ifexists('actor_alternateId_s', ""),
+            client_ipAddress_s = column_ifexists('client_ipAddress_s', "")
+        | where 
+            (isnull(starttime) or TimeGenerated >= starttime) 
+            and (isnull(endtime) or TimeGenerated <= endtime)
+            and ((array_length(username_has_any) == 0) or actor_alternateId_s has_any (username_has_any))
+            and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+            and ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(client_ipAddress_s, srcipaddr_has_any_prefix)))
+            and (array_length(srchostname_has_any) == 0) // SrcHostname not available in source
+            // eventtype_in filtering done later in the parser
+            and (array_length(eventresultdetails_in) == 0) // EventResultDetails not available in source
+        // eventresult filtering done later in the parser
+        // ************************************************************************* 
+        //       </Prefiltering>
+        // ************************************************************************* 
+        | where eventType_s in (OktaSigninEvents)
+        | extend 
+            EventProduct='Okta'
+            ,
+            EventVendor='Okta'
+            ,
+            EventSchema = 'Authentication'
+            ,
+            EventCount=int(1)
+            ,
+            EventSchemaVersion='0.1.0'
+            ,
+            EventResult = case (outcome_result_s in (OktaSuccessfulOutcome), 'Success', outcome_result_s in (OktaFailedOutcome), 'Failure', 'Partial')
+            ,
+            EventStartTime=TimeGenerated
+            ,
+            EventEndTime=TimeGenerated
+            ,
+            EventType=iff(eventType_s hassuffix 'start', 'Logon', 'Logoff')
+            ,
+            EventSubType=legacyEventType_s
+            ,
+            EventMessage=column_ifexists('displayMessage_s', "")
+            ,
+            EventOriginalResultDetails=column_ifexists('outcome_reason_s', "")
+            ,
+            EventOriginalUid = column_ifexists('uuid_g', "")
+            ,
+            TargetUserIdType='OktaId'
+            ,
+            TargetUsernameType='UPN'
+            ,
+            TargetSessionId=column_ifexists('authenticationContext_externalSessionId_s', "")
+            ,
+            TargetUserId=column_ifexists('actor_id_s', "")
+            ,
+            TargetUsername=column_ifexists('actor_alternateId_s', "")
+            ,
+            TargetUserType=column_ifexists('actor_type_s', "")
+            ,
+            SrcGeoLatitude=toreal(client_geographicalContext_geolocation_lat_d)
+            ,
+            SrcGeoLongitude=toreal(client_geographicalContext_geolocation_lon_d)
+            ,
+            SrcDvcOs=column_ifexists('client_userAgent_os_s', "")
+            ,
+            SrcIsp=column_ifexists('securityContext_isp_s', "")
+            ,
+            SrcGeoCity=column_ifexists('client_geographicalContext_city_s', "")
+            ,
+            SrcGeoCountry=column_ifexists('client_geographicalContext_country_s', "")
+            ,
+            SrcIpAddr = column_ifexists('client_ipAddress_s', "")
+            ,
+            ActingAppName=column_ifexists('client_userAgent_browser_s', "")
+            ,
+            ActingAppType="Browser"
+            ,
+            LogonMethod=column_ifexists('authenticationContext_credentialType_s', "")
+            ,
+            HttpUserAgent=column_ifexists('client_userAgent_rawUserAgent_s', "")
+        // Filtering on 'eventresult' and 'eventtype_in'
+        | where (eventresult == "*" or (EventResult == eventresult))
+            and ((array_length(eventtype_in) == 0) or EventType in~ (eventtype_in))
+        // mapping ASimMatchingUsername
+        | extend temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+        // ActorUsername not coming from source. Hence, not mapped.
+        | extend ASimMatchingUsername = case
+            (
+                                    array_length(username_has_any) == 0,
+                                    "-",
+                                    temp_isMatchTargetUsername,
+                                    "TargetUsername",
+                                    "No match"
+                                )
+        // ** Aliases
+        | extend 
+            User=TargetUsername
+            ,
+            Dvc=EventVendor
+            ,
+            IpAddr=SrcIpAddr
+        | project-away *_s, *_d, *_b, *_g, *_t;
+    OktaV1
+};
+OktaSignin (
+    starttime=starttime,
+    endtime=endtime,
+    username_has_any=username_has_any,
+    targetappname_has_any=targetappname_has_any,
+    srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+    srchostname_has_any=srchostname_has_any,
+    eventtype_in=eventtype_in,
+    eventresultdetails_in=eventresultdetails_in,
+    eventresult=eventresult,
+    disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimAuthenticationOktaV2
+// Description: This ASIM parser supports normalizing Okta sign in logs, stored in the OktaV2_CL table, to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimAuthenticationOktaV2(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['username_has_any']:dynamic=dynamic([]),
+    ['targetappname_has_any']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False)
+{
+let OktaSignin = (
+  starttime: datetime=datetime(null), 
+  endtime: datetime=datetime(null), 
+  username_has_any: dynamic = dynamic([]),
+  targetappname_has_any: dynamic = dynamic([]),
+  srcipaddr_has_any_prefix: dynamic = dynamic([]),
+  srchostname_has_any: dynamic = dynamic([]),
+  eventtype_in: dynamic = dynamic([]),
+  eventresultdetails_in: dynamic = dynamic([]),
+  eventresult: string = '*',
+  disabled: bool=false) {
+  let OktaSuccessfulOutcome = dynamic(['SUCCESS', 'ALLOW']);
+  let OktaFailedOutcome = dynamic(['FAILURE', 'SKIPPED', 'DENY']);
+  let OktaSigninEvents=dynamic(['user.session.start', 'user.session.end']);
+  let emptyOctaV2Table = datatable(
+  TimeGenerated: datetime,
+  ActorDetailEntry: dynamic,
+  ActorDisplayName: string,
+  AuthenticationContext: string,
+  AuthenticationProvider: string,
+  AuthenticationStep: string,
+  AuthenticationContextAuthenticationProvider: string,
+  AuthenticationContextAuthenticationStep: int,
+  AuthenticationContextCredentialProvider: string,
+  AuthenticationContextInterface: string,
+  AuthenticationContextIssuerId: string,
+  AuthenticationContextIssuerType: string,
+  DebugData: dynamic,
+  DvcAction: string,
+  EventResult:string,
+  OriginalActorAlternateId: string,
+  OriginalClientDevice: string,
+  OriginalOutcomeResult: string,
+  OriginalSeverity: string,
+  OriginalTarget: dynamic,
+  OriginalUserId: string,
+  OriginalUserType: string,
+  Request: dynamic,
+  SecurityContextAsNumber: int,
+  SecurityContextAsOrg: string,
+  SecurityContextDomain: string,
+  SecurityContextIsProxy: bool,
+  TransactionDetail: dynamic,
+  TransactionId: string,
+  TransactionType: string
+)[];
+    // https://developer.okta.com/docs/reference/api/event-types/#catalog
+    let OktaV2 = union isfuzzy=true emptyOctaV2Table, OktaV2_CL
+        | where not(disabled) 
+        | extend
+            EventOriginalType=column_ifexists('EventOriginalType', "") 
+            ,
+            OriginalActorAlternateId = column_ifexists('OriginalActorAlternateId', "")
+            ,
+            ActorUsername=column_ifexists('ActorUsername', "")
+            ,
+            SrcIpAddr = column_ifexists('SrcIpAddr', "")
+        | where 
+            (isnull(starttime) or TimeGenerated >= starttime) 
+            and (isnull(endtime) or TimeGenerated <= endtime)
+            and ((array_length(username_has_any) == 0) or ActorUsername has_any (username_has_any))
+            and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+            and ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(SrcIpAddr, srcipaddr_has_any_prefix)))
+            and (array_length(srchostname_has_any) == 0) // SrcHostname not available in source
+            // eventtype_in filtering done later in the parser
+            and (array_length(eventresultdetails_in) == 0) // EventResultDetails not available in source
+        // eventresult filtering done later in the parser
+        // ************************************************************************* 
+        //       </Prefiltering>
+        // ************************************************************************* 
+        | where EventOriginalType in (OktaSigninEvents)
+        | extend ActorUsernameType = _ASIM_GetUsernameType(ActorUsername)
+        | extend 
+            EventProduct='Okta'
+            ,
+            EventSchema = 'Authentication'
+            ,
+            EventVendor='Okta'
+            ,
+            EventCount=int(1)
+            ,
+            EventSchemaVersion='0.1.0'
+            ,
+            EventStartTime=TimeGenerated
+            ,
+            EventEndTime=TimeGenerated
+            ,
+            EventType=iff(EventOriginalType hassuffix 'start', 'Logon', 'Logoff')       
+            ,
+            TargetSessionId=column_ifexists('ActorSessionId', "")
+            ,
+            TargetUserId= column_ifexists('ActorUserId', "")
+            ,
+            TargetUsername=ActorUsername
+            ,
+            TargetUserType=column_ifexists('ActorUserType', "")
+            ,
+            TargetUserIdType=column_ifexists('ActorUserIdType', "")
+            ,
+            TargetUsernameType=column_ifexists('ActorUsernameType', "")
+            //** extend non-normalized fields to be projected-away 
+            ,
+            //
+            ActorDetailEntry,
+            ActorDisplayName
+            ,
+            AuthenticationContextAuthenticationProvider
+            ,
+            AuthenticationContextAuthenticationStep,
+            AuthenticationContextCredentialProvider
+            ,
+            AuthenticationContextInterface
+            ,
+            AuthenticationContextIssuerId
+            ,
+            AuthenticationContextIssuerType
+            ,
+            DebugData,
+            DvcAction
+            ,
+            OriginalActorAlternateId
+            ,
+            OriginalClientDevice
+            ,
+            OriginalOutcomeResult
+            ,
+            OriginalSeverity
+            ,
+            OriginalTarget,
+            OriginalUserId
+            ,
+            OriginalUserType
+            ,
+            Request,
+            SecurityContextAsNumber,
+            SecurityContextAsOrg
+            ,
+            SecurityContextDomain
+            ,
+            SecurityContextIsProxy
+            ,
+            TransactionDetail,
+            TransactionId
+            ,
+            TransactionType
+        // Filtering on 'eventresult' and 'eventtype_in'
+        | where (eventresult == "*" or (EventResult == eventresult))
+            and ((array_length(eventtype_in) == 0) or EventType in~ (eventtype_in))
+        // mapping ASimMatchingUsername
+        | extend
+            temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+            ,
+            temp_isMatchActorUsername=ActorUsername has_any(username_has_any)
+        | extend ASimMatchingUsername = case
+            (
+                                    array_length(username_has_any) == 0,
+                                    "-",
+                                    temp_isMatchTargetUsername and temp_isMatchActorUsername,
+                                    "Both",
+                                    temp_isMatchTargetUsername,
+                                    "TargetUsername",
+                                    temp_isMatchActorUsername,
+                                    "ActorUsername",
+                                    "No match"
+                                )
+        // ** Aliases
+        | extend 
+            User=TargetUsername
+            ,
+            Dvc=EventVendor
+            ,
+            IpAddr=SrcIpAddr
+        | project-away
+            ActorDetailEntry,
+            ActorDisplayName
+            ,
+            AuthenticationContextAuthenticationProvider
+            ,
+            AuthenticationContextAuthenticationStep,
+            AuthenticationContextCredentialProvider
+            ,
+            AuthenticationContextInterface
+            ,
+            AuthenticationContextIssuerId
+            ,
+            AuthenticationContextIssuerType
+            ,
+            DebugData,
+            DvcAction
+            ,
+            OriginalActorAlternateId
+            ,
+            OriginalClientDevice
+            ,
+            OriginalOutcomeResult
+            ,
+            OriginalSeverity
+            ,
+            OriginalTarget,
+            OriginalUserId
+            ,
+            OriginalUserType
+            ,
+            Request,
+            SecurityContextAsNumber,
+            SecurityContextAsOrg
+            ,
+            SecurityContextDomain
+            ,
+            SecurityContextIsProxy
+            ,
+            TransactionDetail,
+            TransactionId
+            ,
+            TransactionType;
+    OktaV2
+};
+OktaSignin (
+    starttime=starttime,
+    endtime=endtime,
+    username_has_any=username_has_any,
+    targetappname_has_any=targetappname_has_any,
+    srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+    srchostname_has_any=srchostname_has_any,
+    eventtype_in=eventtype_in,
+    eventresultdetails_in=eventresultdetails_in,
+    eventresult=eventresult,
+    disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimAuthenticationPaloAltoCortexDataLake
+// Description: This ASIM parser supports normalizing Palo Alto Cortex Data Lake logs to the ASIM Authentication normalized schema. These events are captured through the Palo Alto Networks CDL data connector that ingests CDL logs into Microsoft Sentinel.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimAuthenticationPaloAltoCortexDataLake(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['username_has_any']:dynamic=dynamic([]),
+    ['targetappname_has_any']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False)
+{
+let EventSeverityLookup = datatable (LogSeverity: string, EventSeverity: string)
+  [
+  "0", "Low",
+  "1", "Low",
+  "2", "Low",
+  "3", "Low",
+  "4", "Low",
+  "5", "Low",
+  "6", "Medium",
+  "7", "Medium",
+  "8", "Medium",
+  "9", "High",
+  "10", "High"
+];
+let parser = (
+    starttime: datetime=datetime(null), 
+    endtime: datetime=datetime(null), 
+    username_has_any: dynamic = dynamic([]),
+    targetappname_has_any: dynamic = dynamic([]),
+    srcipaddr_has_any_prefix: dynamic = dynamic([]),
+    srchostname_has_any: dynamic = dynamic([]),
+    eventtype_in: dynamic = dynamic([]),
+    eventresultdetails_in: dynamic = dynamic([]),
+    eventresult: string = '*',
+    disabled: bool=false
+    ) {
+    CommonSecurityLog
+    | where not(disabled)
+        and (isnull(starttime) or TimeGenerated >= starttime)
+        and (isnull(endtime) or TimeGenerated <= endtime)
+        and DeviceVendor == "Palo Alto Networks"
+        and DeviceProduct == "LF"
+        and DeviceEventClassID == "AUTH"
+        and ((array_length(username_has_any) == 0) or (AdditionalExtensions has_any (username_has_any)))
+        and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+        and (array_length(srcipaddr_has_any_prefix) == 0 or has_any_ipv4_prefix(SourceIP, srcipaddr_has_any_prefix))
+        and (array_length(srchostname_has_any) == 0 or AdditionalExtensions has_any(srchostname_has_any))
+        and ((array_length(eventtype_in) == 0) or "Logon" in~ (eventtype_in))
+        and (array_length(eventresultdetails_in) == 0) // EventResultDetails not available in source
+    // eventresult filtering done later in the parser
+    | extend
+        EventResult = iff(Message has "Invalid Certificate", "Failure", "Success"),
+        EventType = "Logon"
+    | where (array_length(eventtype_in) == 0 or EventType has_any (eventtype_in))
+        and (eventresult == '*' or EventResult has eventresult)
+    | parse-kv AdditionalExtensions as (PanOSSourceDeviceHost: string, PanOSSourceDeviceOSFamily: string, PanOSAuthenticationProtocol: string, PanOSAuthenticatedUserDomain: string, PanOSAuthenticatedUserName: string, PanOSAuthenticatedUserUUID: string, start: string, PanOSLogSource: string, PanOSRuleMatchedUUID: string, PanOSAuthenticationDescription: string, PanOSClientTypeName: string, PanOSConfigVersion: string, PanOSMFAVendor: string, PanOSSourceDeviceCategory: string, PanOSSourceDeviceModel: string, PanOSSourceDeviceProfile: string, PanOSSourceDeviceVendor: string, PanOSUserAgentString: string, PanOSCortexDataLakeTenantID: string, PanOSSessionID: string) with (pair_delimiter=";", kv_delimiter="=")
+    | where ((array_length(username_has_any) == 0) or (PanOSAuthenticatedUserName has_any (username_has_any)))
+        and (array_length(srchostname_has_any) == 0 or PanOSSourceDeviceHost has_any(srchostname_has_any))
+    | invoke _ASIM_ResolveDvcFQDN('DeviceName')
+    | invoke _ASIM_ResolveSrcFQDN('PanOSSourceDeviceHost')
+    | lookup EventSeverityLookup on LogSeverity
+    | extend
+        EventStartTime = todatetime(start),
+        SrcIpAddr = coalesce(SourceIP, DeviceCustomIPv6Address2),
+        TargetIpAddr = coalesce(DestinationIP, DeviceCustomIPv6Address3),
+        EventMessage = Message,
+        LogonMethod = case(
+                  FieldDeviceCustomNumber1 == 1,
+                  "Username & Password",
+                  FieldDeviceCustomNumber1 == 2,
+                  "Multi factor authentication",
+                  FieldDeviceCustomNumber1 == 3,
+                  "Multi factor authentication",
+                  ""
+              ),
+        AdditionalFields = bag_pack(
+                      "FileName",
+                      FileName,
+                      "PanOSLogSource",
+                      PanOSLogSource,
+                      "PanOSRuleMatchedUUID",
+                      PanOSRuleMatchedUUID,
+                      DeviceCustomNumber1Label,
+                      FieldDeviceCustomNumber1, 
+                      DeviceCustomNumber2Label,
+                      FieldDeviceCustomNumber2,
+                      DeviceCustomString3Label,
+                      DeviceCustomString3,
+                      DeviceCustomString4Label,
+                      DeviceCustomString4,
+                      DeviceCustomString5Label,
+                      DeviceCustomString5,
+                      DeviceCustomString6Label,
+                      DeviceCustomString6,
+                      "PanOSAuthenticationDescription",
+                      PanOSAuthenticationDescription,
+                      "PanOSClientTypeName",
+                      PanOSClientTypeName,
+                      "PanOSConfigVersion",
+                      PanOSConfigVersion,
+                      "PanOSMFAVendor",
+                      PanOSMFAVendor,
+                      "PanOSSourceDeviceCategory",
+                      PanOSSourceDeviceCategory,
+                      "PanOSSourceDeviceModel",
+                      PanOSSourceDeviceModel,
+                      "PanOSSourceDeviceProfile",
+                      PanOSSourceDeviceProfile,
+                      "PanOSSourceDeviceVendor",
+                      PanOSSourceDeviceVendor
+                  )
+    | project-rename
+        DvcIpAddr = Computer,
+        EventUid = _ItemId,
+        DvcId = DeviceExternalID,
+        EventOriginalResultDetails = Message,
+        EventOriginalSeverity = LogSeverity,
+        EventOriginalType = DeviceEventClassID,
+        EventOriginalUid = ExtID,
+        EventProductVersion = DeviceVersion,
+        LogonProtocol = PanOSAuthenticationProtocol,
+        SrcDvcOs = PanOSSourceDeviceOSFamily,
+        TargetUsername = PanOSAuthenticatedUserName,
+        TargetUserId = PanOSAuthenticatedUserUUID,
+        TargetDomain = PanOSAuthenticatedUserDomain,
+        EventOriginalSubType = Activity,
+        HttpUserAgent =  PanOSUserAgentString,
+        TargetDvcScopeId = PanOSCortexDataLakeTenantID,
+        TargetSessionId = PanOSSessionID,
+        TargetDvc = DeviceCustomString1
+    // mapping ASimMatchingUsername
+    | extend temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+    // ActorUsername not coming from source. Hence, not mapped.
+    | extend ASimMatchingUsername = case
+        (
+                                    array_length(username_has_any) == 0,
+                                    "-",
+                                    temp_isMatchTargetUsername,
+                                    "TargetUsername",
+                                    "No match"
+                                )
+    | extend
+        Dvc = coalesce(DvcFQDN, DvcId, DvcHostname, DvcIpAddr),
+        EventEndTime = EventStartTime,
+        Dst = TargetIpAddr,
+        Src = coalesce(SrcFQDN, SrcHostname, SrcIpAddr),
+        TargetUserType = _ASIM_GetUserType(TargetUsername, ""),
+        User = TargetUsername,
+        IpAddr = SrcIpAddr,
+        DvcIdType = iff(isnotempty(DvcId), "Other", ""),
+        TargetDomainType = case(
+                      array_length(split(DestinationUserName, ".")) > 1,
+                      "FQDN",
+                      array_length(split(DestinationUserName, "\\")) > 1,
+                      "Windows",
+                      ""
+                  ),
+        TargetUserIdType = iff(isnotempty(TargetUserId), "UID", ""),
+        TargetUsernameType = _ASIM_GetUsernameType(TargetUsername)
+    | extend
+        EventSchema = "Authentication",
+        EventSchemaVersion = "0.1.3",
+        EventProduct = "Cortex Data Lake",
+        EventVendor = "Palo Alto"
+    | project-away
+        Source*,
+        Destination*,
+        Device*,
+        AdditionalExtensions,
+        CommunicationDirection,
+        EventOutcome,
+        PanOS*,
+        start,
+        EndTime,
+        FieldDevice*,
+        Flex*,
+        File*,
+        Old*,
+        MaliciousIP*,
+        OriginalLogSeverity,
+        Process*,
+        Protocol,
+        ReceivedBytes,
+        SentBytes,
+        Remote*,
+        Request*,
+        SimplifiedDeviceAction,
+        StartTime,
+        TenantId,
+        Threat*,
+        ExternalID,
+        ReportReferenceLink,
+        ReceiptTime,
+        Reason,
+        ApplicationProtocol,
+        Indicator*,
+        _ResourceId,
+        temp_*
+};
+parser(
+  starttime=starttime,
+  endtime=endtime,
+  username_has_any=username_has_any,
+  targetappname_has_any=targetappname_has_any,
+  srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+  srchostname_has_any=srchostname_has_any,
+  eventtype_in=eventtype_in,
+  eventresultdetails_in=eventresultdetails_in,
+  eventresult=eventresult,
+  disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimAuthenticationPostgreSQL
+// Description: This ASIM parser supports filtering and normalizing PostgreSQL sign in logs to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimAuthenticationPostgreSQL(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['username_has_any']:dynamic=dynamic([]),
+    ['targetappname_has_any']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False)
+{
+let PostgreSQLSignInAuthorized=(
+ starttime: datetime=datetime(null), 
+ endtime: datetime=datetime(null), 
+ username_has_any: dynamic = dynamic([]),
+ targetappname_has_any: dynamic = dynamic([]),
+ srcipaddr_has_any_prefix: dynamic = dynamic([]),
+ srchostname_has_any: dynamic = dynamic([]),
+ eventtype_in: dynamic = dynamic([]),
+ eventresultdetails_in: dynamic = dynamic([]),
+ eventresult: string = '*',
+ disabled: bool=false
+ ) {
+  PostgreSQL_CL
+ | where not(disabled)
+ // ************************************************************************* 
+ //      <Prefilterring>
+ // *************************************************************************
+ | where 
+     (isnull(starttime) or TimeGenerated >= starttime)
+     and (isnull(endtime) or TimeGenerated <= endtime)
+     and ((array_length(username_has_any) == 0) or RawData has_any (username_has_any))
+     and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+     and (array_length(srcipaddr_has_any_prefix) == 0) // SrcIpAddr not available in source
+     and (array_length(srchostname_has_any) == 0) // SrcHostname not available in source
+     and ((array_length(eventtype_in) == 0) or "Logon" in~ (eventtype_in))
+     and (array_length(eventresultdetails_in) == 0) // EventResultDetails not available in source
+     and (eventresult == "*" or ('Success' == eventresult))
+ // ************************************************************************* 
+ //      </Prefilterring>
+ // ************************************************************************* 
+ | where RawData has 'connection authorized'
+ | extend
+     EventVendor = 'PostgreSQL'
+     ,
+     EventProduct = 'PostgreSQL'
+     ,
+     EventCount = int(1)
+     ,
+     EventSchema = 'Authentication'
+     ,
+     EventSchemaVersion = '0.1.1'
+     ,
+     EventResult = 'Success'
+     ,
+     EventStartTime = TimeGenerated
+     ,
+     EventEndTime = TimeGenerated
+     ,
+     EventType = 'Logon'
+     ,
+     DvcHostname = Computer
+     ,
+     DvcIpAddr = extract(@'\d{1,3}\.\d{1.3}\.\d{1,3}\.\d{1,3}', 1, Computer)
+     ,
+     TargetUsernameType = 'Simple'
+     ,
+     TargetUsername = extract(@'user=([^\s,]+)', 1, RawData)
+     ,
+     EventOriginalRestultDetails = 'Connection authorized'
+ // ********************** <Postfilterring> **********************************
+ | where ((array_length(username_has_any) == 0) or TargetUsername has_any (username_has_any))
+ // ********************** </Postfilterring> *********************************
+ // mapping ASimMatchingUsername
+ | extend temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+ // ActorUsername not coming from source. Hence, not mapped.
+ | extend ASimMatchingUsername = case
+     (
+                                 array_length(username_has_any) == 0,
+                                 "-",
+                                 temp_isMatchTargetUsername,
+                                 "TargetUsername",
+                                 "No match"
+                             )
+ // ************************ 
+ //      <Aliases> 
+ // ************************
+ | extend
+     User=TargetUsername
+     ,
+     Dvc=Computer
+ // ************************ 
+ //      </Aliases> 
+ // ************************
+ | project-away Computer, MG, ManagementGroupName, RawData, SourceSystem, TenantId
+ };
+ let PostgreSQLAuthFailure1=(
+     starttime: datetime=datetime(null), 
+     endtime: datetime=datetime(null), 
+     username_has_any: dynamic = dynamic([]),
+     targetappname_has_any: dynamic = dynamic([]),
+     srcipaddr_has_any_prefix: dynamic = dynamic([]),
+     srchostname_has_any: dynamic = dynamic([]),
+     eventtype_in: dynamic = dynamic([]),
+     eventresultdetails_in: dynamic = dynamic([]),
+     eventresult: string = '*',
+     disabled: bool=false
+     ) {
+     PostgreSQL_CL
+     | where not(disabled)
+     // ************************************************************************* 
+     //      <Prefilterring>
+     // *************************************************************************
+     | where 
+         (isnull(starttime) or TimeGenerated >= starttime)
+         and (isnull(endtime) or TimeGenerated <= endtime)
+         and ((array_length(username_has_any) == 0) or RawData has_any (username_has_any))
+         and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+         and (array_length(srcipaddr_has_any_prefix) == 0) // SrcIpAddr not available in source
+         and (array_length(srchostname_has_any) == 0) // SrcHostname not available in source
+         and ((array_length(eventtype_in) == 0) or "Logon" in~ (eventtype_in))
+         and (array_length(eventresultdetails_in) == 0 or 'No such user or password' in~ (eventresultdetails_in))
+         and (eventresult == "*" or ('Failure' == eventresult))
+     // ************************************************************************* 
+     //      </Prefilterring>
+     // *************************************************************************
+     | where RawData has 'authentication failed'
+     | extend 
+         EventVendor = 'PostgreSQL'
+         ,
+         EventProduct = 'PostgreSQL'
+         ,
+         EventCount = int(1)
+         ,
+         EventSchema = 'Authentication'
+         ,
+         EventSchemaVersion = '0.1.1'
+         ,
+         EventResult = 'Failure'
+         ,
+         EventStartTime = TimeGenerated
+         ,
+         EventEndTime = TimeGenerated
+         ,
+         EventType = 'Logon'
+         ,
+         DvcHostname = Computer
+         ,
+         DvcIpAddr = extract(@'\d{1,3}\.\d{1.3}\.\d{1,3}\.\d{1,3}', 1, Computer)
+         ,
+         TargetUsernameType = 'Simple'
+         ,
+         TargetUsername = extract(@'for user\s"(.*?)"', 1, RawData)
+         ,
+         EventResultDetails = 'No such user or password'
+         ,
+         EventOriginalRestultDetails = 'User authentication failed'
+     // ********************** <Postfilterring> **********************************
+     | where ((array_length(username_has_any) == 0) or TargetUsername has_any (username_has_any))
+     // ********************** </Postfilterring> *********************************
+     // mapping ASimMatchingUsername
+     | extend temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+     // ActorUsername not coming from source. Hence, not mapped.
+     | extend ASimMatchingUsername = case
+         (
+                                     array_length(username_has_any) == 0,
+                                     "-",
+                                     temp_isMatchTargetUsername,
+                                     "TargetUsername",
+                                     "No match"
+                                 )
+     // ************************ 
+     //      <Aliases> 
+     // ************************
+     | extend
+         User=TargetUsername
+         ,
+         Dvc=Computer
+     // ************************ 
+     //      </Aliases> 
+     // ************************
+     | project-away Computer, MG, ManagementGroupName, RawData, SourceSystem, TenantId
+ };
+ let PostgreSQLAuthFailure2=(
+     starttime: datetime=datetime(null), 
+     endtime: datetime=datetime(null), 
+     username_has_any: dynamic = dynamic([]),
+     targetappname_has_any: dynamic = dynamic([]),
+     srcipaddr_has_any_prefix: dynamic = dynamic([]),
+     srchostname_has_any: dynamic = dynamic([]),
+     eventtype_in: dynamic = dynamic([]),
+     eventresultdetails_in: dynamic = dynamic([]),
+     eventresult: string = '*',
+     disabled: bool=false
+     ) {
+     PostgreSQL_CL
+     | where not(disabled)
+     // ************************************************************************* 
+     //      <Prefilterring>
+     // *************************************************************************
+     | where 
+         (isnull(starttime) or TimeGenerated >= starttime)
+         and (isnull(endtime) or TimeGenerated <= endtime)
+         and ((array_length(username_has_any) == 0) or RawData has_any (username_has_any))
+         and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+         and (array_length(srcipaddr_has_any_prefix) == 0) // SrcIpAddr not available in source
+         and (array_length(srchostname_has_any) == 0) // SrcHostname not available in source
+         and ((array_length(eventtype_in) == 0) or "Logon" in~ (eventtype_in))
+         and (array_length(eventresultdetails_in) == 0 or 'No such user or password' in~ (eventresultdetails_in))
+         and (eventresult == "*" or ('Failure' == eventresult))
+     // ************************************************************************* 
+     //      </Prefilterring>
+     // *************************************************************************
+     | where RawData has_all ('role', 'does', 'not', 'exist')
+     | extend 
+         EventVendor = 'PostgreSQL'
+         ,
+         EventProduct = 'PostgreSQL'
+         ,
+         EventCount = int(1)
+         ,
+         EventSchema = 'Authentication'
+         ,
+         EventSchemaVersion = '0.1.1'
+         ,
+         EventResult = 'Failure'
+         ,
+         EventStartTime = TimeGenerated
+         ,
+         EventEndTime = TimeGenerated
+         ,
+         EventType = 'Logon'
+         ,
+         DvcHostname = Computer
+         ,
+         DvcIpAddr = extract(@'\d{1,3}\.\d{1.3}\.\d{1,3}\.\d{1,3}', 1, Computer)
+         ,
+         TargetUsernameType = 'Simple'
+         ,
+         TargetUsername = extract(@'role\s"(.*?)"\sdoes', 1, RawData)
+         ,
+         EventResultDetails = 'No such user or password'
+         ,
+         EventOriginalRestultDetails = 'Role does not exist'
+     // ********************** <Postfilterring> **********************************
+     | where ((array_length(username_has_any) == 0) or TargetUsername has_any (username_has_any))
+     // ********************** </Postfilterring> *********************************
+     // mapping ASimMatchingUsername
+     | extend temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+     // ActorUsername not coming from source. Hence, not mapped.
+     | extend ASimMatchingUsername = case
+         (
+                                     array_length(username_has_any) == 0,
+                                     "-",
+                                     temp_isMatchTargetUsername,
+                                     "TargetUsername",
+                                     "No match"
+                                 )
+     // ************************ 
+     //      <Aliases> 
+     // ************************
+     | extend
+         User=TargetUsername
+         ,
+         Dvc=Computer
+     // ************************ 
+     //      </Aliases> 
+     // ************************
+     | project-away Computer, MG, ManagementGroupName, RawData, SourceSystem, TenantId
+ };
+ let PostgreSQLAuthFailure3=(
+     starttime: datetime=datetime(null), 
+     endtime: datetime=datetime(null), 
+     username_has_any: dynamic = dynamic([]),
+     targetappname_has_any: dynamic = dynamic([]),
+     srcipaddr_has_any_prefix: dynamic = dynamic([]),
+     srchostname_has_any: dynamic = dynamic([]),
+     eventtype_in: dynamic = dynamic([]),
+     eventresultdetails_in: dynamic = dynamic([]),
+     eventresult: string = '*',
+     disabled: bool=false
+     ) {
+     PostgreSQL_CL
+     | where not(disabled)
+     // ************************************************************************* 
+     //      <Prefilterring>
+     // *************************************************************************
+     | where 
+         (isnull(starttime) or TimeGenerated >= starttime)
+         and (isnull(endtime) or TimeGenerated <= endtime)
+         and ((array_length(username_has_any) == 0) or RawData has_any (username_has_any))
+         and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+         and (array_length(srcipaddr_has_any_prefix) == 0 or has_any_ipv4_prefix(RawData, srcipaddr_has_any_prefix))
+         and (array_length(srchostname_has_any) == 0) // SrcHostname not available in source
+         and ((array_length(eventtype_in) == 0) or "Logon" in~ (eventtype_in))
+         and (array_length(eventresultdetails_in) == 0 or 'No such user or password' in~ (eventresultdetails_in))
+         and (eventresult == "*" or ('Failure' == eventresult))
+     // ************************************************************************* 
+     //      </Prefilterring>
+     // *************************************************************************
+     | where RawData has_all ('no', 'entry', 'user')
+     | extend 
+         EventVendor = 'PostgreSQL'
+         ,
+         EventProduct = 'PostgreSQL'
+         ,
+         EventCount = int(1)
+         ,
+         EventSchema = 'Authentication'
+         ,
+         EventSchemaVersion = '0.1.1'
+         ,
+         EventResult = 'Failure'
+         ,
+         EventStartTime = TimeGenerated
+         ,
+         EventEndTime = TimeGenerated
+         ,
+         EventType = 'Logon'
+         ,
+         DvcHostname = Computer
+         ,
+         DvcIpAddr = extract(@'\d{1,3}\.\d{1.3}\.\d{1,3}\.\d{1,3}', 1, Computer)
+         ,
+         TargetUsernameType = 'Simple'
+         ,
+         TargetUsername = extract(@'user\s"(.*?)",', 1, RawData)
+         ,
+         SrcIpAddr = extract(@'host\s"(.*?)",', 1, RawData)
+         ,
+         EventResultDetails = 'No such user or password'
+         ,
+         EventOriginalRestultDetails = 'No entry for user'
+     // ********************** <Postfilterring> **********************************
+     | where ((array_length(username_has_any) == 0) or TargetUsername has_any (username_has_any))
+         and (array_length(srcipaddr_has_any_prefix) == 0 or has_any_ipv4_prefix(SrcIpAddr, srcipaddr_has_any_prefix))
+     // ********************** </Postfilterring> *********************************
+     // mapping ASimMatchingUsername
+     | extend temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+     // ActorUsername not coming from source. Hence, not mapped.
+     | extend ASimMatchingUsername = case
+         (
+                                     array_length(username_has_any) == 0,
+                                     "-",
+                                     temp_isMatchTargetUsername,
+                                     "TargetUsername",
+                                     "No match"
+                                 )
+     // ************************ 
+     //      <Aliases> 
+     // ************************
+     | extend
+         User=TargetUsername
+         ,
+         Dvc=Computer
+     // ************************ 
+     //      </Aliases> 
+     // ************************
+     | project-away Computer, MG, ManagementGroupName, RawData, SourceSystem, TenantId
+ };
+ let PostgreSQLDisconnect=(
+     starttime: datetime=datetime(null), 
+     endtime: datetime=datetime(null), 
+     username_has_any: dynamic = dynamic([]),
+     targetappname_has_any: dynamic = dynamic([]),
+     srcipaddr_has_any_prefix: dynamic = dynamic([]),
+     srchostname_has_any: dynamic = dynamic([]),
+     eventtype_in: dynamic = dynamic([]),
+     eventresultdetails_in: dynamic = dynamic([]),
+     eventresult: string = '*',
+     disabled: bool=false
+     ) {
+     PostgreSQL_CL
+     | where not(disabled)
+     // ************************************************************************* 
+     //      <Prefilterring>
+     // *************************************************************************
+     | where 
+         (isnull(starttime) or TimeGenerated >= starttime)
+         and (isnull(endtime) or TimeGenerated <= endtime)
+         and ((array_length(username_has_any) == 0) or RawData has_any (username_has_any))
+         and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+         and (array_length(srcipaddr_has_any_prefix) == 0 or has_any_ipv4_prefix(RawData, srcipaddr_has_any_prefix))
+         and (array_length(srchostname_has_any) == 0) // SrcHostname not available in source
+         and ((array_length(eventtype_in) == 0) or "Logoff" in~ (eventtype_in))
+         and (array_length(eventresultdetails_in) == 0 or 'Session expired' in~ (eventresultdetails_in))
+         and (eventresult == "*" or ('Success' == eventresult))
+     // ************************************************************************* 
+     //      </Prefilterring>
+     // *************************************************************************
+     | where RawData has 'disconnection'
+     | extend 
+         EventVendor = 'PostgreSQL'
+         ,
+         EventProduct = 'PostgreSQL'
+         ,
+         EventCount = int(1)
+         ,
+         EventSchema = 'Authentication'
+         ,
+         EventSchemaVersion = '0.1.1'
+         ,
+         EventResult = 'Success'
+         ,
+         EventStartTime = TimeGenerated
+         ,
+         EventEndTime = TimeGenerated
+         ,
+         EventType = 'Logoff'
+         ,
+         DvcHostname = Computer
+         ,
+         DvcIpAddr = extract(@'\d{1,3}\.\d{1.3}\.\d{1,3}\.\d{1,3}', 1, Computer)
+         ,
+         TargetUsernameType = 'Simple'
+         ,
+         TargetUsername = extract(@'user=([^\s,]+)', 1, RawData)
+         ,
+         SrcIpAddr = extract(@'host=([\d.]+)', 1, RawData)
+         ,
+         EventResultDetails = 'Session expired'
+         ,
+         EventOriginalRestultDetails = 'User session closed'
+     // ********************** <Postfilterring> **********************************
+     | where ((array_length(username_has_any) == 0) or TargetUsername has_any (username_has_any))
+         and (array_length(srcipaddr_has_any_prefix) == 0 or has_any_ipv4_prefix(SrcIpAddr, srcipaddr_has_any_prefix))
+     // ********************** </Postfilterring> *********************************
+     // mapping ASimMatchingUsername
+     | extend temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+     // ActorUsername not coming from source. Hence, not mapped.
+     | extend ASimMatchingUsername = case
+         (
+                                     array_length(username_has_any) == 0,
+                                     "-",
+                                     temp_isMatchTargetUsername,
+                                     "TargetUsername",
+                                     "No match"
+                                 )
+     // ************************ 
+     //      <Aliases> 
+     // ************************
+     | extend
+         User=TargetUsername
+         ,
+         Dvc=Computer
+     // ************************ 
+     //      </Aliases> 
+     // ************************
+     | project-away Computer, MG, ManagementGroupName, RawData, SourceSystem, TenantId
+ };
+ union isfuzzy=false PostgreSQLSignInAuthorized(starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled=disabled)
+               ,  PostgreSQLAuthFailure1(starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled=disabled)
+               ,  PostgreSQLAuthFailure2(starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled=disabled)
+               ,  PostgreSQLAuthFailure3(starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled=disabled)
+               ,  PostgreSQLDisconnect(starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled=disabled)
+}
+
+
+
+//
+// Function Name: vimAuthenticationSalesforceSC
+// Description: This ASIM parser supports filtering and normalizing the Salesforce Service Cloud logs stored in 'SalesforceServiceCloud_CL' table to the ASIM authentication normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimAuthenticationSalesforceSC(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['username_has_any']:dynamic=dynamic([]),
+    ['targetappname_has_any']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False)
+{
+let parser = (
+    starttime: datetime=datetime(null), 
+    endtime: datetime=datetime(null), 
+    username_has_any: dynamic = dynamic([]),
+    targetappname_has_any: dynamic = dynamic([]),
+    srcipaddr_has_any_prefix: dynamic = dynamic([]),
+    srchostname_has_any: dynamic = dynamic([]),
+    eventtype_in: dynamic = dynamic([]),
+    eventresultdetails_in: dynamic = dynamic([]),
+    eventresult: string = '*',
+    disabled: bool=false
+    )
+{
+    let SalesforceSchema = datatable
+(
+    api_version_s: string,
+    browser_type_s: string,
+    cipher_suite_s: string,
+    client_ip_s: string,
+    delegated_user_id_s: string,
+    delegated_user_name_s: string,
+    event_type_s: string,
+    login_key_s: string,
+    login_status_s: string,
+    login_type_s: string,
+    login_sub_type_s: string,
+    organization_id_s: string,
+    platform_type_s: string,
+    request_id_s: string,
+    request_status_s: string,
+    session_key_s: string,
+    source_ip_s: string,
+    timestamp_s: string,
+    tls_protocol_s: string,
+    uri_s: string,
+    user_id_s: string,
+    user_name_s: string,
+    user_type_s: string,
+    wave_session_id_g: string
+)[];
+    let EventResultLookup = datatable
+(
+    login_status_s: string,
+    DvcAction: string,
+    EventResultDetails: string,
+    EventResult: string,
+    EventSeverity: string
+)
+[
+    "LOGIN_CHALLENGE_ISSUED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_CHALLENGE_PENDING", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_DATA_DOWNLOAD_ONLY", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_END_SESSION_TXN_SECURITY_POLICY", "Blocked", "Logon violates policy", "Failure", "Informational",
+    "LOGIN_ERROR_API_TOO_OLD", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_ASYNC_USER_CREATE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_AVANTGO_DISABLED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_AVANTGO_TRIAL_EXP", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_CLIENT_NO_ACCESS", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_CLIENT_REQ_UPDATE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_CSS_FROZEN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_CSS_PW_LOCKOUT", "Blocked", "User locked", "Failure", "Informational",
+    "LOGIN_ERROR_DUPLICATE_USERNAME", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_EXPORT_RESTRICTED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_GLOBAL_BLOCK_DOMAIN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_HT_DOWN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_HTP_METHD_INVALID", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_INSECURE_LOGIN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_INVALID_GATEWAY", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_INVALID_ID_FIELD", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_INVALID_PASSWORD", "Blocked", "Incorrect password", "Failure", "Informational",
+    "LOGIN_ERROR_LOGINS_EXCEEDED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_MUST_USE_API_TOKEN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_MUTUAL_AUTHENTICATION", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_NETWORK_INACTIVE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_NO_HT_ACCESS", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_NO_NETWORK_ACCESS", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_NO_NETWORK_INFO", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_NO_SET_COOKIES", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_OFFLINE_DISABLED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_OFFLINE_TRIAL_EXP", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_ORG_CLOSED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_ORG_DOMAIN_ONLY", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_ORG_IN_MAINTENANCE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_ORG_INACTIVE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_ORG_IS_DOT_ORG", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_ORG_LOCKOUT", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_ORG_SIGNING_UP", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_ORG_SUSPENDED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_OUTLOOK_DISABLED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_PAGE_REQUIRES_LOGIN", "Blocked", "Session expired", "Failure", "Informational",
+    "LOGIN_ERROR_PASSWORD_EMPTY", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_PASSWORD_LOCKOUT", "Blocked", "User locked", "Failure", "Informational",
+    "LOGIN_ERROR_PORTAL_INACTIVE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_RATE_EXCEEDED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_RESTRICTED_DOMAIN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_RESTRICTED_TIME", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_SESSION_TIMEOUT", "Blocked", "Session expired", "Failure", "Informational",
+    "LOGIN_ERROR_SSO_PWD_INVALID", "Blocked", "Incorrect password", "Failure", "Informational",
+    "LOGIN_ERROR_SSO_SVC_DOWN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_SSO_URL_INVALID", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_STORE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_STORE_DOWN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_SWITCH_SFDC_INSTANCE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_SWITCH_SFDC_LOGIN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_SYNCOFFLINE_DISBLD", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_SYSTEM_DOWN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_USER_API_ONLY", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_USER_FROZEN", "Blocked", "User locked", "Failure", "Informational",
+    "LOGIN_ERROR_USER_INACTIVE", "Blocked", "User disabled", "Failure", "Informational",
+    "LOGIN_ERROR_USER_NON_MOBILE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_USER_STORE_ACCESS", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_USERNAME_EMPTY", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_WIRELESS_DISABLED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_WIRELESS_TRIAL_EXP", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_LIGHTNING_LOGIN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_NO_ERROR", "Allowed", "", "Success", "Informational",
+    "LOGIN_OAUTH_API_DISABLED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_CONSUMER_DELETED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_DS_NOT_EXPECTED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_EXCEED_GET_AT_LMT", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_CODE_CHALLENGE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_CODE_VERIFIER", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_DEVICE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_DS", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_DSIG", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_IP", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_NONCE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_SIG_METHOD", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_TIMESTAMP", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_TOKEN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_VERIFIER", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_VERSION", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_MISSING_DS", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_NO_CALLBACK_URL", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_NO_CONSUMER", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_NO_TOKEN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_NONCE_REPLAY", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_PACKAGE_MISSING", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_PACKAGE_OLD", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_UNEXPECTED_PARAM", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ORG_TRIAL_EXP", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_READONLY_CANNOT_VALIDATE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_AUDIENCE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_CONFIG", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_FORMAT", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_IN_RES_TO", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_ISSUER", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_ORG_ID", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_PORTAL_ID", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_RECIPIENT", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_SESSION_LEVEL", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_SIGNATURE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_SITE_URL", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_STATUS", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_SUB_CONFIRM", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_TIMESTAMP", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_USERNAME", "Blocked", "No such user", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_VERSION", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_MISMATCH_CERT", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_MISSING_ORG_ID", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_MISSING_PORTAL_ID", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_PROVISION_ERROR", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_REPLAY_ATTEMPTED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_SITE_INACTIVE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_TWOFACTOR_REQ", "Blocked", "Logon violates policy", "Failure", "Informational"
+];
+    let SalesforceEventType = dynamic(['Login', 'LoginAs', 'Logout']);
+    let EventTypeLookup = datatable(event_type_s: string, EventType: string)
+[
+    "Login", "Logon",
+    "LoginAs", "Logon",
+    "Logout", "Logoff"
+];
+    let DvcOsLookup = datatable
+(
+    platform_type_s: string,
+    DvcOs: string,
+    DvcOsVersion: string
+)
+[
+    "1000", "Windows", "",
+    "1008", "Windows", "2003",
+    "1013", "Windows", "8.1",
+    "1015", "Windows", "10",
+    "2003", "Macintosh/Apple", "OSX",
+    "4000", "Linux", "",
+    "5005", "Android", "",
+    "5006", "iPhone", "",
+    "5007", "iPad", "",
+    "5200", "Android", "10.0"
+];
+    let LogonMethodLookup = datatable
+(
+    LoginType_s: string,
+    LogonMethodOriginal: string,
+    LogonMethod: string
+)
+[
+    "7", "AppExchange", "Other",
+    "A", "Application", "Other",
+    "s", "Certificate-based login", "PKI",
+    "k", "Chatter Communities External User", "Other",
+    "n", "Chatter Communities External User Third Party SSO", "Other",
+    "r", "Employee Login to Community", "Other",
+    "z", "Lightning Login", "Username & Password",
+    "l", "Networks Portal API Only", "Other",
+    "6", "Remote Access Client", "Other",
+    "i", "Remote Access 2.0", "Other",
+    "I", "Other Apex API", "Other",
+    "R", "Partner Product", "Other",
+    "w", "Passwordless Login", "Passwordless",
+    "3", "Customer Service Portal", "Other",
+    "q", "Partner Portal Third-Party SSO", "Other",
+    "9", "Partner Portal", "Other",
+    "5", "SAML Idp Initiated SSO", "Other",
+    "m", "SAML Chatter Communities External User SSO", "Other",
+    "b", "SAML Customer Service Portal SSO", "Other",
+    "c", "SAML Partner Portal SSO", "Other",
+    "h", "SAML Site SSO", "Other",
+    "8", "SAML Sfdc Initiated SSO", "Other",
+    "E", "SelfService", "Other",
+    "j", "Third Party SSO", "Other"
+];
+    let LogonProtocolLookup = datatable
+(
+    LoginSubType_s: string,
+    LogonProtocolOriginal: string,
+    LogonProtocol: string
+)
+[
+    "uiup", "UI Username-Password", "Basic Auth",
+    "oauthpassword", "OAuth Username-Password", "OAuth",
+    "oauthtoken", "OAuth User-Agent", "OAuth",
+    "oauthhybridtoken", "OAuth User-Agent for Hybrid Apps", "OAuth",
+    "oauthtokenidtoken", "OAuth User-Agent with ID Token", "OAuth",
+    "oauthclientcredential", "OAuth Client Credential", "OAuth",
+    "oauthcode", "OAuth Web Server", "OAuth",
+    "oauthhybridauthcode", "OAuth Web Server for Hybrid Apps", "OAuth",
+];
+    let TempEventResultLookup = datatable(request_status_s: string, TempEventResult: string)
+[
+    "S", "Success",
+    "F", "Failure",
+    "A", "Failure",
+    "R", "Success",
+    "N", "Failure",
+    "U", "NA"
+];
+    let UserTypeLookup = datatable(user_type_s: string, TargetUserType: string)
+[
+    "CsnOnly", "Other",
+    "CspLitePortal", "Other",
+    "CustomerSuccess", "Other",
+    "Guest", "Anonymous",
+    "PowerCustomerSuccess", "Other",
+    "PowerPartner", "Other",
+    "SelfService", "Other",
+    "Standard", "Regular",
+    "A", "Application",
+    "b", "Other",
+    "C", "Other",
+    "D", "Other",
+    "F", "Other",
+    "G", "Anonymous",
+    "L", "Other",
+    "N", "Service",
+    "n", "Other",
+    "O", "Other",
+    "o", "Other",
+    "P", "Other",
+    "p", "Other",
+    "S", "Regular",
+    "X", "Admin"
+];
+    union isfuzzy=true
+        SalesforceSchema,
+        SalesforceServiceCloud_CL 
+    | where not(disabled)
+    | extend TimeGenerated = todatetime(tostring(split(timestamp_s, '.', 0)[0]))
+    //  -- Pre filtering
+    | where 
+        (isnull(starttime) or TimeGenerated >= starttime) 
+        and (isnull(endtime) or TimeGenerated <= endtime)
+        and ((array_length(username_has_any) == 0) or (user_name_s has_any (username_has_any)) or (delegated_user_name_s has_any (username_has_any)))
+        and ((array_length(targetappname_has_any) == 0) or ('Salesforce Dot Com(SFDC)' in~ (targetappname_has_any)))
+        and ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(source_ip_s, srcipaddr_has_any_prefix)))
+        and (array_length(srchostname_has_any) == 0) // SrcHostname not available in source
+        // eventtype_in filtering done later in the parser
+        // eventresultdetails_in filtering done later in the parser
+        // eventresult filtering done later in the parser
+        and event_type_s in~ (SalesforceEventType)
+    //  -- end pre-filtering
+    // mapping ASimMatchingUsername
+    | extend
+        temp_isMatchTargetUsername=user_name_s has_any(username_has_any)
+        ,
+        temp_isMatchActorUsername=delegated_user_name_s has_any(username_has_any)
+    | extend ASimMatchingUsername = case
+                                (
+                                    array_length(username_has_any) == 0,
+                                    "-",
+                                    temp_isMatchTargetUsername and temp_isMatchActorUsername,
+                                    "Both",
+                                    temp_isMatchTargetUsername,
+                                    "TargetUsername",
+                                    temp_isMatchActorUsername,
+                                    "ActorUsername",
+                                    "No match"
+                                )
+    | extend LoginType_s = login_type_s, LoginSubType_s = login_sub_type_s
+    | lookup EventResultLookup on login_status_s
+    // filtering on 'eventresultdetails_in'
+    | where (array_length(eventresultdetails_in) == 0 or EventResultDetails in~ (eventresultdetails_in))
+    | lookup EventTypeLookup on event_type_s
+    // Filtering on eventtype_in
+    | where ((array_length(eventtype_in) == 0) or (EventType in~ (eventtype_in)))
+    | lookup LogonMethodLookup on LoginType_s
+    | lookup LogonProtocolLookup on LoginSubType_s
+    | lookup TempEventResultLookup on request_status_s
+    | lookup DvcOsLookup on platform_type_s
+    | lookup UserTypeLookup on user_type_s
+    | project-rename
+        EventProductVersion = api_version_s,
+        EventOriginalResultDetails = login_status_s,
+        TargetUserId = user_id_s,
+        SrcIpAddr = source_ip_s,
+        EventOriginalUid = request_id_s,
+        TlsCipher = cipher_suite_s,
+        TlsVersion = tls_protocol_s,
+        HttpUserAgent= browser_type_s,
+        TargetUserScopeId = organization_id_s,
+        TargetUrl = uri_s,
+        TargetOriginalUserType = user_type_s,
+        ActorUsername = delegated_user_name_s,
+        ActorUserId = delegated_user_id_s,
+        TargetUsername = user_name_s
+    | where ((array_length(username_has_any) == 0) or (TargetUsername has_any (username_has_any)) or (ActorUsername has_any (username_has_any)))
+    | extend
+        EventVendor = 'Salesforce',
+        EventProduct='Service Cloud',
+        EventCount = int(1),
+        EventSchema = 'Authentication',
+        EventSchemaVersion = '0.1.3',
+        TargetAppName = "Salesforce Dot Com(SFDC)",
+        TargetAppType = "SaaS application",
+        EventUid = _ItemId,
+        EventOriginalType=event_type_s,
+        SrcIpAddr = coalesce(SrcIpAddr, client_ip_s)
+    | extend
+        TargetSessionId = coalesce(session_key_s, login_key_s),
+        TargetUserScope = "Salesforce Organization",
+        TargetUserIdType = iff(isnotempty(TargetUserId), "SaleforceId", ""),
+        ActorUserIdType = iff(isnotempty(ActorUserId), "SaleforceId", ""),
+        TargetUsernameType = iff(isnotempty(TargetUsername), "UPN", ""),
+        ActorUsernameType = iff(isnotempty(ActorUsername), "UPN", ""),
+        User = coalesce(TargetUsername, TargetUserId),
+        Src = SrcIpAddr,
+        IpAddr = SrcIpAddr,
+        Dvc = EventProduct,
+        EventResult = coalesce(EventResult, TempEventResult),
+        Application = TargetAppName,
+        EventStartTime = TimeGenerated,
+        EventEndTime = TimeGenerated
+    // Filtering on 'eventresult'
+    | where (eventresult == "*" or (EventResult == eventresult))
+    | project-away
+        *_s,
+        *_t,
+        *_g,
+        TenantId,
+        SourceSystem,
+        Computer,
+        MG,
+        ManagementGroupName,
+        Message,
+        RawData,
+        TempEventResult,
+        _ItemId,
+        temp*
+};
+parser (
+  starttime=starttime,
+  endtime=endtime,
+  username_has_any=username_has_any,
+  targetappname_has_any=targetappname_has_any,
+  srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+  srchostname_has_any=srchostname_has_any,
+  eventtype_in=eventtype_in,
+  eventresultdetails_in=eventresultdetails_in,
+  eventresult=eventresult,
+  disabled=disabled
+)
+}
+
+
+

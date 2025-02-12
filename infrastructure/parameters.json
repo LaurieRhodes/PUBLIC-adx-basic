@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "value": "australiasoutheast"
+    },
+    "ADXClusterName": {
+      "value": "adx-security-cluster"
+    },
+    "skuName": {
+      "value": "Standard_D12_v2"
+    },
+    "skutier": {
+      "value": "Standard"
+    },
+    "skuCapacity": {
+      "value": 2
+    },
+    "securitydatabaseName": {
+      "value": "security"
+    }
+  }
+}

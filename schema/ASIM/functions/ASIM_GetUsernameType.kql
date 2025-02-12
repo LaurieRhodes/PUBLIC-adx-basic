@@ -1,0 +1,20 @@
+﻿//
+// Function Name: ASIM_GetUsernameType
+// Description: This ASIM tabular function is intended for use in ASIM parsers and sets the UserType based on the username
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASIM_GetUsernameType(    ['username']:string)
+{
+let ASIM_GetUsernameType = (username:string) { 
+    case ( 
+        username contains "@" , "UPN"
+        , username contains "\\", "Windows"
+        , (username has "CN=" or username has "OU=" or username has "DC="), "DN"
+        , isempty(username), ""
+        , "Simple"
+    )
+};
+ASIM_GetUsernameType (username)
+}

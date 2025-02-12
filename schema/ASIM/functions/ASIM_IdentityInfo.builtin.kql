@@ -1,0 +1,53 @@
+﻿//
+// Function Name: _ASIM_IdentityInfo
+// Description: This ASIM function deduplicate and normalizes the IdentityInfo table to improve its usability in queries. 
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) _ASIM_IdentityInfo
+{
+IdentityInfo
+  | where TimeGenerated > ago(14d)
+  | where AccountObjectId != ""
+  | project-away AccountName, AccountDomain, GivenName, Surname, Type, TenantId, OnPremisesExtensionAttributes, UserState, UserStateChangedOn, SourceSystem
+  | project-away InvestigationPriority, InvestigationPriorityPercentile, ExtensionProperty, AccountCloudSID, Applications, ServicePrincipals
+  | summarize arg_max(TimeGenerated, *) by UserScopeId = AccountTenantId, UserId = AccountObjectId
+  | project-away TimeGenerated
+  | project-rename
+      Username = AccountUPN,
+      UserDisplayName = AccountDisplayName,
+      UserSid = AccountSID,
+      UserDN = OnPremisesDistinguishedName,
+      UserTags = Tags,
+      UserRiskLevel = RiskLevel,
+      UserRiskLevelDetails = RiskLevelDetails,
+      UserRiskState = RiskState, 
+      UserBlastRadius = BlastRadius,
+      UserGroupMembership = GroupMembership,
+      UserAssignedRoles = AssignedRoles,
+      UserDepartment = Department,
+      UserEmployeeId = EmployeeId,
+      UserJobTitle = JobTitle,
+      UserMailAddress = MailAddress,
+      UserAdditionalMailAddresses = AdditionalMailAddresses,
+      UserManager = Manager,
+      UserStreetAddress = StreetAddress,
+      UserCity = City,
+      UserCountry = Country,
+      UserRegion = State,
+      UserPhone = Phone,
+      UserAccountEnabled = IsAccountEnabled,
+      UserAccountCreationTime = AccountCreationTime,
+      RelatedUsers = RelatedAccounts,
+      UserDeleted = DeletedDateTime,
+      UserLastSeen = LastSeenDate,
+      UserUACFlags = UACFlags,
+      UserIsMFARegistered = IsMFARegistered,
+      UserRiskScore = EntityRiskScore
+  | extend 
+      UsernameType = "UPN",
+      UserIdType = "AadId",
+      UserType = iff(UserType == "Guest", UserType, ""),
+      UserUpn = Username
+}

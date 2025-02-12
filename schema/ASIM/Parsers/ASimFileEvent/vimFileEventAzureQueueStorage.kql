@@ -1,0 +1,120 @@
+﻿//
+// Function Name: vimFileEventAzureQueueStorage
+// Description: This ASIM parser supports normalizing Azure Queue Storage events, stored in the StorageQueueLogs table, to the ASIM file activity schema.
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimFileEventAzureQueueStorage(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['targetfilepath_has_any']:dynamic=dynamic([]),
+    ['srcfilepath_has_any']:dynamic=dynamic([]),
+    ['hashes_has_any']:dynamic=dynamic([]),
+    ['dvchostname_has_any']:dynamic=dynamic([]),
+    ['disabled']:bool=False)
+{
+// https://docs.microsoft.comrest/api/storageservices/storage-analytics-logged-operations-and-status-messages
+let parser=(
+    starttime: datetime=datetime(null),
+    endtime: datetime=datetime(null),
+    eventtype_in: dynamic=dynamic([]),
+    srcipaddr_has_any_prefix: dynamic=dynamic([]),
+    actorusername_has_any: dynamic=dynamic([]),
+    targetfilepath_has_any: dynamic=dynamic([]),
+    srcfilepath_has_any: dynamic=dynamic([]),
+    hashes_has_any: dynamic=dynamic([]),
+    dvchostname_has_any: dynamic=dynamic([]),
+    disabled: bool=false
+    )
+{
+    let queueoperations=datatable(OperationName: string, EventType: string)
+[
+    "ClearMessages", "FileDeleted"
+        ,
+    "CreateQueue", "FileCreated"
+        ,
+    "DeleteQueue", "FileDeleted"
+        ,
+    "DeleteMessage", "FileDeleted"
+        ,
+    "GetQueue", "FileAccessed"
+        ,
+    "GetMessage", "FileAccessed"
+        ,
+    "GetMessages", "FileAccessed"
+        ,
+    "PeekMessage", "FileAccessed"
+        ,
+    "PeekMessages", "FileAccessed"
+        ,
+    "PutMessage", "FileCreated"
+        ,
+    "UpdateMessage", "FileModified" 
+];
+    StorageQueueLogs
+    | where not(disabled)
+    | where (isnull(starttime) or TimeGenerated >= starttime) 
+        and (isnull(endtime) or TimeGenerated <= endtime)
+    // **** relevant data filtering;
+    | where OperationName in (queueoperations)
+    //
+    | where ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(CallerIpAddress, srcipaddr_has_any_prefix))) and 
+        (array_length(actorusername_has_any) == 0) and
+        ((array_length(targetfilepath_has_any) == 0) or (Uri has_any (targetfilepath_has_any))) and 
+        (array_length(srcfilepath_has_any) == 0) and
+        (array_length(hashes_has_any) == 0) and 
+        (array_length(dvchostname_has_any) == 0)
+    | extend 
+        EventCount=int(1)
+        ,
+        EventStartTime=TimeGenerated
+        ,
+        EventEndTime=TimeGenerated
+        //	, EventType :string  ---> see lookup below
+        ,
+        EventResult=iff(StatusText == 'Success', 'Success', 'Failure') 
+        ,
+        EventOriginalUid = CorrelationId
+        ,
+        EventOriginalType=OperationName
+        ,
+        EventProduct='Azure File Storage' 
+        ,
+        EventVendor='Microsoft'
+        ,
+        EventSchemaVersion='0.1.0'
+        ,
+        TargetFilePath=tostring(split(Uri, '?')[0]) 
+        ,
+        TargetFilePathType='URL'
+        ,
+        TargetUrl=Uri
+        ,
+        SrcIpAddr=tostring(split(CallerIpAddress, ':')[0])
+        ,
+        SrcPortNumber=tostring(split(CallerIpAddress, ':')[0])
+        ,
+        HttpUserAgent=UserAgentHeader
+    | extend TargetFileName=tostring(split(TargetFilePath, '/')[-1])
+    | lookup queueoperations on OperationName
+    | where ((array_length(eventtype_in) == 0 or EventType in~ (eventtype_in)))
+    // Aliases
+    | extend 
+        FilePath=TargetFilePath
+};
+parser
+(
+    starttime=datetime(null), 
+    endtime=datetime(null), 
+    eventtype_in=dynamic([]),
+    srcipaddr_has_any_prefix=dynamic([]),
+    actorusername_has_any=dynamic([]),
+    targetfilepath_has_any=dynamic([]),
+    srcfilepath_has_any=dynamic([]),
+    hashes_has_any=dynamic([]),
+    dvchostname_has_any=dynamic([]),
+    disabled=false
+)
+}

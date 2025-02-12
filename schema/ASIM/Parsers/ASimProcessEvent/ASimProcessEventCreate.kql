@@ -1,0 +1,24 @@
+﻿//
+// Function Name: ASimProcessEventCreate
+// Description: This ASIM parser supports normalizing process create event logs from all supported sources to the ASIM ProcessEvent normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimProcessEventCreate
+{
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludeASimProcessEventCreate') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser);
+let imProcessEventBuiltInDisabled=toscalar('ExcludeASimProcessEventBuiltIn' in (DisabledParsers) or 'Any' in (DisabledParsers)); 
+union isfuzzy=true
+  vimProcessEmpty,
+  ASimProcessEventMicrosoft365D(imProcessEventBuiltInDisabled or ('ExcludeASimProcessEventMicrosoft365D' in (DisabledParsers) )),
+  ASimProcessCreateMicrosoftSysmon(imProcessEventBuiltInDisabled or ('ExcludeASimProcessCreateMicrosoftSysmon' in (DisabledParsers) )),
+  ASimProcessCreateMicrosoftSecurityEvents(imProcessEventBuiltInDisabled or ('ExcludeASimProcessCreateMicrosoftSecurityEvents' in (DisabledParsers) )),
+  ASimProcessCreateLinuxSysmon(imProcessEventBuiltInDisabled or ('ExcludeASimProcessCreateLinuxSysmon' in (DisabledParsers) )),
+  ASimProcessCreateMicrosoftWindowsEvents(imProcessEventBuiltInDisabled or ('ExcludeASimProcessCreateMicrosoftWindowsEvents' in (DisabledParsers) )),
+  ASimProcessCreateSentinelOne(imProcessEventBuiltInDisabled or ('ExcludeASimProcessCreateSentinelOne' in (DisabledParsers) )),
+  ASimProcessEventMD4IoT(imProcessEventBuiltInDisabled or ('ExcludeASimProcessEventMD4IoT' in (DisabledParsers) )),
+  ASimProcessEventNative(imProcessEventBuiltInDisabled or ('ExcludeASimProcessEventNative' in (DisabledParsers) )),
+  ASimProcessCreateVMwareCarbonBlackCloud(imProcessEventBuiltInDisabled or ('ExcludeASimProcessCreateVMwareCarbonBlackCloud' in (DisabledParsers) )),
+  ASimProcessCreateTrendMicroVisionOne(imProcessEventBuiltInDisabled or ('ExcludeASimProcessCreateTrendMicroVisionOne' in (DisabledParsers) ))
+}

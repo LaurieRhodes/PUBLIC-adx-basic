@@ -1,0 +1,18 @@
+﻿//
+// Function Name: _ASIM_ResolveDvcFQDN
+// Description: This ASIM tabular function is intended for use in ASIM parsers and sets the DvcHostname entity fields based on an FQDN or hostname provided as a parameter. The function is invoked using the [invoke operator](https://docs.microsoft.com/azure/data-explorer/kusto/query/invokeoperator) and requires the source table to have a TimeGenerated field.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) _ASIM_ResolveDvcFQDN(    ['T']:(*),
+    ['field']:string)
+{
+T
+| invoke _ASIM_ResolveFQDN (field)
+| project-rename 
+    DvcHostname = ExtractedHostname,
+    DvcDomain = Domain,
+    DvcFQDN = FQDN,
+    DvcDomainType = DomainType
+}

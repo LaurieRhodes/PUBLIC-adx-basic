@@ -1,0 +1,2179 @@
+//
+// Function Name: ASimAuthenticationBarracudaWAF
+// Description: This ASIM parser supports normalizing the Barracuda WAF logs to the ASIM authentication normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuthenticationBarracudaWAF(    ['disabled']:bool=False)
+{
+let barracudaSchema = datatable(
+    LogType_s: string,
+    UnitName_s: string,
+    EventName_s: string,
+    DeviceReceiptTime_s: string,
+    HostIP_s: string,
+    host_s: string,
+    LoginIP_s: string,
+    Severity_s: string,
+    LoginPort_d: real,
+    AdminName_s: string,
+    EventMessage_s: string,
+    TimeTaken_d: real,
+    TenantId: string,
+    Message: string,
+    SourceSystem: string,
+    _ResourceId: string,
+    RawData: string,
+    Computer: string,
+    MG: string,
+    ManagementGroupName: string,
+    SourceIP: string
+)[];
+let SeverityLookup = datatable (severity: int, EventSeverity: string)
+    [
+    0, "High", 
+    1, "High", 
+    2, "High", 
+    3, "Medium",
+    4, "Low",
+    5, "Low", 
+    6, "Informational",
+    7, "Informational" 
+];
+let EventTypeLookup = datatable (
+    EventName_s: string,
+    EventType_lookup: string,
+    EventResult: string
+)
+    [
+    "LOGIN", "Logon", "Success",
+    "UNSUCCESSFUL_LOGIN", "Logoff", "Failure",
+    "LOGOUT", "Logoff", "Success"
+];
+let EventResultDetailsLookup = datatable (
+    Reason: string,
+    EventResultDetails: string
+)
+    [
+    "Invalid Username/Password", "Incorrect password",
+    "Account Lockout", "User locked",
+    "Expired or Disabled Accounts", "User disabled",
+    "IP Blocking", "Logon violates policy",
+    "Session Timeouts", "Session expired",
+    "CAPTCHA Verification", "Other"
+];
+let parser = (disabled: bool=false)
+{
+let BarracudaCustom = 
+    union isfuzzy=true
+        barracudaSchema,
+        barracuda_CL
+    | where not(disabled)
+        and (LogType_s == "AUDIT")
+        and (EventName_s in ("LOGIN", "LOGOUT", "UNSUCCESSFUL_LOGIN"))
+    | parse trim(@'[^\w(")]+', EventMessage_s) with * "Reason=" Reason:string
+    | extend Reason = trim(@'(")', Reason)
+    | lookup EventResultDetailsLookup on Reason
+    | lookup EventTypeLookup on EventName_s
+    | extend 
+        EventType = EventType_lookup,
+        severity = toint(Severity_s)
+    | lookup SeverityLookup on severity
+    | extend
+        Dvc = UnitName_s,
+        EventCount = toint(1),
+        EventProduct = "WAF",
+        EventSchema = "Authentication",
+        EventSchemaVersion = "0.1.3",
+        EventVendor = "Barracuda"
+    | extend
+        EventStartTime = iff(isnotempty(TimeTaken_d), unixtime_milliseconds_todatetime(tolong(DeviceReceiptTime_s)-tolong(TimeTaken_d)), unixtime_milliseconds_todatetime(tolong(DeviceReceiptTime_s))),
+        SrcPortNumber = toint(LoginPort_d),
+        DvcIpAddr = HostIP_s,
+        SrcIpAddr = LoginIP_s,
+        DvcHostname = host_s,
+        ActorUsername = AdminName_s
+    | extend
+        ActorUsernameType = iff(isnotempty(ActorUsername), "Simple", ""),
+        ActorUserType = iff(isnotempty(ActorUsername), "Admin", "")
+    | extend
+        IpAddr = SrcIpAddr,
+        Src = SrcIpAddr,
+        EventEndTime = EventStartTime
+    | project-away
+        *_s,
+        *_d,
+        severity,
+        EventType_lookup,
+        TenantId,
+        Message,
+        SourceSystem,
+        _ResourceId,
+        RawData,
+        Computer,
+        MG,
+        ManagementGroupName,
+        SourceIP,
+        Reason;
+let BarracudaCEF = 
+    CommonSecurityLog
+    | where not(disabled) and DeviceVendor startswith "Barracuda" and (DeviceProduct == "WAF" or DeviceProduct == "WAAS")
+    | where DeviceEventCategory == "AUDIT"
+        and (toupper(ProcessName) in ("LOGIN", "LOGOUT", "UNSUCCESSFUL_LOGIN"))
+    | parse trim(@'[^\w(")]+', Message) with * "Reason=" Reason:string
+    | extend Reason = trim(@'(")', Reason)
+    | lookup EventResultDetailsLookup on Reason
+    | extend ProcessName = toupper(ProcessName)
+    | lookup EventTypeLookup on $left.ProcessName == $right.EventName_s
+    | extend 
+        EventType = EventType_lookup,
+        severity = toint(LogSeverity)
+    | lookup SeverityLookup on severity
+    | extend
+        Dvc = DeviceName,
+        EventCount = toint(1),
+        EventProduct = "WAF",
+        EventSchema = "Authentication",
+        EventSchemaVersion = "0.1.3",
+        EventVendor = "Barracuda"
+    | extend
+        EventStartTime = iff(isnotempty(FlexNumber2), unixtime_milliseconds_todatetime(tolong(ReceiptTime)-tolong(FlexNumber2)), unixtime_milliseconds_todatetime(tolong(ReceiptTime))),
+        SrcPortNumber = toint(SourcePort),
+        DvcIpAddr = DeviceAddress,
+        SrcIpAddr = SourceIP,
+        DvcHostname = DeviceName,
+        ActorUsername= DestinationUserName
+    | extend
+        ActorUsernameType = iff(isnotempty(ActorUsername), "Simple", ""),
+        ActorUserType = iff(isnotempty(ActorUsername), "Admin", "")
+    | extend
+        IpAddr = SrcIpAddr,
+        Src = SrcIpAddr,
+        EventEndTime = EventStartTime
+    | project-away
+        ThreatConfidence,
+        EventType_lookup,
+        CommunicationDirection,
+        AdditionalExtensions,
+        Device*,
+        Source*,
+        Destination*,
+        Activity,
+        LogSeverity,
+        ApplicationProtocol,
+        ProcessID,
+        ExtID,
+        Protocol,
+        Reason,
+        ReceiptTime,
+        SimplifiedDeviceAction,
+        OriginalLogSeverity,
+        ProcessName,
+        EndTime,
+        ExternalID,
+        File*,
+        ReceivedBytes,
+        Message,
+        Old*,
+        EventOutcome,
+        Request*,
+        StartTime,
+        Field*,
+        Flex*,
+        Remote*,
+        Malicious*,
+        severity,
+        ThreatSeverity,
+        IndicatorThreatType,
+        ThreatDescription,
+        _ResourceId,
+        SentBytes,
+        ReportReferenceLink,
+        Computer,
+        TenantId;
+union isfuzzy = true 
+  BarracudaCustom,
+  BarracudaCEF
+};
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimAuthenticationCiscoASA
+// Description: This ASIM parser supports normalizing authentication events, collected from Cisco ASA devices, to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuthenticationCiscoASA(    ['disabled']:bool=False)
+{
+let parser = (
+  disabled:bool=false
+){
+  let DeviceEventClassIDLookup = datatable (DeviceEventClassID:string, EventResultDetails:string, EventType:string, EventResult:string, DvcAction:string, EventSubType:string)
+  [
+      "113004", "", "Logon", "Success", "Allowed", "Remote",
+      "113005", "Incorrect password", "Logon", "Failure", "Blocked", "Remote",
+      "113006", "Logon violates policy", "Logon", "Failure", "Blocked", "Remote",
+      "113008", "", "Logon", "Success", "Allowed", "Remote",
+      "113010", "", "Logon", "Success", "Allowed", "Remote",
+      "113012", "", "Logon", "Success", "Allowed", "Remote",
+      "113019", "", "Logoff", "Success", "Allowed", "",
+      "113039", "", "Logon", "Success", "Allowed", "Remote",
+      "315011", "", "Logoff", "Success", "Allowed", "",
+      "502103", "", "Elevate", "Success", "Allowed", "AssumeRole",
+      "605004", "Other", "Logon", "Failure", "Blocked", "Remote",
+      "605005", "", "Logon", "Success", "Allowed", "Remote",
+      "611101", "", "Logon", "Success", "Allowed", "Remote",
+      "611102", "Other", "Logon", "Failure", "Blocked", "Remote",
+      "611103", "", "Logoff", "Success", "Allowed", "",
+      "713198", "Logon violates policy", "Logon", "Failure", "Blocked", "Remote",
+      "716002", "", "Logoff", "Success", "Allowed", "",
+      "716038", "", "Logon", "Success", "Allowed", "Remote",
+      "716039", "Other", "Logon", "Failure", "Blocked", "Remote",
+      "716040", "Other", "Logon", "Failure", "Blocked", "Remote",
+      "722022", "", "Logon", "Success", "Allowed", "Remote",
+      "722023", "", "Logoff", "Success", "Allowed", "",
+      "722028", "", "Logoff", "Success", "Allowed", "",
+      "722037", "", "Logoff", "Success", "Allowed", "",
+      "772002", "", "Logon", "Success", "Allowed", "",
+      "772003", "Other", "Logon", "Failure", "Blocked", "",
+      "772004", "Other", "Logon", "Failure", "Blocked", "",
+      "772005", "", "Logon", "Success", "Allowed", "",
+      "772006", "Other", "Logon", "Failure", "Blocked", ""
+  ];
+  let FilteredDeviceEventClassID = toscalar(
+      DeviceEventClassIDLookup 
+      | summarize make_set(DeviceEventClassID)
+  );
+  let SeverityLookup = datatable (EventOriginalSeverity:string, EventSeverity:string)
+  [
+      "1", "High", // Alert,
+      "2", "High", // Critical
+      "3", "Medium", // Error
+      "4", "Low", // Warning
+      "5", "Informational", // Notification
+      "6", "Informational", // Information
+      "7", "Informational", // Debug
+  ];
+  let LogMessages = 
+  CommonSecurityLog
+  | where not(disabled) 
+  | where DeviceVendor =~ "Cisco"
+  | where DeviceProduct == "ASA"
+  | where DeviceEventClassID in(FilteredDeviceEventClassID)
+  | extend EventOriginalSeverity = tostring(split(Message,"-",1)[0])
+  | lookup SeverityLookup on EventOriginalSeverity
+  | project TimeGenerated, Type, Computer, _ItemId, DeviceEventClassID, Message, DeviceAddress,EventOriginalSeverity, EventSeverity
+  | lookup DeviceEventClassIDLookup on DeviceEventClassID;
+  union 
+  (
+      LogMessages
+      | where DeviceEventClassID == 113005
+      | parse Message with * 'reason = ' EventOriginalResultDetails ' : server = ' TargetIpAddr ' ' * 'user = ' TargetUsername ' ' * 'user IP = ' SrcIpAddr
+      | project-away Message
+  ),
+  (
+      LogMessages
+      | where DeviceEventClassID == 502103
+      | parse Message with * "Uname: " TargetUsername " " *
+      | project-away Message
+  ),
+  (
+      LogMessages
+      | where DeviceEventClassID in(605004,605005)
+      | parse Message with * 'from ' SrcIpAddr '/' SrcPortNumber:int " to " * ":" TargetIpAddr '/' * 'user "' TargetUsername '"'
+      | project-away Message
+  ),
+  (
+      LogMessages
+      | where DeviceEventClassID in(611101,611102)
+      | parse Message with * 'IP address: ' SrcIpAddr ', Uname: ' TargetUsername
+      | project-away Message
+  ),
+  (
+      LogMessages
+      | where DeviceEventClassID == 611103
+      | parse Message with * ' Uname: ' TargetUsername
+      | project-away Message
+  ),
+  (
+      LogMessages
+      | where DeviceEventClassID == 113004
+      | parse Message with * 'server = ' TargetIpAddr ' ' * 'user = ' TargetUsername
+      | project-away Message
+  ),
+  (
+      LogMessages
+      | where DeviceEventClassID in(113008,113012)
+      | parse Message with * 'user = ' TargetUsername
+      | project-away Message
+  ),
+  (
+      LogMessages
+      | where DeviceEventClassID == 113019
+      | parse Message with * 'Username = ' TargetUsername ', IP = ' SrcIpAddr ',' * 
+      | project-away Message
+  ),
+  (
+      LogMessages
+      | where DeviceEventClassID in(113039,716002,716039,722022,722023,722028,722037)
+      | parse Message with * '> User <' TargetUsername "> IP <" SrcIpAddr ">" *
+      | project-away Message
+  ),
+  (
+      LogMessages
+      | where DeviceEventClassID == 315011
+      | parse Message with * 'from ' SrcIpAddr ' ' * 'user "' TargetUsername '" ' * ' reason: "' EventOriginalResultDetails '" ' *
+      | extend EventResultDetails = iif(EventOriginalResultDetails == "Internal error", "Other", EventResultDetails)
+      | project-away Message
+  ),
+  (
+      LogMessages
+      | where DeviceEventClassID == 113010
+      | parse Message with * 'user ' TargetUsername ' from  server' SrcIpAddr
+      | project-away Message
+  ),
+  (
+      LogMessages
+      | where DeviceEventClassID == 113006
+      | parse Message with * 'User ' TargetUsername ' locked' *
+      | project-away Message
+  ),
+  (
+      LogMessages
+      | where DeviceEventClassID == 716040
+      | parse Message with * 'Denied ' TargetUsername ' login' *
+      | project-away Message
+  ),
+  (
+      LogMessages
+      | where DeviceEventClassID == 713198
+      | parse Message with * 'Failed: ' TargetUsername ' User' *
+      | project-away Message
+  ),
+  (
+      LogMessages
+      | where DeviceEventClassID == 716038
+      | parse Message with * 'User ' TargetUsername ' IP ' SrcIpAddr ' Authentication'*
+      | project-away Message
+  ),
+  (
+      LogMessages
+      | where DeviceEventClassID in(772002)
+      | parse Message with * 'user ' TargetUsername ', cause: ' EventOriginalResultDetails
+      | project-away Message
+  ),
+  (
+      LogMessages
+      | where DeviceEventClassID in(772003,772004)
+      | parse Message with * 'user ' TargetUsername ', IP ' SrcIpAddr ', cause: ' EventOriginalResultDetails
+      | project-away Message
+  ), 
+  (
+      LogMessages
+      | where DeviceEventClassID in(772005)
+      | parse Message with * 'user ' TargetUsername ' passed'
+      | project-away Message
+  ),  
+  (
+      LogMessages
+      | where DeviceEventClassID in(772006)
+      | parse Message with * 'user ' TargetUsername ' failed'
+      | project-away Message
+  )      
+  | project-rename 
+      DvcHostname           = Computer,
+      EventUid              = _ItemId,
+      EventOriginalType     = DeviceEventClassID,
+      DvcIpAddr             = DeviceAddress
+  | extend 
+      EventSchemaVersion = "0.1.3",
+      EventSchema        = "Authentication",
+      EventVendor        = "Cisco",
+      EventProduct       = "ASA",
+      EventCount         = int(1),
+      EventStartTime     = TimeGenerated,
+      EventEndTime       = TimeGenerated,
+      Dvc                = DvcHostname,
+      User               = TargetUsername,
+      Src                = SrcIpAddr,
+      IpAddr             = SrcIpAddr,
+      Dst                = TargetIpAddr,
+      TargetUsernameType = _ASIM_GetUsernameType(TargetUsername),
+      EventResultDetails = iif(TargetUsername == "*****", "No such user or password", EventResultDetails)
+};
+parser (
+  disabled = disabled
+)
+}
+
+
+
+//
+// Function Name: ASimAuthenticationCiscoISE
+// Description: This ASIM parser supports normalizing Cisco ISE events produced by the Microsoft Sentinel Cisco ISE connector to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuthenticationCiscoISE(    ['disabled']:bool=False)
+{
+let EventFieldsLookup=datatable(
+  EventOriginalType: string,
+  EventType: string,
+  EventOriginalSeverity: string,
+  EventResult: string,
+  EventSeverity: string,
+  EventResultDetails: string,
+  EventMessage: string,
+  EventOriginalResultDetails: string
+)[
+  "25104", "Logon", "DEBUG", "Success", "Informational", "", "Plain text password authentication in external REST ID store server succeeded", "Plain text password authentication in external REST ID store server succeeded",
+  "25105", "Logon", "DEBUG", "Failure", "Low", "No such user or password", "Plain text password authentication in external REST ID store server failed", "Plain text password authentication in external REST ID store server failed",
+  "25106", "Logon", "DEBUG", "Failure", "Low", "No such user or password", "REST ID Store server indicated plain text password authentication failure", "REST ID store server indicated plain text password authentication failure",
+  "25112", "Logon", "DEBUG", "Failure", "Low", "No such user or password", "REST database indicated plain text password authentication failure", "REST database indicated plain text password authentication failure",
+  "51000", "Logon", "NOTICE", "Failure", "Low", "No such user or password", "Administrator authentication failed", "Administrator authentication failed",
+  "51001", "Logon", "NOTICE", "Success", "Informational", "", "Administrator authentication succeeded", "Administrator authentication succeeded",
+  "51002", "Logoff", "NOTICE", "Success", "Informational", "", "Administrator logged off", "Administrator logged off",
+  "51003", "Logoff", "NOTICE", "Success", "Informational", "Session expired", "Session Timeout", "Administrator had a session timeout",
+  "51004", "Logon", "NOTICE", "Failure", "Low", "Logon violates policy", "Rejected administrator session from unauthorized client IP address", "An attempt to start an administration session from an unauthorized client IP address was rejected. Check the client's administration access setting.",
+  "51005", "Logon", "NOTICE", "Failure", "Low", "User disabled", "Administrator authentication failed. Administrator account is disabled", "Administrator authentication failed. Administrator account is disabled.",
+  "51006", "Logon", "NOTICE", "Failure", "Low", "User disabled", "Administrator authentication failed. Account is disabled due to inactivity", "Administrator authentication failed. Account is disabled due to inactivity.",
+  "51007", "Logon", "NOTICE", "Failure", "Low", "User disabled", "Authentication failed. Account is disabled due to password expiration", "Authentication failed. Account is disabled due to password expiration",
+  "51008", "Logon", "NOTICE", "Failure", "Low", "Logon violates policy", "Administrator authentication failed. Account is disabled due to excessive failed authentication attempts", "Administrator authentication failed. Account is disabled due to excessive failed authentication attempts.",
+  "51009", "Logon", "NOTICE", "Failure", "Low", "Other", "Authentication failed. ISE Runtime is not running", "Authentication failed. ISE Runtime is not running",
+  "51020", "Logon", "NOTICE", "Failure", "Low", "No such user", "Administrator authentication failed. Login username does not exist.", "Administrator authentication failed. Login username does not exist.",
+  "51021", "Logon", "NOTICE", "Failure", "Low", "Incorrect password", "Administrator authentication failed. Wrong password.", "Administrator authentication failed. Wrong password.",
+  "51022", "Logon", "NOTICE", "Failure", "Low", "Other", "Administrator authentication failed. System Error", "Administrator authentication failed. System Error",
+  "51106", "Logon", "NOTICE", "Failure", "Low", "Other", "Authentication for web services failed", "Authentication for web services failed.",
+  "60075", "Logon", "NOTICE", "Success", "Informational", "", "Sponsor has successfully authenticated", "Sponsor has successfully authenticated",
+  "60076", "Logon", "NOTICE", "Failure", "Low", "Other", "Sponsor authentication has failed", "Sponsor authentication has failed; please see Failure Code for more details",
+  "60077", "Logon", "NOTICE", "Failure", "Low", "Other", "MyDevices user authentication has failed", "MyDevices user authentication has failed",
+  "60078", "Logon", "INFO", "Success", "Informational", "", "MyDevices user has successfully authenticated", "MyDevices user has successfully authenticated",
+  "60080", "Logon", "INFO", "Success", "Informational", "", "A SSH CLI user has successfully logged in", "A SSH CLI User has successfully logged in",
+  "60081", "Logon", "INFO", "Failure", "Low", "No such user or password", "A SSH CLI user has attempted unsuccessfully to login", "A SSH CLI user has attempted unsuccessfully to login",
+  "60082", "Logon", "INFO", "Failure", "Low", "User locked", "A SSH CLI user has attempted to login, however account is locked out", "A SSH CLI user has attempted to login, however account is locked out",
+  "60135", "Logoff", "INFO", "Failure", "Low", "Other", "MyDevices user SSO logout has failed", "MyDevices user SSO logout has failed",
+  "60136", "Logoff", "INFO", "Failure", "Low", "Other", "Sponsor user SSO logout has failed", "Sponsor user SSO logout has failed",
+  "60204", "Logon", "INFO", "Success", "Informational", "", "System root CLI account has successfully logged in", "System root CLI account has successfully logged in",
+  "60205", "Logon", "INFO", "Success", "Informational", "", "A CLI user has logged in from console", "A CLI user has logged in from console",
+  "60206", "Logoff", "INFO", "Success", "Informational", "", "A CLI user has logged out from console", "A CLI user has logged out from console",
+  "61012", "Logon", "INFO", "Success", "Informational", "", "ISE has authenticated against APIC successfully", "ISE has authenticated against APIC successfully",
+  "61013", "Logon", "INFO", "Failure", "Low", "Other", "ISE failed to authenticate against APIC", "ISE failed to authenticate against APIC",
+  "61014", "Logon", "INFO", "Success", "Informational", "", "ISE has refreshed authentication against APIC successfully", "ISE has refreshed authentication against APIC successfully",
+  "61015", "Logon", "INFO", "Failure", "Low", "Other", "ISE failed to refresh authenticate against APIC", "ISE failed to refresh authenticate against APIC",
+  "60507", "Logon", "ERROR", "Failure", "Low", "No such user", "ERS request rejected due to unauthorized user.", "ERS request was rejected because the user who sent the request is unauthorized.",
+  "51025", "Logon", "NOTICE", "Failure", "Low", "Other", "Authentication for web services failed", "Authentication for web services failed.",
+  "61076", "Logoff", "INFO", "Success", "Informational", "", "Sponsor has been successfully logged out", "Sponsor has been successfully logged out",
+  "61077", "Logoff", "INFO", "Success", "Informational", "", "MyDevices has been successfully logged out", "MyDevices has been successfully logged out",
+  "10003", "Logon", "ERROR", "Failure", "Low", "No such user", "Internal error: Administrator authentication received blank Administrator name", "Internal error: AAC RT component received Administrator authentication request",
+  "10004", "Logon", "ERROR", "Failure", "Low", "Incorrect password", "Internal error: Administrator authentication received blank Administrator password", "Internal error: AAC RT component received an Administrator authentication request with blank admin password",
+  "10005", "Logon", "INFO", "Success", "Informational", "", "Administrator authenticated successfully", "Administrator authenticated successfully",
+  "10006", "Logon", "INFO", "Failure", "Low", "No such user or password", "Administrator authentication failed", "Administrator authentication failed",
+  "10007", "Logon", "ERROR", "Failure", "Low", "Other", "Administrator authentication failed - DB Error", "Administrator authentication failed - DB Error",
+  "22000", "Logon", "ERROR", "Failure", "Low", "Other", "Authentication resulted in internal error", "Authentication resulted in internal error",
+  "22004", "Logon", "INFO", "Failure", "Low", "Incorrect password", "Wrong password", "Wrong password",
+  "22028", "Logon", "INFO", "Failure", "Low", "No such user or password", "Authentication failed and the advanced options are ignored", "Authentication of the user failed and the advanced option settings specified in the identity portion of the relevant authentication policy were ignored. For PEAP, LEAP, EAP-FAST or RADIUS MSCHAP authentications, when authentication fails, ISE stops processing the request.",
+  "22037", "Logon", "DEBUG", "Success", "Informational", "", "Authentication Passed", "Authentication Passed, Skipping Attribute Retrieval",
+  "22040", "Logon", "INFO", "Failure", "Low", "Incorrect password", "Wrong password or invalid shared secret", "Wrong password or invalid shared secret",
+  "22091", "Logon", "INFO", "Failure", "Low", "Logon violates policy", "Authentication failed. User account is disabled due to excessive failed authentication attempts at global level", "Authentication failed. User account is disabled due to excessive failed authentication attempts at global level.",
+  "5400", "Logon", "NOTICE", "Failure", "Low", "Other", "Authentication failed", "User authentication failed. See FailureReason for more information",
+  "5401", "Logon", "NOTICE", "Failure", "Low", "Other", "Authentication failed", "User authentication failed. See FailureReason for more information",
+  "5412", "Logon", "NOTICE", "Failure", "Low", "Other", "TACACS+ authentication request ended with error", "TACACS+ authentication request ended with an error",
+  "5418", "Logon", "NOTICE", "Failure", "Low", "Other", "Guest Authentication Failed", "Guest Authentication failed; please see Failure code for more details",
+  "5447", "Logon", "NOTICE", "Success", "Informational", "", "MDM Authentication Passed", "MDM Authentication passed",
+  "5448", "Logon", "NOTICE", "Failure", "Low", "Other", "MDM Authentication Failed", "MDM Authentication failed; please see Failure code for more details",
+  "86010", "Logon", "INFO", "Failure", "Low", "No such user or password", "Guest user authentication failed", "Guest user authentication failed. Please check your password and account permission",
+  "86011", "Logon", "INFO", "Failure", "Low", "User disabled", "Guest user is not enabled", "Guest user authentication failed. User is not enabled. Please contact your system administrator",
+  "86014", "Logon", "INFO", "Failure", "Low", "User disabled", "User is suspended", "User authentication failed. User account is suspended",
+  "86020", "Logon", "INFO", "Failure", "Low", "Other", "Guest Unknown Error", "User authentication failed. Please contact your System Administrator",
+  "24015", "Logon", "DEBUG", "Success", "Informational", "", "Authenticating user against LDAP Server", "Authenticating user against LDAP Server",
+  "24020", "Logon", "DEBUG", "Failure", "Low", "Incorrect password", "User authentication against the LDAP Server failed", "User authentication against the LDAP Server failed. The user entered the wrong password or the user record in the LDAP Server is disabled or expired",
+  "24021", "Logon", "ERROR", "Failure", "Low", "Other", "User authentication ended with an error", "User authentication against LDAP Server ended with an error",
+  "24022", "Logon", "DEBUG", "Success", "Informational", "", "User authentication succeeded", "User authentication against LDAP Server succeeded",
+  "24050", "Logon", "WARN", "Failure", "Low", "Incorrect password", "Cannot authenticate with LDAP Identity Store because password was not present or was empty", "ISE did not receive user password or received empty password. Plain password authentication cannot be performed with no password or empty password",
+  "24054", "Logon", "DEBUG", "Failure", "Low", "Password expired", "User authentication against LDAP server detected that user password has expired", "The password has expired but there are remaining grace authentications. The user needs to change it",
+  "24055", "Logon", "DEBUG", "Failure", "Low", "Password expired", "User authentication against LDAP server detected that the user is authenticating for the first time after the password administrator set the password", "The user needs to change his password immediately",
+  "24056", "Logon", "WARN", "Failure", "Low", "Password expired", "User authentication against LDAP server detected that user password has expired and there are no more grace authentications", "The user needs to contact the password administrator in order to have its password reset",
+  "24057", "Logon", "WARN", "Failure", "Low", "Logon violates policy", "User authentication against LDAP server detected that the password failure limit has been reached and the account is locked", "The user needs to retry later or contact the password administrator to reset the password",
+  "24337", "Logon", "DEBUG", "Success", "Informational", "", "Authentication Ticket (TGT) request succeeded", "Authentication Ticket (TGT) request succeeded",
+  "24338", "Logon", "DEBUG", "Failure", "Low", "Other", "Authentication Ticket (TGT) request failed", "Authentication Ticket (TGT) request failed",
+  "24402", "Logon", "INFO", "Success", "Informational", "", "User authentication against Active Directory succeeded", "User authentication against Active Directory succeeded",
+  "24403", "Logon", "INFO", "Failure", "Low", "Other", "User authentication against Active Directory failed", "User authentication against Active Directory failed",
+  "24406", "Logon", "DEBUG", "Failure", "Low", "No such user or password", "User authentication against Active Directory failed since user has invalid credentials", "User authentication against Active Directory failed since user has invalid credentials",
+  "24407", "Logon", "DEBUG", "Failure", "Low", "Password expired", "User authentication against Active Directory failed since user is required to change his password", "User authentication against Active Directory failed since user is required to change his password",
+  "24408", "Logon", "DEBUG", "Failure", "Low", "Incorrect password", "User authentication against Active Directory failed since user has entered the wrong password", "User authentication against Active Directory failed since user has entered the wrong password",
+  "24409", "Logon", "DEBUG", "Failure", "Low", "User disabled", "User authentication against Active Directory failed since the user's account is disabled", "User authentication against Active Directory failed since the user's account is disabled",
+  "24410", "Logon", "DEBUG", "Failure", "Low", "Logon violates policy", "User authentication against Active Directory failed since user is considered to be in restricted logon hours", "User authentication against Active Directory failed since user is considered to be in restricted logon hours",
+  "24414", "Logon", "DEBUG", "Failure", "Low", "Account expired", "User authentication against Active Directory failed since the user's account has expired", "User authentication against Active Directory failed since the user's account has expired",
+  "24415", "Logon", "DEBUG", "Failure", "Low", "User locked", "User authentication against Active Directory failed since user's account is locked out", "User authentication against Active Directory failed since user's account is locked out",
+  "24418", "Logon", "ERROR", "Failure", "Low", "Logon violates policy", "Machine authentication against Active Directory failed since it is disabled in configuration", "Machine authentication against Active Directory failed since it is disabled in configuration",
+  "24454", "Logon", "ERROR", "Failure", "Low", "Session expired", "User authentication against Active Directory failed because of a timeout error", "User authentication against Active Directory failed because of a timeout error",
+  "24470", "Logon", "INFO", "Success", "Informational", "", "Machine authentication against Active Directory is successful", "Machine authentication against Active Directory is successful.",
+  "24484", "Logon", "DEBUG", "Failure", "Low", "Password expired", "Machine authentication against Active Directory has failed because the machine's password has expired", "Machine authentication against Active Directory has failed because the machine's password has expired.",
+  "24485", "Logon", "DEBUG", "Failure", "Low", "Incorrect password", "Machine authentication against Active Directory has failed because of wrong password", "Machine authentication against Active Directory has failed because of wrong password.",
+  "24486", "Logon", "DEBUG", "Failure", "Low", "User disabled", "Machine authentication against Active Directory has failed because the machine's account is disabled", "Machine authentication against Active Directory has failed because the machine's account is disabled.",
+  "24487", "Logon", "DEBUG", "Failure", "Low", "Logon violates policy", "Machine authentication against Active Directory failed since machine is considered to be in restricted logon hours", "Machine authentication against Active Directory failed since machine is considered to be in restricted logon hours",
+  "24489", "Logon", "DEBUG", "Failure", "Low", "Account expired", "Machine authentication against Active Directory has failed because the machine's account has expired", "Machine authentication against Active Directory has failed because the machine's account has expired.",
+  "24490", "Logon", "DEBUG", "Failure", "Low", "User locked", "Machine authentication against Active Directory has failed because the machine's account is locked out", "Machine authentication against Active Directory has failed because the machine's account is locked out.",
+  "24491", "Logon", "DEBUG", "Failure", "Low", "No such user or password", "Machine authentication against Active Directory has failed because the machine has invalid credentials", "Machine authentication against Active Directory has failed because the machine has invalid credentials.",
+  "24492", "Logon", "ERROR", "Failure", "Low", "No such user or password", "Machine authentication against Active Directory has failed", "Machine authentication against Active Directory has failed.",
+  "24496", "Logon", "WARN", "Failure", "Low", "Logon violates policy", "Authentication rejected due to a white or black list restriction", "Authentication rejected due to a white or black list restriction",
+  "24505", "Logon", "DEBUG", "Success", "Informational", "", "User authentication has succeeded", "User authentication against the RSA SecurID Server has succeeded.",
+  "24508", "Logon", "DEBUG", "Failure", "Low", "Logon violates policy", "User authentication failed", "User authentication against RSA SecurID Server failed",
+  "24518", "Logon", "DEBUG", "Failure", "Low", "Other", "User canceled New PIN operation; User authentication against RSA SecurIDServer failed", "User canceled New PIN operation; User authentication against RSA SecurID Server failed",
+  "24547", "Logon", "WARN", "Failure", "Low", "Session expired", "RSA request timeout expired. RSA authentication session cancelled", "RSA request timeout expired. RSA authentication session cancelled.",
+  "24612", "Logon", "INFO", "Success", "Informational", "", "Authentication against the RADIUS token server succeeded", "Authentication against the RADIUS token server succeeded.",
+  "24613", "Logon", "ERROR", "Failure", "Low", "Other", "Authentication against the RADIUS token server failed", "Authentication against the RADIUS token server failed.",
+  "24614", "Logon", "INFO", "Failure", "Low", "No such user", "RADIUS token server authentication failure is translated as Unknown user failure", "RADIUS token server authentication failure is translated as Unknown user failure.",
+  "24639", "Logon", "DEBUG", "Success", "Informational", "", "Authentication passed via Passcode cache", "User record was found in Passcode cache, passcode matches the passcode on the authentication request. Authentication passed via Passcode cache.",
+  "24704", "Logon", "DEBUG", "Failure", "Low", "Logon violates policy", "Authentication failed because identity credentials are ambiguous", "Authentication found several accounts matching to the given credentials (i.e identity name and password)",
+  "24705", "Logon", "DEBUG", "Failure", "Low", "Other", "Authentication failed because ISE server is not joined to required domains", "Authentication failed because ISE server is not joined to required domains",
+  "24706", "Logon", "DEBUG", "Failure", "Low", "Other", "Authentication failed because NTLM was blocked", "Authentication failed because NTLM was blocked",
+  "24707", "Logon", "DEBUG", "Failure", "Low", "Other", "Authentication failed because all identity names have been rejected", "Authentication failed all identity names has been rejected according AD Identity Store Advanced Settings",
+  "24708", "Logon", "DEBUG", "Failure", "Low", "No such user", "User not found in Active Directory. Some authentication domains were not available", "User not found in Active Directory. Some authentication domains were not available during identity resolution",
+  "24709", "Logon", "DEBUG", "Failure", "Low", "No such user", "Host not found in Active Directory. Some authentication domains were not available", "Host not found in Active Directory. Some authentication domains were not available during identity resolution",
+  "24712", "Logon", "DEBUG", "Failure", "Low", "Logon violates policy", "Authentication failed because domain trust is restricted", "Authentication failed because domain trust is restricted",
+  "24814", "Logon", "INFO", "Failure", "Low", "Other", "The responding provider was unable to successfully authenticate the principal", "The responding provider was unable to successfully authenticate the principal",
+  "24853", "Logon", "DEBUG", "Success", "Informational", "", "Plain text password authentication in external ODBC database succeeded", "Plain text password authentication in external ODBC database succeeded",
+  "24854", "Logon", "DEBUG", "Failure", "Low", "No such user or password", "Plain text password authentication in external ODBC database failed", "Plain text password authentication in external ODBC database failed",
+  "24860", "Logon", "DEBUG", "Failure", "Low", "No such user or password", "ODBC database indicated plain text password authentication failure", "ODBC database indicated plain text password authentication failure",
+  "24890", "Logon", "WARN", "Failure", "Low", "Other", "Social Login operation failed", "Social Login operation failed. Check the message details for more information",
+  "24716", "Logon", "INFO", "Success", "Informational", "", "Active Directory Kerberos ticket authentication succeeded", "Active Directory Kerberos ticket authentication succeeded",
+  "24717", "Logon", "ERROR", "Failure", "Low", "Other", "Active Directory Kerberos ticket authentication failed", "Active Directory Kerberos ticket authentication failed",
+  "24719", "Logon", "DEBUG", "Failure", "Low", "Incorrect password", "Active Directory Kerberos ticket authentication failed because of the ISE account password mismatch, integrity check failure or expired ticket", "Active Directory Kerberos ticket authentication failed because of the ISE account password mismatch, integrity check failure or expired ticket",
+  "89157", "Logon", "ERROR", "Failure", "Low", "Other", "CMCS authentication failure", "ISE is unable to authenticate with the Cisco MDM Cloud Service",
+  "89159", "Logon", "ERROR", "Failure", "Low", "Other", "APNS authentication failure", "ISE is unable to authenticate with the Apple Push Notification System (APNS)",
+  "89160", "Logon", "INFO", "Success", "Informational", "", "MDM User Authentication completed", "The User Authentication part of mobile device enrollment has completed",
+  "33102", "Logon", "INFO", "Success", "Informational", "", "Successful user login to ISE configuration mode", "ISE administrator logged in to ISE configuration mode",
+  "33103", "Logon", "INFO", "Failure", "Low", "Other", "User login to ISE configuration mode failed", "Login to ISE configuration mode failed",
+  "5200", "Logon", "NOTICE", "Success", "Informational", "", "Authentication succeeded", "User authentication ended successfully",
+  "5201", "Logon", "NOTICE", "Success", "Informational", "", "Authentication succeeded", "User authentication ended successfully",
+  "5231", "Logon", "NOTICE", "Success", "Informational", "", "Guest Authentication Passed", "Guest Authentication Passed",
+  "11002", "Logon", "DEBUG", "Success", "Informational", "", "Returned RADIUS Access-Accept", "Returned RADIUS Access-Accept - authentication succeeded",
+  "11003", "Logon", "DEBUG", "Failure", "Low", "Other", "Returned RADIUS Access-Reject", "Returned RADIUS Access-Reject - authentication failed",
+  "11039", "Logon", "INFO", "Failure", "Low", "Other", "RADIUS authentication request rejected due to critical logging error", "A RADIUS authentication request was rejected due to a critical logging error.",
+  "11052", "Logon", "ERROR", "Failure", "Low", "Other", "Authentication request dropped due to unsupported port number", "An authentication request was dropped because it was received through an unsupported port number.",
+  "11812", "Logon", "INFO", "Success", "Informational", "", "EAP-MSCHAP authentication succeeded", "EAP-MSCHAP authentication succeeded.",
+  "11813", "Logon", "INFO", "Failure", "Low", "Other", "EAP-MSCHAP authentication failed", "EAP-MSCHAP authentication failed.",
+  "11814", "Logon", "INFO", "Success", "Informational", "", "Inner EAP-MSCHAP authentication succeeded", "EAP-MSCHAP authentication for the inner EAP method succeeded.",
+  "11815", "Logon", "INFO", "Failure", "Low", "Other", "Inner EAP-MSCHAP authentication failed", "EAP-MSCHAP authentication for the inner EAP method failed.",
+  "11823", "Logon", "INFO", "Failure", "Low", "Other", "EAP-MSCHAP authentication attempt failed", "EAP-MSCHAP authentication attempt failed.",
+  "11824", "Logon", "DEBUG", "Success", "Informational", "", "EAP-MSCHAP authentication attempt passed", "EAP-MSCHAP authentication attempt passed.",
+  "12005", "Logon", "INFO", "Success", "Informational", "", "EAP-MD5 authentication succeeded", "EAP-MD5 authentication succeeded.",
+  "12006", "Logon", "INFO", "Failure", "Low", "Other", "EAP-MD5 authentication failed", "EAP-MD5 authentication failed.",
+  "12208", "Logon", "INFO", "Failure", "Low", "Other", "Client certificate was received but authentication failed", "ISE received client certificate during tunnel establishment or inside the tunnel but the authentication failed.",
+  "12306", "Logon", "INFO", "Success", "Informational", "", "PEAP authentication succeeded", "PEAP authentication succeeded.",
+  "12307", "Logon", "INFO", "Failure", "Low", "Other", "PEAP authentication failed", "PEAP authentication failed.",
+  "12308", "Logon", "WARN", "Failure", "Low", "Other", "Client sent Result TLV indicating failure", "Internal error, possibly in the supplicant: PEAP v0 authentication failed because client sent Result TLV indicating failure. Client indicates that it does not support Crypto-Binding TLV",
+  "12506", "Logon", "INFO", "Success", "Informational", "", "EAP-TLS authentication succeeded", "EAP-TLS authentication succeeded.",
+  "12507", "Logon", "INFO", "Failure", "Low", "Other", "EAP-TLS authentication failed", "EAP-TLS authentication failed.",
+  "12528", "Logon", "INFO", "Success", "Informational", "", "Inner EAP-TLS authentication succeeded", "EAP-TLS authentication for the inner EAP method succeeded.",
+  "12529", "Logon", "INFO", "Failure", "Low", "Other", "Inner EAP-TLS authentication failed", "EAP-TLS authentication for the inner EAP method failed.",
+  "12612", "Logon", "INFO", "Success", "Informational", "", "EAP-GTC authentication succeeded", "EAP-GTC authentication has succeeded.",
+  "12613", "Logon", "INFO", "Failure", "Low", "Other", "EAP-GTC authentication failed", "EAP-GTC authentication has failed.",
+  "12614", "Logon", "INFO", "Success", "Informational", "", "Inner EAP-GTC authentication succeeded", "EAP-GTC authentication for the inner EAP method has succeeded.",
+  "12615", "Logon", "INFO", "Failure", "Low", "Other", "Inner EAP-GTC authentication failed", "EAP-GTC authentication for the inner EAP method has failed.",
+  "12623", "Logon", "INFO", "Failure", "Low", "Other", "EAP-GTC authentication attempt failed", "The EAP-GTC authentication attempt has failed.",
+  "12624", "Logon", "DEBUG", "Success", "Informational", "", "EAP-GTC authentication attempt passed", "The EAP-GTC authentication attempt has passed.",
+  "12705", "Logon", "INFO", "Success", "Informational", "", "LEAP authentication passed; Continuing protocol", "LEAP authentication passed. Continue LEAP protocol.",
+  "12706", "Logon", "INFO", "Failure", "Low", "Other", "LEAP authentication failed; Finishing protocol", "LEAP authentication has failed. Protocol finished with a failure.",
+  "12707", "Logon", "INFO", "Failure", "Low", "Other", "LEAP authentication error; Finishing protocol", "A LEAP authentication error has occurred. Protocol finished with an error.",
+  "12854", "Logon", "WARN", "Failure", "Low", "Incorrect password", "Cannot authenticate because password was not present or was empty", "ISE did not receive user password or received empty password. Plain password authentication cannot be performed with no password or empty password",
+  "12975", "Logon", "INFO", "Success", "Informational", "", "EAP-TTLS authentication succeeded", "EAP-TTLS authentication succeeded.",
+  "12976", "Logon", "INFO", "Failure", "Low", "Other", "EAP-TTLS authentication failed", "EAP-TTLS authentication failed.",
+  "11700", "Logon", "INFO", "Success", "Informational", "", "5G AKA Authentication succeeded", "5G AKA Authentication succeeded."
+  ];
+let EventOriginalTypeList = toscalar(EventFieldsLookup 
+    | summarize make_set(EventOriginalType));
+let CiscoISEAuthParser=(disabled: bool=false) {
+    Syslog
+    | where not(disabled)
+    | where ProcessName has_any ("CISE", "CSCO")
+    | parse kind = regex SyslogMessage with @"\d{10}\s" EventOriginalType @"\s(NOTICE|INFO|WARN|WARNING|ERROR|FATAL|DEBUG)"
+    | where EventOriginalType in (EventOriginalTypeList)
+    | lookup EventFieldsLookup on EventOriginalType 
+    | parse-kv SyslogMessage as (FailureReason: string, NetworkDeviceName: string, Protocol: string, DestinationIPAddress: string, DestinationPort: int, ['User-Name']: string, UserName: string, User: string, ['Remote-Address']: string, ['Device IP Address']: string, ['Device Port']: int, ['cisco-av-pair=audit-session-id']: string, ['Caller-Station-ID']: string) with (pair_delimiter=',', kv_delimiter='=')
+    | project-rename
+        LogonProtocol=Protocol
+        , TargetIpAddr=DestinationIPAddress
+        , TargetPortNumber=DestinationPort
+        , TargetSessionId=["cisco-av-pair=audit-session-id"]
+        , SrcPortNumber=['Device Port']
+    | invoke _ASIM_ResolveSrcFQDN("['Caller-Station-ID']")
+    | extend
+        EventStartTime = coalesce(EventTime, TimeGenerated)
+        , EventEndTime = coalesce(EventTime, TimeGenerated)
+    | extend DvcHostname = coalesce(NetworkDeviceName, Computer, HostName)
+    | extend TargetUsername = coalesce(['User-Name'], UserName, User)
+    | extend
+        TargetUsernameType = _ASIM_GetUsernameType(TargetUsername)
+        , SrcIpAddr = coalesce(['Device IP Address'], ['Remote-Address'], tostring(extract(@"Caller-Station-ID=(\d{1,3}\.\d{1.3}\.\d{1,3}\.\d{1,3})", 1, SyslogMessage)), "")
+    | extend EventOriginalResultDetails = case(isnotempty(FailureReason), FailureReason, EventOriginalResultDetails)
+    | extend DvcIpAddr = iif(isnotempty(HostIP) and HostIP != "Unknown IP", HostIP, extract(@"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", 1, Computer))
+    | extend 
+        EventVendor = "Cisco"
+        , EventProduct = "ISE"
+        , EventProductVersion = "3.2"
+        , EventCount = int(1)
+        , EventSchema = "Authentication"
+        , EventSchemaVersion = "0.1.3"
+    // **************** <Aliases> *****************
+    | extend 
+        Dvc = coalesce(DvcIpAddr, DvcHostname)
+        , IpAddr = SrcIpAddr
+        , Dst = TargetIpAddr
+        , Src = SrcIpAddr
+        , User = TargetUsername
+    // **************** </Aliases> ****************
+    | project-away
+        TenantId,
+        SourceSystem,
+        MG,
+        Computer,
+        EventTime,
+        Facility,
+        HostName,
+        SeverityLevel,
+        SyslogMessage,
+        HostIP,
+        ProcessName,
+        ProcessID,
+        _ResourceId,
+        FailureReason,
+        NetworkDeviceName,
+        ['User-Name'],
+        UserName,
+        User,
+        ['Remote-Address'],
+        ['Device IP Address'],
+        ['Caller-Station-ID']
+};
+CiscoISEAuthParser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimAuthenticationCiscoMeraki
+// Description: This ASIM parser supports normalizing Cisco Meraki logs ingested in 'meraki_CL' table to the ASIM Authentication normalized schema. Cisco Meraki events are generated from network activity and security events from Meraki devices such as firewalls, switches, and access points. These logs are captured through the Cisco Meraki Sentinel connector which uses a Linux agent to collect logs in Syslog format.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuthenticationCiscoMeraki(    ['disabled']:bool=False)
+{
+let LogSubTypeList = dynamic(["8021x_auth", "wpa_auth", "splash_auth", "8021x_deauth", "8021x_client_deauth", "wpa_deauth", "8021x_eap_failure", "8021x_eap_success"]);
+let EventResultDetailsLookup = datatable (reason: string, EventResultDetails: string)
+    [
+    "0", "Other",
+    "1", "Other",
+    "2", "Password expired",
+    "3", "Other",
+    "4", "Session expired",
+    "5", "Other",
+    "6", "Other",
+    "7", "Other",
+    "8", "Other",
+    "9", "Other",
+    "10", "Logon violates policy",
+    "11", "Logon violates policy",
+    "12", "Other",
+    "13", "Logon violates policy",
+    "14", "Other",
+    "15", "Other",
+    "16", "Other",
+    "17", "Other",
+    "18", "Incorrect key",
+    "19", "Incorrect key",
+    "20", "Incorrect key",
+    "21", "Other",
+    "22", "Other",
+    "23", "Other",
+    "24", "Logon violates policy",
+];
+let EventFieldsLookup = datatable (
+    LogSubType: string,
+    EventResult: string,
+    EventType: string,
+    EventSeverity: string
+)
+    [
+    "8021x_auth", "Success", "Logon", "Informational",
+    "wpa_auth", "Success", "Logon", "Informational",
+    "splash_auth", "Success", "Logon", "Informational",
+    "8021x_eap_success", "Success", "Logon", "Informational",
+    "8021x_deauth", "Success", "Logoff", "Informational",
+    "8021x_client_deauth", "Success", "Logoff", "Informational",
+    "wpa_deauth", "Success", "Logoff", "Informational",
+    "8021x_eap_failure", "Failure", "Logon", "Low",
+    "disassociation", "Failure", "Logon", "Low",
+];
+let parser = (disabled: bool=false) {
+    (
+        meraki_CL
+        | project-rename LogMessage =  Message
+        )
+    | where not(disabled)
+        and LogMessage has "events"
+        and (LogMessage has_any (LogSubTypeList) or LogMessage has_all("disassociation","auth_neg_failed"))
+    | extend Parser = extract_all(@"(\d+.\d+)\s([\w\-\_]+)\s([\w\-\_]+)\s([\S\s]+)$", dynamic([1, 2, 3, 4]), LogMessage)[0]
+    | extend
+        Epoch = tostring(Parser[0]),
+        Device = tostring(Parser[1]),
+        LogType = tostring(Parser[2]),
+        Substring = tostring(Parser[3])
+    | where LogType == "events"
+    | parse Substring with * "type=" LogSubType:string " " restOfMessage:string
+    | where LogSubType in (LogSubTypeList) or (LogSubType == "disassociation" and Substring has "auth_neg_failed")
+    | extend EpochTimestamp = split(Epoch, ".")
+    | extend EventStartTime = unixtime_seconds_todatetime(tolong(EpochTimestamp[0]))
+    | extend EventEndTime = EventStartTime
+    | invoke _ASIM_ResolveDvcFQDN('Device')
+    | parse-kv Substring as(last_known_client_ip: string, ip: string, client_ip: string, client_mac: string, identity: string, reason: string, aid: string) with (pair_delimiter=" ", kv_delimiter="=", quote="'")
+    | extend Dvc = DvcHostname, 
+          aid = trim('"', aid)
+    | extend
+        SrcIpAddr = tostring(split(coalesce(last_known_client_ip, ip, client_ip), " ")[0]),
+        DvcMacAddr = client_mac,
+        TargetUsername = identity,
+        AdditionalFields = bag_pack("aid", aid),
+        EventOriginalType = LogType,
+        EventOriginalSubType = LogSubType,
+        EventUid = _ResourceId
+    | extend
+        SrcIpAddr = trim('"', SrcIpAddr),
+        DvcMacAddr = trim('"', DvcMacAddr),
+        TargetUsername = trim('"', TargetUsername),
+        reason = trim('"', reason)
+    | extend
+        DvcIpAddr = SrcIpAddr,
+        IpAddr = SrcIpAddr,
+        User = TargetUsername,
+        TargetUsernameType = iff(isnotempty(TargetUsername), "Simple", "")
+    | lookup EventFieldsLookup on LogSubType
+    | lookup EventResultDetailsLookup on reason
+    | extend EventResultDetails = iff(tolong(reason) between (25 .. 65535), "Other", EventResultDetails)
+    | extend
+        EventCount=int(1),
+        EventProduct="Meraki",
+        EventVendor="Cisco",
+        EventSchema="Authentication",
+        EventSchemaVersion="0.1.3"
+    | project-away
+        LogMessage,
+        Parser,
+        Epoch,
+        EpochTimestamp,
+        Device,
+        Substring,
+        LogType,
+        LogSubType,
+        restOfMessage,
+        reason,
+        last_known_client_ip,
+        client_ip,
+        ip,
+        client_mac,
+        identity,
+        aid,
+        TenantId,
+        SourceSystem,
+        Computer,
+        _ResourceId,
+        MG
+};
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimAuthenticationCiscoMerakiSyslog
+// Description: This ASIM parser supports normalizing Cisco Meraki logs ingested in 'Syslog' table to the ASIM Authentication normalized schema. Cisco Meraki events are generated from network activity and security events from Meraki devices such as firewalls, switches, and access points. These logs are captured through the Cisco Meraki Sentinel connector which uses a Linux agent to collect logs in Syslog format.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuthenticationCiscoMerakiSyslog(    ['disabled']:bool=False)
+{
+let LogSubTypeList = dynamic(["8021x_auth", "wpa_auth", "splash_auth", "8021x_deauth", "8021x_client_deauth", "wpa_deauth", "8021x_eap_failure", "8021x_eap_success"]);
+let EventResultDetailsLookup = datatable (reason: string, EventResultDetails: string)
+    [
+    "0", "Other",
+    "1", "Other",
+    "2", "Password expired",
+    "3", "Other",
+    "4", "Session expired",
+    "5", "Other",
+    "6", "Other",
+    "7", "Other",
+    "8", "Other",
+    "9", "Other",
+    "10", "Logon violates policy",
+    "11", "Logon violates policy",
+    "12", "Other",
+    "13", "Logon violates policy",
+    "14", "Other",
+    "15", "Other",
+    "16", "Other",
+    "17", "Other",
+    "18", "Incorrect key",
+    "19", "Incorrect key",
+    "20", "Incorrect key",
+    "21", "Other",
+    "22", "Other",
+    "23", "Other",
+    "24", "Logon violates policy",
+];
+let EventFieldsLookup = datatable (
+    LogSubType: string,
+    EventResult: string,
+    EventType: string,
+    EventSeverity: string
+)
+    [
+    "8021x_auth", "Success", "Logon", "Informational",
+    "wpa_auth", "Success", "Logon", "Informational",
+    "splash_auth", "Success", "Logon", "Informational",
+    "8021x_eap_success", "Success", "Logon", "Informational",
+    "8021x_deauth", "Success", "Logoff", "Informational",
+    "8021x_client_deauth", "Success", "Logoff", "Informational",
+    "wpa_deauth", "Success", "Logoff", "Informational",
+    "8021x_eap_failure", "Failure", "Logon", "Low",
+    "disassociation", "Failure", "Logon", "Low",
+];
+let parser = (disabled: bool=false) {
+    (
+        Syslog
+        | where Computer in (_ASIM_GetSourceBySourceType('CiscoMeraki'))
+        | project-rename LogMessage =  SyslogMessage
+        )
+    | where not(disabled)
+        and LogMessage has "events"
+        and (LogMessage has_any (LogSubTypeList) or LogMessage has_all("disassociation","auth_neg_failed"))
+    | extend Parser = extract_all(@"(\d+.\d+)\s([\w\-\_]+)\s([\w\-\_]+)\s([\S\s]+)$", dynamic([1, 2, 3, 4]), LogMessage)[0]
+    | extend
+        Epoch = tostring(Parser[0]),
+        Device = tostring(Parser[1]),
+        LogType = tostring(Parser[2]),
+        Substring = tostring(Parser[3])
+    | where LogType == "events"
+    | parse Substring with * "type=" LogSubType:string " " restOfMessage:string
+    | where LogSubType in (LogSubTypeList) or (LogSubType == "disassociation" and Substring has "auth_neg_failed")
+    | extend EpochTimestamp = split(Epoch, ".")
+    | extend EventStartTime = unixtime_seconds_todatetime(tolong(EpochTimestamp[0]))
+    | extend EventEndTime = EventStartTime
+    | invoke _ASIM_ResolveDvcFQDN('Device')
+    | parse-kv Substring as(last_known_client_ip: string, ip: string, client_ip: string, client_mac: string, identity: string, reason: string, aid: string) with (pair_delimiter=" ", kv_delimiter="=", quote="'")
+    | extend Dvc = DvcHostname, 
+          aid = trim('"', aid)
+    | extend
+        SrcIpAddr = tostring(split(coalesce(last_known_client_ip, ip, client_ip), " ")[0]),
+        DvcMacAddr = client_mac,
+        TargetUsername = identity,
+        AdditionalFields = bag_pack("aid", aid),
+        EventOriginalType = LogType,
+        EventOriginalSubType = LogSubType,
+        EventUid = _ResourceId
+    | extend
+        SrcIpAddr = trim('"', SrcIpAddr),
+        DvcMacAddr = trim('"', DvcMacAddr),
+        TargetUsername = trim('"', TargetUsername),
+        reason = trim('"', reason)
+    | extend
+        DvcIpAddr = SrcIpAddr,
+        IpAddr = SrcIpAddr,
+        User = TargetUsername,
+        TargetUsernameType = iff(isnotempty(TargetUsername), "Simple", "")
+    | lookup EventFieldsLookup on LogSubType
+    | lookup EventResultDetailsLookup on reason
+    | extend EventResultDetails = iff(tolong(reason) between (25 .. 65535), "Other", EventResultDetails)
+    | extend
+        EventCount=int(1),
+        EventProduct="Meraki",
+        EventVendor="Cisco",
+        EventSchema="Authentication",
+        EventSchemaVersion="0.1.3"
+    | project-away
+        LogMessage,
+        Parser,
+        Epoch,
+        EpochTimestamp,
+        Device,
+        Substring,
+        LogType,
+        LogSubType,
+        restOfMessage,
+        reason,
+        last_known_client_ip,
+        client_ip,
+        ip,
+        client_mac,
+        identity,
+        aid,
+        TenantId,
+        SourceSystem,
+        Computer,
+        _ResourceId,
+        MG,
+        EventTime,
+        Facility,
+        HostName,
+        SeverityLevel,
+        ProcessID,
+        HostIP,
+        ProcessName,
+        CollectorHostName
+};
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimAuthenticationCrowdStrikeFalconHost
+// Description: This ASIM parser supports normalizing CrowdStrike Falcon Endpoint Protection logs to the ASIM Authentication normalized schema. These events are captured through CrowdStrike Falcon Endpoint Protection data connector which allows you to easily connect your CrowdStrike Falcon Event Stream with Microsoft Sentinel.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuthenticationCrowdStrikeFalconHost(    ['disabled']:bool=False)
+{
+let EventSeverityLookup = datatable (LogSeverity: string, EventSeverity: string)
+  [
+    "0", "Informational",
+    "1", "Informational",
+    "2", "Low",
+    "3", "Medium",
+    "4", "High",
+    "5", "High"
+];
+let parser = (disabled: bool=false) {
+    CommonSecurityLog
+    | where not(disabled)
+    | where (DeviceVendor == "CrowdStrike" and DeviceProduct == "FalconHost")
+    | where DeviceEventCategory == "AuthActivityAuditEvent" and DeviceEventClassID in ("userAuthenticate", "twoFactorAuthenticate")
+    | lookup EventSeverityLookup on LogSeverity
+    | extend
+        EventResult = iff(EventOutcome == "true", "Success", "Failure"),
+        EventStartTime = todatetime(DeviceCustomDate1),
+        EventCount = int(1),
+        EventSchema = "Authentication",
+        EventSchemaVersion = "0.1.3",
+        EventType = "Logon",
+        EventProduct = "FalconHost",
+        EventVendor = "CrowdStrike"
+    | project-rename
+        TargetIpAddr = DestinationTranslatedAddress,
+        EventUid = _ItemId,
+        EventOriginalSeverity = LogSeverity,
+        EventOriginalSubType = DeviceEventClassID,
+        EventOriginalType = DeviceEventCategory,
+        EventProductVersion = DeviceVersion,
+        EventOriginalResultDetails = EventOutcome,
+        TargetUsername = DestinationUserName,
+        TargetAppName = ProcessName
+    | extend
+        EventEndTime = EventStartTime,
+        DvcIpAddr = TargetIpAddr,
+        TargetUsernameType = _ASIM_GetUsernameType(TargetUsername),
+        TargetUserType = _ASIM_GetUserType(TargetUsername, ""),
+        TargetAppType = iff(isnotempty(TargetAppName), "Service", ""),
+        LogonMethod = iff(EventOriginalSubType =~ "userAuthenticate", "Username and Password", "Two Factor Authentication")
+    | extend
+        User = TargetUsername,
+        Dst = TargetIpAddr,
+        Dvc = coalesce(DvcIpAddr, EventProduct),
+        Application = TargetAppName
+    | project-away 
+        Source*,
+        Destination*,
+        Device*,
+        AdditionalExtensions,
+        CommunicationDirection,
+        Computer,
+        EndTime,
+        FieldDevice*,
+        Flex*,
+        File*,
+        Old*,
+        MaliciousIP*,
+        OriginalLogSeverity,
+        Process*,
+        Protocol,
+        Activity,
+        ReceivedBytes,
+        SentBytes,
+        Remote*,
+        Request*,
+        SimplifiedDeviceAction,
+        StartTime,
+        TenantId,
+        Threat*,
+        IndicatorThreatType,
+        ExternalID,
+        ReportReferenceLink,
+        ReceiptTime,
+        Reason,
+        ApplicationProtocol,
+        _ResourceId,
+        ExtID,
+        Message
+};
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimAuthenticationGoogleWorkspace
+// Description: This ASIM parser supports normalizing the Google Workspace sign-in logs(type=login) ingested in 'GWorkspace_ReportsAPI_login_CL' table to the ASIM Authentication normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuthenticationGoogleWorkspace(    ['disabled']:bool=False)
+{
+let parser = (
+  disabled: bool = false
+  ) {
+  let GoogleWorkspaceSchema = datatable (
+  event_name_s: string,
+  event_type_s: string,
+  id_uniqueQualifier_s: string,
+  actor_email_s: string,
+  actor_profileId_s: string,
+  IPAddress: string,
+  login_challenge_method_s: string,
+  id_applicationName_s: string,
+  affected_email_address_s: string,
+  is_suspicious_b: bool,
+  is_second_factor_b: bool,
+  login_type_s: string,
+  sensitive_action_name_s: string,
+  login_challenge_status_s: string,
+  TimeGenerated: datetime,
+  _ItemId: string,
+  _ResourceId: string,
+  Computer: string,
+  MG: string,
+  ManagementGroupName: string,
+  RawData: string,
+  SourceSystem: string,
+  TenantId: string
+)[];
+    let EventFieldsLookup = datatable (
+    EventOriginalSubType: string,
+    EventType: string,
+    EventResult: string,
+    DvcAction: string
+)
+        [
+    "login_success", "Logon", "Success", "Allowed",
+    "login_failure", "Logon", "Failure", "Blocked",
+    "login_challenge", "Logon", "", "",
+    "login_verification", "Logon", "", "",
+    "risky_sensitive_action_blocked", "Logon", "Failure", "Blocked",
+    "riskay_sensitive_action_allowed", "Logon", "Success", "Allowed",
+    "logout", "Logoff", "Success", "Allowed",
+    "suspicious_login", "Logon", "Failure", "Blocked",
+    "suspicious_login_less_secure_app", "Logon", "Failure", "Blocked",
+    "suspicious_programmatic_login", "Logon", "Failure", "Blocked",
+    "user_signed_out_due_to_suspicious_session_cookie", "Logoff", "Success", "Allowed"
+];
+    let ThreatEventTypes = dynamic(['suspicious_login', 'suspicious_login_less_secure_app', 'suspicious_programmatic_login', 'user_signed_out_due_to_suspicious_session_cookie']);
+    let SupportedEventNames = EventFieldsLookup
+        | project EventOriginalSubType;
+    union isfuzzy=true  GoogleWorkspaceSchema, GWorkspace_ReportsAPI_login_CL
+    | where not(disabled)
+    | where event_name_s in (SupportedEventNames)
+    | lookup EventFieldsLookup on $left.event_name_s == $right.EventOriginalSubType
+    | project-rename
+        TargetUsername = actor_email_s,
+        TargetUserId = actor_profileId_s,
+        SrcIpAddr = IPAddress,
+        LogonMethod = login_challenge_method_s,
+        EventOriginalType = event_type_s,
+        EventOriginalUid = id_uniqueQualifier_s
+    | extend
+        TargetUsername = iif(event_name_s in (ThreatEventTypes), affected_email_address_s, TargetUsername),
+        TargetUsernameType = _ASIM_GetUsernameType(TargetUsername),
+        TargetUserIdType = iif(isnotempty(TargetUserId), "GWorkspaceProfileID", ""),
+        EventSeverity = iif(event_name_s in (ThreatEventTypes), "High", "Informational")
+    | extend 
+        AdditionalFields = bag_pack(
+                      "Is_Suspicious",
+                      is_suspicious_b,
+                      "Is_Second_Factor_b",
+                      is_second_factor_b,
+                      "Logon_Type",
+                      login_type_s,
+                      "Sensitive_Action_Name",
+                      sensitive_action_name_s
+                  ),
+        EventResult = case(
+                  event_name_s in ('login_challenge', 'login_verification') and login_challenge_status_s == "passed",
+                  "Success",
+                  event_name_s in ('login_challenge', 'login_verification') and login_challenge_status_s == "incorrect_answer_entered",
+                  "Failure",
+                  EventResult
+              ),
+        EventResultDetails = iif(event_name_s in ('login_challenge', 'login_verification') and login_challenge_status_s == "incorrect_answer_entered", "MFA not satisfied", ""),
+        RuleName = case(
+              event_name_s == 'suspicious_login',
+              "Google has detected a suspicious login for TargetUSerName",
+              event_name_s == 'suspicious_login_less_secure_app',
+              "Google has detected a suspicious login for TargetUSerName from a less secure app",
+              event_name_s == 'suspicious_programmatic_login',
+              "Google has detected a suspicious programmatic login for TargetUserName",
+              event_name_s == 'user_signed_out_due_to_suspicious_session_cookie',
+              "Suspicious session cookie detected for user TargetUserName",
+              ""
+          ),
+        ThreatField = iif(event_name_s in (ThreatEventTypes), "TargetUserName", ""),
+        ThreatFirstReportedTime = iif(event_name_s in (ThreatEventTypes), TimeGenerated, datetime(null)),
+        ThreatLastReportedTime = iif(event_name_s in (ThreatEventTypes), TimeGenerated, datetime(null))
+    | extend
+        EventOriginalSubType = event_name_s,
+        TargetAppName = "Google Workspace - login",
+        Dst = "Google Workspace",
+        Application = "Google Workspace",
+        TargetAppType = "SaaS application",
+        IpAddr = SrcIpAddr,
+        User = TargetUsername,
+        EventCount = int(1),
+        EventStartTime = TimeGenerated,
+        EventEndTime = TimeGenerated,
+        EventProduct = "Workspace",
+        EventVendor = "Google",
+        Dvc="Workspace",
+        EventSchema = 'Authentication',
+        EventSchemaVersion = '0.1.3',
+        EventUid = _ItemId
+    | project-away 
+        *_s,
+        *_b,
+        _ResourceId,
+        Computer,
+        MG,
+        ManagementGroupName,
+        RawData,
+        SourceSystem,
+        TenantId
+};
+parser (disabled = disabled)
+}
+
+
+
+//
+// Function Name: ASimAuthenticationM365Defender
+// Description: This ASIM parser supports normalizing endpoint authentication events, collected by Microsoft 365 Defender for Endpoint, stored in the  DeviceLogonEvents table, to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuthenticationM365Defender(    ['disabled']:bool=False)
+{
+let EventResultDetailsLookup=datatable(EventOriginalResultDetails:string, EventResultDetails:string)[
+  'InvalidUserNameOrPassword','No such user or password'
+];
+let EventSubTypeLookup = datatable (EventOriginalType:string, EventSubType:string) [ 
+  'Batch',                            'Service',
+  'CachedInteractive',                'Interactive',
+  'Interactive',                      'Interactive',
+  'Network',                          'Remote',
+  'Remote interactive (RDP) logons',  'RemoteInteractive',
+  'RemoteInteractive',                'RemoteInteractive',
+  'Service',                          'Service',
+  'Unknown',                          ''
+];
+let EventResultLookup = datatable (ActionType:string, EventResult:string) [ 
+  'LogonAttempted', 'NA',
+  'LogonFailed',    'Failure',
+  'LogonSuccess',   'Success'
+];
+let parser = (
+  disabled:bool=false
+){
+  let UnixDeviceLogonEvents = (disabled:bool=false) {
+      DeviceLogonEvents  
+      | where not(disabled)
+      | where InitiatingProcessFolderPath startswith "/"
+      | extend 
+          ActorUsernameType  = "Simple",
+          TargetDvcOs        = "Linux",
+          TargetUsernameType = "Simple"
+      | project-rename 
+          ActingProcessName  = InitiatingProcessFolderPath,
+          ActorUsername      = InitiatingProcessAccountName,
+          TargetUsername     = AccountName
+      | project-away 
+          InitiatingProcessAccountSid, AccountDomain, InitiatingProcessAccountDomain, InitiatingProcessFileName, AccountSid
+  };
+  let WindowsDeviceLogonEvents = (disabled:bool=false) {
+      DeviceLogonEvents  
+      | where not(disabled)
+      | where InitiatingProcessFolderPath !startswith "/"
+      | extend 
+          ActingProcessName           = strcat (InitiatingProcessFolderPath,'\\',InitiatingProcessFileName),
+          ActorUserIdType             = 'SID',
+          ActorUsername               = case (
+            isempty(InitiatingProcessAccountName), "",
+            isempty(InitiatingProcessAccountDomain), InitiatingProcessAccountName,
+            strcat(InitiatingProcessAccountDomain, '\\', InitiatingProcessAccountName)
+          ),
+          ActorUsernameType           = iff (
+            InitiatingProcessAccountDomain == '','Simple',
+            'Windows'
+          ),
+          TargetDvcOs = "Windows",
+          TargetUserIdType            = 'SID',
+          TargetUsername              = iff (
+              isempty(AccountDomain), AccountName,
+              strcat(AccountDomain, '\\', AccountName)
+          ),
+          TargetUsernameType          = iff (AccountDomain == '','Simple', 'Windows')
+      | project-rename 
+          ActorUserId        = InitiatingProcessAccountSid,
+          TargetUserId       = AccountSid
+      // -- Specific identifiers aliases
+      | extend 
+          TargetUserSid         = TargetUserId,
+          ActorUserSid          = ActorUserId,
+          TargetWindowsUsername = TargetUsername,
+          ActorWindowsUsername  = ActorUsername,
+          ActorUserType         = _ASIM_GetWindowsUserType (ActorUsername, ActorUserId)
+      | extend 
+          TargetUserType = iff(IsLocalAdmin, 
+              'Admin',
+              _ASIM_GetWindowsUserType (TargetWindowsUsername, TargetUserSid)
+          )
+      | project-away InitiatingProcessAccountName, InitiatingProcessAccountDomain, AccountDomain, AccountName, InitiatingProcessFolderPath, InitiatingProcessFileName
+  };
+  union 
+    WindowsDeviceLogonEvents (disabled=disabled),
+    UnixDeviceLogonEvents (disabled=disabled)
+  | project-away SourceSystem, TenantId, Timestamp, MachineGroup
+  | project-rename 
+      ActingProcessCommandLine    = InitiatingProcessCommandLine,
+      ActingProcessCreationTime   = InitiatingProcessCreationTime,
+      ActingProcessIntegrityLevel = InitiatingProcessIntegrityLevel,
+      ActingProcessMD5            = InitiatingProcessMD5,
+      ActingProcessSHA1           = InitiatingProcessSHA1 ,
+      ActingProcessSHA256         = InitiatingProcessSHA256,
+      ActingProcessTokenElevation = InitiatingProcessTokenElevation,
+      ActorUserAadId              = InitiatingProcessAccountObjectId,
+      ActorUserUpn                = InitiatingProcessAccountUpn,
+      EventOriginalResultDetails  = FailureReason,
+      EventOriginalType           = LogonType,
+      EventUid                    = _ItemId,
+      LogonProtocol               = Protocol,
+      ParentProcessCreationTime   = InitiatingProcessParentCreationTime,
+      ParentProcessName           = InitiatingProcessParentFileName,
+      SrcHostname                 = RemoteDeviceName,
+      SrcPortNumber               = RemotePort,
+      TargetDvcId                 = DeviceId
+  | extend 
+      ActingProcessId             = tostring (InitiatingProcessId),
+      EventCount                  = int(1),
+      EventEndTime                = TimeGenerated,
+      EventOriginalUid            = tostring (ReportId),
+      EventProduct                = 'M365 Defender for EndPoint',
+      EventSchema                 = 'Authentication',
+      EventSchemaVersion          = '0.1.3',
+      EventStartTime              = TimeGenerated,
+      EventType                   = 'Logon',
+      EventVendor                 = 'Microsoft',
+      ParentProcessId             = tostring (InitiatingProcessParentId),
+      SrcIpAddr                   = iff (RemoteIP == '-', '', RemoteIP),
+      TargetDvcIdType             = 'MDEid',
+      TargetSessionId             = tostring (LogonId)
+  | extend
+       Hash = coalesce(
+          ActingProcessMD5,
+          ActingProcessSHA1,
+          ActingProcessSHA256
+       )
+  | extend
+      HashType = tostring(dynamic(["SHA256", "SHA1", "MD5"])[array_index_of(pack_array(ActingProcessSHA256, ActingProcessSHA1, ActingProcessMD5),Hash)])     
+  | invoke _ASIM_ResolveFQDN('DeviceName')
+  | project-rename 
+      TargetDomain       = Domain, 
+      TargetDomainType   = DomainType,
+      TargetFQDN         = FQDN,
+      TargetHostname     = ExtractedHostname
+  | project-away DeviceName
+  | lookup EventResultDetailsLookup on EventOriginalResultDetails 
+  | lookup EventSubTypeLookup on EventOriginalType
+  | lookup EventResultLookup on ActionType
+  | extend
+       EventSeverity = iff (EventResult == "Success", "Informational", "Low")
+  // -- Specific identifiers aliases
+  | extend
+      DvcMDEid              = TargetDvcId,
+      TargetDvcMDEid        = TargetDvcId
+  // --  Aliases
+  | extend 
+      ActingAppName = ActingProcessName,
+      ActingAppType = "Process",
+      Dvc           = coalesce (TargetFQDN, TargetHostname),
+      IpAddr        = SrcIpAddr,
+      Prcess        = ActingProcessName,
+      Src           = coalesce (SrcIpAddr, SrcHostname),
+      User          = TargetUsername,
+  // -- Alias Dvc to Target,
+      DvcDomain     = TargetDomain,
+      DvcDomainType = TargetDomainType,
+      DvcFQDN       = TargetFQDN,
+      DvcHostname   = TargetHostname,
+      DvcId         = TargetDvcId,
+      DvcIdType     = TargetDvcIdType,
+      DvcOs         = TargetDvcOs
+  | extend 
+      Dst         = Dvc,
+      LogonTarget = Dvc
+  | project-away ReportId, LogonId, InitiatingProcessId, InitiatingProcessParentId, ActionType, InitiatingProcessFileSize, InitiatingProcessVersionInfoCompanyName, InitiatingProcessVersionInfoFileDescription, InitiatingProcessVersionInfoInternalFileName, InitiatingProcessVersionInfoOriginalFileName, InitiatingProcessVersionInfoProductName, InitiatingProcessVersionInfoProductVersion, AppGuardContainerId, RemoteIPType, IsLocalAdmin, RemoteIP
+};
+parser (
+    disabled = disabled
+)
+}
+
+
+
+//
+// Function Name: ASimAuthenticationMD4IoT
+// Description: This ASIM parser supports normalizing Microsoft Defender for IoT endpoint logs to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuthenticationMD4IoT(    ['disabled']:bool=False)
+{
+let parser=(disabled:bool=false)
+{
+  SecurityIoTRawEvent | where not(disabled)
+  | where RawEventName == "Login" 
+  | project-rename EventUid = _ItemId
+  | extend
+      EventDetails = todynamic(EventDetails)
+  | extend
+      EventCount         = int(1),
+      EventEndTime       = todatetime(TimeGenerated), 
+      EventOriginalUid   = tostring(EventDetails.OriginalEventId), 
+      EventProduct       = 'Microsoft Defender for IoT',
+      EventResult        = iff (EventDetails.Operation == 'LoginFailed', 'Failure', 'Success'),  
+      EventSchemaVersion = '0.1.0', 
+      EventStartTime     = todatetime(EventDetails.TimestampUTC), 
+      EventType          = iff (EventDetails.Operation == 'Logout', 'Logoff', 'Logon'),  
+      EventVendor        = 'Microsoft'
+  | extend
+      ActingProcessId    = tostring(EventDetails.ProcessId),  
+      ActingProcessName  = tostring(EventDetails.Executable),  // -- Linux input device or service used to authenticate, for example pts/1, tty1, pts/0, ssh:notty 
+      DvcOs              = iif (EventDetails.MessageSource == "Linux", "Linux", "Windows"),  // -- Intermediate fix
+      SrcIpAddr          = tostring(EventDetails.RemoteAddress), 
+      TargetUsername     = tostring(EventDetails.UserName),
+      TargetUsernameType = "Simple"
+  | project-rename
+      _ResourceId         = AssociatedResourceId, 
+      _SubscriptionId     = AzureSubscriptionId, 
+      DvcHostname         = DeviceId, 
+      EventProductVersion = AgentVersion  // -- Not available in Windows
+    // -- aliases
+  | extend 
+      Dvc          = DvcHostname,
+      IpAddr       = SrcIpAddr,
+      Process      = ActingProcessName, 
+      SrcDvcIpAddr = SrcIpAddr,
+      User         = TargetUsername
+  };
+  parser (
+      disabled = disabled
+  )
+}
+
+
+
+//
+// Function Name: ASimAuthenticationMicrosoftWindowsEvent
+// Description: This ASIM parser supports normalizing Windows Authentication events (4624, 4625, 4634, and 4647), collected either by the Log Analytics Agent or the Azure Monitor Agent, into either the WindowsEvent (WEF) or SecurityEvent tables, to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuthenticationMicrosoftWindowsEvent(    ['disabled']:bool=False)
+{
+let LogonEvents=dynamic([4624,4625]);
+let LogoffEvents=dynamic([4634,4647]);
+let LogonTypes=datatable(LogonType:int, EventSubType:string)[
+    2, 'Interactive',
+    3, 'Network',
+    4, 'Batch',
+    5, 'Service',
+    7, 'Unlock',
+    8, 'NetworkCleartext',
+    9, 'NewCredentials',
+    10, 'RemoteInteractive',
+    11, 'CachedInteractive'];
+// https://techcommunity.microsoft.com/t5/core-infrastructure-and-security/quick-reference-troubleshooting-netlogon-error-codes/ba-p/256000
+let LogonStatus=datatable 
+    (EventStatus:string,EventOriginalResultDetails:string, EventResultDetails:string)[
+    '0x80090325', 'SEC_E_UNTRUSTED_ROOT','Other',
+    '0xc0000064', 'STATUS_NO_SUCH_USER','No such user or password',
+    '0xc000006f', 'STATUS_INVALID_LOGON_HOURS','Logon violates policy',
+    '0xc0000070', 'STATUS_INVALID_WORKSTATION','Logon violates policy',
+    '0xc0000071', 'STATUS_PASSWORD_EXPIRED','Password expired',
+    '0xc0000072', 'STATUS_ACCOUNT_DISABLED','User disabled',
+    '0xc0000133', 'STATUS_TIME_DIFFERENCE_AT_DC','Other',
+    '0xc000018d', 'STATUS_TRUSTED_RELATIONSHIP_FAILURE','Other',
+    '0xc0000193', 'STATUS_ACCOUNT_EXPIRED','Account expired',
+    '0xc0000380', 'STATUS_SMARTCARD_WRONG_PIN','Other',
+    '0xc0000381', 'STATUS_SMARTCARD_CARD_BLOCKED','Other',
+    '0xc0000382', 'STATUS_SMARTCARD_CARD_NOT_AUTHENTICATED','Other',
+    '0xc0000383', 'STATUS_SMARTCARD_NO_CARD','Other',
+    '0xc0000384', 'STATUS_SMARTCARD_NO_KEY_CONTAINER','Other',
+    '0xc0000385', 'STATUS_SMARTCARD_NO_CERTIFICATE','Other',
+    '0xc0000386', 'STATUS_SMARTCARD_NO_KEYSET','Other',
+    '0xc0000387', 'STATUS_SMARTCARD_IO_ERROR','Other',
+    '0xc0000388', 'STATUS_DOWNGRADE_DETECTED','Other',
+    '0xc0000389', 'STATUS_SMARTCARD_CERT_REVOKED','Other',
+    '0x80090302', 'SEC_E_UNSUPPORTED_FUNCTION','Other',
+    '0x80090308', 'SEC_E_INVALID_TOKEN','Other',
+    '0x8009030e', 'SEC_E_NO_CREDENTIALS','Other',
+    '0xc0000008', 'STATUS_INVALID_HANDLE','Other',
+    '0xc0000017', 'STATUS_NO_MEMORY','Other',
+    '0xc0000022', 'STATUS_ACCESS_DENIED','Other',
+    '0xc0000034', 'STATUS_OBJECT_NAME_NOT_FOUND','Other',
+    '0xc000005e', 'STATUS_NO_LOGON_SERVERS','Other',
+    '0xc000006a', 'STATUS_WRONG_PASSWORD','Incorrect password',
+    '0xc000006d', 'STATUS_LOGON_FAILURE','Other',
+    '0xc000006e', 'STATUS_ACCOUNT_RESTRICTION','Logon violates policy',
+    '0xc0000073', 'STATUS_NONE_MAPPED','Other',
+    '0xc00000fe', 'STATUS_NO_SUCH_PACKAGE','Other',
+    '0xc000009a', 'STATUS_INSUFFICIENT_RESOURCES','Other',
+    '0xc00000dc', 'STATUS_INVALID_SERVER_STATE','Other',
+    '0xc0000106', 'STATUS_NAME_TOO_LONG','Other',
+    '0xc000010b', 'STATUS_INVALID_LOGON_TYPE','Logon violates policy',
+    '0xc000015b', 'STATUS_LOGON_TYPE_NOT_GRANTED','Logon violates policy',
+    '0xc000018b', 'STATUS_NO_TRUST_SAM_ACCOUNT','Logon violates policy',
+    '0xc0000224', 'STATUS_PASSWORD_MUST_CHANGE','Other',
+    '0xc0000234', 'STATUS_ACCOUNT_LOCKED_OUT','User locked',
+    '0xc00002ee', 'STATUS_UNFINISHED_CONTEXT_DELETED','Other'];
+let WinLogon=(disabled:bool=false){ 
+    WindowsEvent 
+    | where not(disabled)
+    | where Provider == 'Microsoft-Windows-Security-Auditing'
+    | where EventID in (LogonEvents) or EventID in (LogoffEvents)
+    | extend    
+        ActingProcessCreationTime = EventData.ProcessCreationTime,
+        ActingProcessId           = tostring(toint(EventData.ProcessId)),
+        ActingProcessName         = tostring(EventData.ProcessName),
+        ActorSessionId            = tostring(EventData.SubjectLogonId),
+        ActorUserId               = tostring(EventData.SubjectUserSid),
+        ActorUsername             = tostring(iff (EventData.SubjectDomainName in ('-',''), EventData.SubjectUserName, strcat(EventData.SubjectDomainName, @"\" , EventData.SubjectUserName))),
+        EventProduct              = "Security Events",
+        LogonGuid                 = tostring(EventData.LogonGuid),
+        LogonProtocol             = tostring(EventData.AuthenticationPackageName),
+        LogonType                 = toint(EventData.LogonType),
+        SrcDvcHostname            = tostring(EventData.WorkstationName),
+        SrcDvcIpAddr              = tostring(EventData.IpAddress),
+        Status                    = tostring(EventData.Status),
+        SubStatus                 = tostring(EventData.SubStatus),
+        TargetDomainName          = tostring(EventData.TargetDomainName),
+        TargetPortNumber          = toint(EventData.IpPort),
+        TargetSessionId           = tostring(EventData.TargetLogonId),
+        TargetUserId              = tostring(EventData.TargetUserSid),
+        TargetUsername            = tostring(iff (EventData.TargetDomainName in ('-',''), EventData.TargetUserName, strcat(EventData.TargetDomainName, @"\" , EventData.TargetUserName)))
+    | extend 
+        EventStatus = iff(SubStatus=='0x0',Status,SubStatus)
+    // -- creating EventMessage matching EventMessage in SecurityEvent table
+    | extend 
+        EventMessage = case(
+                            EventID == 4624 ,"4624 - An account was successfully logged on.",
+                            EventID == 4625, "4625 - An account failed to log on.",
+                            EventID == 4634, "4634 - An account was logged off.", 
+                            "4647 - User initiated logoff."),
+        EventResult = iff(EventID == 4625, 'Failure', 'Success')
+    | project-rename 
+        EventOriginalType = EventID,
+        EventOriginalUid  = EventOriginId,   
+        EventUid          = _ItemId,       
+        TargetDvcHostname = Computer
+    | extend 
+        ActorUserIdType    = 'SID',
+        ActorUsernameType  = iff(EventData.SubjectDomainName in ('-',''),'Simple', 'Windows' ),
+        EventCount         = int(1),
+        EventEndTime       = TimeGenerated,
+        EventSchemaVersion = '0.1.0',
+        EventStartTime     = TimeGenerated,
+        EventStatus        = iff(SubStatus=='0x0',Status,SubStatus),
+        EventType          = iff(EventOriginalType in (LogoffEvents), 'Logoff', 'Logon'),
+        EventVendor        = 'Microsoft',
+        SrcDvcOs           = 'Windows',
+        TargetUserIdType   = 'SID',
+        TargetUsernameType = iff(TargetDomainName in ('-',''), 'Simple', 'Windows')
+    | extend
+        ActorUserType  = _ASIM_GetWindowsUserType (ActorUsername, ActorUserId),
+        TargetUserType = _ASIM_GetWindowsUserType (TargetUsername, TargetUserId)
+    | lookup LogonStatus on EventStatus
+    | lookup LogonTypes on LogonType
+    /// ** Aliases 
+    | extend
+        Dvc         = SrcDvcHostname,
+        LogonTarget = TargetDvcHostname,
+        User        = TargetUsername
+};
+let SecEventLogon=(disabled:bool=false){
+  SecurityEvent 
+  | where not(disabled)
+  | where EventID in (LogonEvents) or 
+          EventID in (LogoffEvents)
+  | project-rename 
+      ActorSessionId    = SubjectLogonId,
+      ActorUserId       = SubjectUserSid,
+      EventMessage      = Activity,
+      EventOriginalType = EventID,
+      EventOriginalUid  = EventOriginId,
+      LogonProtocol     = AuthenticationPackageName,
+      SrcDvcHostname    = WorkstationName,
+      SrcDvcIpAddr      = IpAddress,
+      TargetDvcHostname = Computer,
+      TargetSessionId   = TargetLogonId,
+      TargetUserId      = TargetUserSid
+  | extend 
+      ActorUserIdType    = 'SID',
+      ActorUsername      = iff (SubjectDomainName in ('-',''), SubjectUserName, SubjectAccount),
+      ActorUsernameType  = iff(SubjectDomainName in ('-',''), 'Simple', 'Windows' ),
+      EventCount         = int(1),
+      EventEndTime       = TimeGenerated,
+      EventProduct       = "Security Events",
+      EventResult        = iff(EventOriginalType == 4625, 'Failure', 'Success'),
+      EventSchemaVersion = '0.1.0',
+      EventStartTime     = TimeGenerated,
+      EventStatus        = iff(SubStatus=='0x0',Status,SubStatus),
+      EventType          = iff(EventOriginalType in (LogoffEvents), 'Logoff', 'Logon'),
+      EventVendor        = 'Microsoft',
+      SrcDvcOs           = 'Windows',
+      TargetUserIdType   = 'SID',
+      TargetUsername     = iff (TargetDomainName in ('-',''), trim(@'\\',TargetUserName), trim(@'\\',TargetAccount)),
+      TargetUsernameType = iff (TargetDomainName in ('-',''), 'Simple', 'Windows')
+  | project-away TargetUserName, AccountType
+  | extend
+      ActorUserType      = _ASIM_GetWindowsUserType (ActorUsername, ActorUserId),
+      TargetUserType     = _ASIM_GetWindowsUserType (TargetUsername, TargetUserId)
+  | lookup LogonStatus on EventStatus
+  | lookup LogonTypes  on LogonType
+  /// ** Aliases 
+  | extend
+      Dvc         = SrcDvcHostname,
+      LogonTarget = TargetDvcHostname,
+      User        = TargetUsername
+  };
+union isfuzzy=true 
+  SecEventLogon(disabled=disabled), 
+  WinLogon(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimAuthenticationOktaSSO
+// Description: This ASIM parser supports normalizing Okta sign in logs, stored in the Okta_CL table, to the ASIM Authentication schema. 
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuthenticationOktaSSO(    ['disabled']:bool=False)
+{
+let parser=(disabled: bool=false) {
+  let OktaSuccessfulOutcome = dynamic(['SUCCESS', 'ALLOW']);
+  let OktaFailedOutcome = dynamic(['FAILURE', 'SKIPPED', 'DENY']);
+  let OktaSigninEvents=dynamic(['user.session.start', 'user.session.end']);
+  let emptyOctV1Table = datatable(TimeGenerated:datetime)[];
+    // https://developer.okta.com/docs/reference/api/event-types/#catalog
+    let OktaV1 = union isfuzzy=true emptyOctV1Table, Okta_CL 
+        | where not(disabled)
+        | extend
+            outcome_result_s=column_ifexists('outcome_result_s', "")
+            ,
+            eventType_s=column_ifexists('eventType_s', "")
+            ,
+            legacyEventType_s=column_ifexists('legacyEventType_s', "")
+            ,
+            client_geographicalContext_geolocation_lat_d=column_ifexists('client_geographicalContext_geolocation_lat_d', "")
+            ,
+            client_geographicalContext_geolocation_lon_d=column_ifexists('client_geographicalContext_geolocation_lon_d', "")
+        | where eventType_s in (OktaSigninEvents)
+        | extend 
+            EventProduct='Okta'
+            ,
+            EventVendor='Okta'
+            ,
+            EventSchema = 'Authentication'
+            ,
+            EventCount=int(1)
+            ,
+            EventSchemaVersion='0.1.0'
+            ,
+            EventResult = case (outcome_result_s in (OktaSuccessfulOutcome), 'Success', outcome_result_s in (OktaFailedOutcome), 'Failure', 'Partial')
+            ,
+            EventStartTime=TimeGenerated
+            ,
+            EventEndTime=TimeGenerated
+            ,
+            EventType=iff(eventType_s hassuffix 'start', 'Logon', 'Logoff')
+            ,
+            EventSubType=legacyEventType_s
+            ,
+            EventMessage=column_ifexists('displayMessage_s', "")
+            ,
+            EventOriginalResultDetails=column_ifexists('outcome_reason_s', "")
+            ,
+            EventOriginalUid = column_ifexists('uuid_g', "")
+            ,
+            TargetUserIdType='OktaId'
+            ,
+            TargetUsernameType='UPN'
+            ,
+            TargetSessionId=column_ifexists('authenticationContext_externalSessionId_s', "")
+            ,
+            TargetUserId=column_ifexists('actor_id_s', "")
+            ,
+            TargetUsername=column_ifexists('actor_alternateId_s', "")
+            ,
+            TargetUserType=column_ifexists('actor_type_s', "")
+            ,
+            SrcGeoLatitude=toreal(client_geographicalContext_geolocation_lat_d)
+            ,
+            SrcGeoLongitude=toreal(client_geographicalContext_geolocation_lon_d)
+            ,
+            SrcDvcOs=column_ifexists('client_userAgent_os_s', "")
+            ,
+            SrcIsp=column_ifexists('securityContext_isp_s', "")
+            ,
+            SrcGeoCity=column_ifexists('client_geographicalContext_city_s', "")
+            ,
+            SrcGeoCountry=column_ifexists('client_geographicalContext_country_s', "")
+            ,
+            SrcIpAddr = column_ifexists('client_ipAddress_s', "")
+            ,
+            ActingAppName=column_ifexists('client_userAgent_browser_s', "")
+            ,
+            ActingAppType="Browser"
+            ,
+            LogonMethod=column_ifexists('authenticationContext_credentialType_s', "")
+            ,
+            HttpUserAgent=column_ifexists('client_userAgent_rawUserAgent_s', "")
+        // ** Aliases
+        | extend 
+            User=TargetUsername
+            ,
+            Dvc=EventVendor
+            ,
+            IpAddr=SrcIpAddr
+        | project-away *_s, *_d, *_b, *_g, *_t;
+    OktaV1
+};
+parser(disabled = disabled)
+}
+
+
+
+//
+// Function Name: ASimAuthenticationOktaV2
+// Description: This ASIM parser supports normalizing Okta sign in logs, stored in OktaV2_CL table, to the ASIM Authentication schema. 
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuthenticationOktaV2(    ['disabled']:bool=False)
+{
+let parser=(disabled: bool=false) {
+  let OktaSuccessfulOutcome = dynamic(['SUCCESS', 'ALLOW']);
+  let OktaFailedOutcome = dynamic(['FAILURE', 'SKIPPED', 'DENY']);
+  let OktaSigninEvents=dynamic(['user.session.start', 'user.session.end']);
+  let emptyOctaV2Table = datatable(
+  TimeGenerated: datetime,
+  ActorDetailEntry: dynamic,
+  ActorDisplayName: string,
+  AuthenticationContext: string,
+  AuthenticationProvider: string,
+  AuthenticationStep: string,
+  AuthenticationContextAuthenticationProvider: string,
+  AuthenticationContextAuthenticationStep: int,
+  AuthenticationContextCredentialProvider: string,
+  AuthenticationContextInterface: string,
+  AuthenticationContextIssuerId: string,
+  AuthenticationContextIssuerType: string,
+  DebugData: dynamic,
+  DvcAction: string,
+  EventResult:string,
+  OriginalActorAlternateId: string,
+  OriginalClientDevice: string,
+  OriginalOutcomeResult: string,
+  OriginalSeverity: string,
+  OriginalTarget: dynamic,
+  OriginalUserId: string,
+  OriginalUserType: string,
+  Request: dynamic,
+  SecurityContextAsNumber: int,
+  SecurityContextAsOrg: string,
+  SecurityContextDomain: string,
+  SecurityContextIsProxy: bool,
+  TransactionDetail: dynamic,
+  TransactionId: string,
+  TransactionType: string
+)[];
+    let OktaV2 = union isfuzzy=true emptyOctaV2Table, OktaV2_CL
+        | where not(disabled)      
+        | extend
+            EventOriginalType=column_ifexists('EventOriginalType', "") 
+            ,
+            OriginalActorAlternateId = column_ifexists('OriginalActorAlternateId', "")
+            ,
+            ActorUsername=column_ifexists('ActorUsername', "")
+            ,
+            SrcIpAddr = column_ifexists('SrcIpAddr', "")
+        | where EventOriginalType in (OktaSigninEvents)
+        | extend ActorUsernameType = _ASIM_GetUsernameType(ActorUsername)
+        | extend 
+            EventProduct='Okta'
+            ,
+            EventSchema = 'Authentication'
+            ,
+            EventVendor='Okta'
+            ,
+            EventCount=int(1)
+            ,
+            EventSchemaVersion='0.1.0'
+            ,
+            EventStartTime=TimeGenerated
+            ,
+            EventEndTime=TimeGenerated
+            ,
+            EventType=iff(EventOriginalType hassuffix 'start', 'Logon', 'Logoff')       
+            ,
+            TargetSessionId=column_ifexists('ActorSessionId', "")
+            ,
+            TargetUserId= column_ifexists('ActorUserId', "")
+            ,
+            TargetUsername=column_ifexists('ActorUsername', "")
+            ,
+            TargetUserType=column_ifexists('ActorUserType', "")
+            ,
+            TargetUserIdType=column_ifexists('ActorUserIdType', "")
+            ,
+            TargetUsernameType=column_ifexists('ActorUsernameType', "")
+            ,
+            SrcIpAddr = column_ifexists('SrcIpAddr', "")
+            //** extend non-normalized fields to be projected-away 
+            ,
+            ActorDetailEntry,
+            ActorDisplayName,
+            AuthenticationContextAuthenticationProvider,
+            AuthenticationContextAuthenticationStep,
+            AuthenticationContextCredentialProvider,
+            AuthenticationContextInterface,
+            AuthenticationContextIssuerId,
+            AuthenticationContextIssuerType
+            ,
+            DebugData,
+            DvcAction,
+            OriginalActorAlternateId,
+            OriginalClientDevice,
+            OriginalOutcomeResult,
+            OriginalSeverity,
+            OriginalTarget,
+            OriginalUserId,
+            OriginalUserType,
+            Request,
+            SecurityContextAsNumber,
+            SecurityContextAsOrg,
+            SecurityContextDomain,
+            SecurityContextIsProxy
+            ,
+            TransactionDetail,
+            TransactionId,
+            TransactionType
+        // ** Aliases
+        | extend 
+            User=TargetUsername
+            ,
+            Dvc=EventVendor
+            ,
+            IpAddr=SrcIpAddr
+        | project-away
+            ActorDetailEntry,
+            ActorDisplayName,
+            AuthenticationContextAuthenticationProvider,
+            AuthenticationContextAuthenticationStep,
+            AuthenticationContextCredentialProvider,
+            AuthenticationContextInterface,
+            AuthenticationContextIssuerId,
+            AuthenticationContextIssuerType,
+            DebugData,
+            DvcAction,
+            OriginalActorAlternateId,
+            OriginalClientDevice,
+            OriginalOutcomeResult,
+            OriginalSeverity,
+            OriginalTarget,
+            OriginalUserId,
+            OriginalUserType,
+            Request,
+            SecurityContextAsNumber,
+            SecurityContextAsOrg,
+            SecurityContextDomain,
+            SecurityContextIsProxy,
+            TransactionId,
+            TransactionType;
+    OktaV2
+};
+parser(disabled = disabled)
+}
+
+
+
+//
+// Function Name: ASimAuthenticationPaloAltoCortexDataLake
+// Description: This ASIM parser supports normalizing Palo Alto Cortex Data Lake logs to the ASIM Authentication normalized schema. These events are captured through the Palo Alto Networks CDL data connector that ingests CDL logs into Microsoft Sentinel.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuthenticationPaloAltoCortexDataLake(    ['disabled']:bool=False)
+{
+let EventSeverityLookup = datatable (LogSeverity: string, EventSeverity: string)
+[
+    "0", "Low",
+    "1", "Low",
+    "2", "Low",
+    "3", "Low",
+    "4", "Low",
+    "5", "Low",
+    "6", "Medium",
+    "7", "Medium",
+    "8", "Medium",
+    "9", "High",
+    "10", "High"
+];
+let parser = (disabled: bool=false) {
+    CommonSecurityLog
+    | where not(disabled)
+        and DeviceVendor == "Palo Alto Networks" and DeviceProduct == "LF"
+        and DeviceEventClassID == "AUTH"
+    | parse-kv AdditionalExtensions as (PanOSSourceDeviceHost: string, PanOSSourceDeviceOSFamily: string, PanOSAuthenticationProtocol: string, PanOSAuthenticatedUserDomain: string, PanOSAuthenticatedUserName: string, PanOSAuthenticatedUserUUID: string, start: string, PanOSLogSource: string, PanOSRuleMatchedUUID: string, PanOSAuthenticationDescription: string, PanOSClientTypeName: string, PanOSConfigVersion: string, PanOSMFAVendor: string, PanOSSourceDeviceCategory: string, PanOSSourceDeviceModel: string, PanOSSourceDeviceProfile: string, PanOSSourceDeviceVendor: string, PanOSUserAgentString: string, PanOSCortexDataLakeTenantID: string, PanOSSessionID: string) with (pair_delimiter=";", kv_delimiter="=")
+    | invoke _ASIM_ResolveDvcFQDN('DeviceName')
+    | invoke _ASIM_ResolveSrcFQDN('PanOSSourceDeviceHost')
+    | lookup EventSeverityLookup on LogSeverity
+    | extend
+        EventStartTime = todatetime(start),
+        SrcIpAddr = coalesce(SourceIP, DeviceCustomIPv6Address2),
+        TargetIpAddr = coalesce(DestinationIP, DeviceCustomIPv6Address3),
+        EventMessage = Message,
+        LogonMethod = case(
+                      FieldDeviceCustomNumber1 == 1, "Username & Password",
+                      FieldDeviceCustomNumber1 == 2, "Multi factor authentication",
+                      FieldDeviceCustomNumber1 == 3, "Multi factor authentication",
+                      ""
+        ),
+        AdditionalFields = bag_pack(
+                      "FileName",
+                      FileName,
+                      "PanOSLogSource",
+                      PanOSLogSource,
+                      "PanOSRuleMatchedUUID",
+                      PanOSRuleMatchedUUID,
+                      DeviceCustomNumber1Label,
+                      FieldDeviceCustomNumber1, 
+                      DeviceCustomNumber2Label,
+                      FieldDeviceCustomNumber2,
+                      DeviceCustomString3Label,
+                      DeviceCustomString3,
+                      DeviceCustomString4Label,
+                      DeviceCustomString4,
+                      DeviceCustomString5Label,
+                      DeviceCustomString5,
+                      DeviceCustomString6Label,
+                      DeviceCustomString6,
+                      "PanOSAuthenticationDescription",
+                      PanOSAuthenticationDescription,
+                      "PanOSClientTypeName",
+                      PanOSClientTypeName,
+                      "PanOSConfigVersion",
+                      PanOSConfigVersion,
+                      "PanOSMFAVendor",
+                      PanOSMFAVendor,
+                      "PanOSSourceDeviceCategory",
+                      PanOSSourceDeviceCategory,
+                      "PanOSSourceDeviceModel",
+                      PanOSSourceDeviceModel,
+                      "PanOSSourceDeviceProfile",
+                      PanOSSourceDeviceProfile,
+                      "PanOSSourceDeviceVendor",
+                      PanOSSourceDeviceVendor
+                  )
+    | project-rename
+        DvcIpAddr = Computer,
+        EventUid = _ItemId,
+        DvcId = DeviceExternalID,
+        EventOriginalResultDetails = Message,
+        EventOriginalSeverity = LogSeverity,
+        EventOriginalType = DeviceEventClassID,
+        EventOriginalUid = ExtID,
+        EventProductVersion = DeviceVersion,
+        LogonProtocol = PanOSAuthenticationProtocol,
+        SrcDvcOs = PanOSSourceDeviceOSFamily,
+        TargetUsername = PanOSAuthenticatedUserName,
+        TargetUserId = PanOSAuthenticatedUserUUID,
+        TargetDomain = PanOSAuthenticatedUserDomain,
+        EventOriginalSubType = Activity,
+        HttpUserAgent =  PanOSUserAgentString,
+        TargetDvcScopeId = PanOSCortexDataLakeTenantID,
+        TargetSessionId = PanOSSessionID,
+        TargetDvc = DeviceCustomString1
+    | extend
+        Dvc = coalesce(DvcFQDN, DvcId, DvcHostname, DvcIpAddr),
+        EventEndTime = EventStartTime,
+        EventResult = iff(EventMessage has "Invalid Certificate", "Failure", "Success"),
+        Dst = TargetIpAddr,
+        Src = coalesce(SrcFQDN, SrcHostname, SrcIpAddr),
+        TargetUserType = _ASIM_GetUserType(TargetUsername, ""),
+        User = TargetUsername,
+        IpAddr = SrcIpAddr,
+        DvcIdType = iff(isnotempty(DvcId), "Other", ""),
+        TargetDomainType = case(
+                      array_length(split(DestinationUserName, ".")) > 1, "FQDN",
+                      array_length(split(DestinationUserName, "\\")) > 1, "Windows",
+                      ""
+                  ),
+        TargetUserIdType = iff(isnotempty(TargetUserId), "UID", ""),
+        TargetUsernameType = _ASIM_GetUsernameType(TargetUsername)
+    | extend
+        EventSchema = "Authentication",
+        EventSchemaVersion = "0.1.3",
+        EventType = "Logon",
+        EventProduct = "Cortex Data Lake",
+        EventVendor = "Palo Alto"
+    | project-away
+        Source*,
+        Destination*,
+        Device*,
+        AdditionalExtensions,
+        CommunicationDirection,
+        EventOutcome,
+        PanOS*,
+        start,
+        EndTime,
+        FieldDevice*,
+        Flex*,
+        File*,
+        Old*,
+        MaliciousIP*,
+        OriginalLogSeverity,
+        Process*,
+        Protocol,
+        ReceivedBytes,
+        SentBytes,
+        Remote*,
+        Request*,
+        SimplifiedDeviceAction,
+        StartTime,
+        TenantId,
+        Threat*,
+        ExternalID,
+        ReportReferenceLink,
+        ReceiptTime,
+        Reason,
+        ApplicationProtocol,
+        Indicator*,
+        _ResourceId
+};
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimAuthenticationPostgreSQL
+// Description: This ASIM parser supports normalizing PostgreSQL sign in logs to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuthenticationPostgreSQL(    ['disabled']:bool=False)
+{
+let PostgreSQLSignInAuthorized=(disabled:bool=false){
+PostgreSQL_CL 
+| where not(disabled)
+| where RawData has 'connection authorized'
+| project-rename 
+    EventUid = _ItemId
+| extend
+    DvcHostname                 = Computer,
+    DvcIpAddr                   = extract(@'\d{1,3}\.\d{1.3}\.\d{1,3}\.\d{1,3}', 1, Computer),
+    EventCount                  = int(1),
+    EventEndTime                = TimeGenerated,
+    EventOriginalRestultDetails = 'Connection authorized',
+    EventProduct                = 'PostgreSQL',
+    EventResult                 = 'Success',
+    EventSchema                 = 'Authentication',
+    EventSchemaVersion          = '0.1.1',
+    EventStartTime              = TimeGenerated,
+    EventType                   = 'Logon',
+    EventVendor                 = 'PostgreSQL',
+    TargetUsername              = extract(@'user=([^\s,]+)', 1, RawData),
+    TargetUsernameType          = 'Simple'
+// ************************ 
+//      <Aliases> 
+// ************************
+| extend
+    Dvc=Computer,
+    User=TargetUsername
+// ************************ 
+//      </Aliases> 
+// ************************
+  | project-away Computer, MG, ManagementGroupName, RawData, SourceSystem, TenantId
+  };
+let PostgreSQLAuthFailure1=(disabled:bool=false){
+PostgreSQL_CL 
+| where not(disabled)
+| where RawData has 'authentication failed'
+| extend 
+    DvcHostname                 = Computer,
+    DvcIpAddr                   = extract(@'\d{1,3}\.\d{1.3}\.\d{1,3}\.\d{1,3}', 1, Computer),
+    EventCount                  = int(1),
+    EventEndTime                = TimeGenerated,
+    EventOriginalRestultDetails = 'User authentication failed',
+    EventProduct                = 'PostgreSQL',
+    EventResult                 = 'Failure',
+    EventResultDetails          = 'No such user or password',
+    EventSchema                 = 'Authentication',
+    EventSchemaVersion          = '0.1.1',
+    EventStartTime              = TimeGenerated,
+    EventType                   = 'Logon',
+    EventVendor                 = 'PostgreSQL',
+    TargetUsername              = extract(@'for user\s"(.*?)"', 1, RawData),
+    TargetUsernameType          = 'Simple'
+// ************************ 
+//      <Aliases> 
+// ************************
+| extend
+    Dvc  = Computer,
+    User = TargetUsername
+// ************************ 
+//      </Aliases> 
+// ************************
+| project-away Computer, MG, ManagementGroupName, RawData, SourceSystem, TenantId
+};
+let PostgreSQLAuthFailure2=(disabled:bool=false){
+PostgreSQL_CL 
+| where not(disabled)
+| where RawData has_all ('role', 'does', 'not', 'exist')
+| extend 
+    DvcHostname                 = Computer,
+    DvcIpAddr                   = extract(@'\d{1,3}\.\d{1.3}\.\d{1,3}\.\d{1,3}', 1, Computer),
+    EventCount                  = int(1),
+    EventEndTime                = TimeGenerated,
+    EventOriginalRestultDetails = 'Role does not exist',
+    EventProduct                = 'PostgreSQL',
+    EventResult                 = 'Failure',
+    EventResultDetails          = 'No such user or password',
+    EventSchema                 = 'Authentication',
+    EventSchemaVersion          = '0.1.1',
+    EventStartTime              = TimeGenerated,
+    EventType                   = 'Logon',
+    EventVendor                 = 'PostgreSQL',
+    TargetUsername              = extract(@'role\s"(.*?)"\sdoes', 1, RawData),
+    TargetUsernameType          = 'Simple'
+// ************************ 
+//      <Aliases> 
+// ************************
+| extend
+    Dvc  = Computer,
+    User = TargetUsername
+// ************************ 
+//      </Aliases> 
+// ************************
+| project-away Computer, MG, ManagementGroupName, RawData, SourceSystem, TenantId
+};
+let PostgreSQLAuthFailure3=(disabled:bool=false){
+PostgreSQL_CL 
+| where not(disabled)
+| where RawData has_all ('no', 'entry', 'user')
+| extend 
+    DvcHostname                 = Computer,
+    DvcIpAddr                   = extract(@'\d{1,3}\.\d{1.3}\.\d{1,3}\.\d{1,3}', 1, Computer),
+    EventCount                  = int(1),
+    EventEndTime                = TimeGenerated,
+    EventOriginalRestultDetails = 'No entry for user',
+    EventProduct                = 'PostgreSQL',
+    EventResult                 = 'Failure',
+    EventResultDetails          = 'No such user or password',
+    EventSchema                 = 'Authentication',
+    EventSchemaVersion          = '0.1.1',
+    EventStartTime              = TimeGenerated,
+    EventType                   = 'Logon',
+    EventVendor                 = 'PostgreSQL',
+    SrcIpAddr                   = extract(@'host\s"(.*?)",', 1, RawData),
+    TargetUsername              = extract(@'user\s"(.*?)",', 1, RawData),
+    TargetUsernameType          = 'Simple'
+// ************************ 
+//      <Aliases> 
+// ************************
+| extend
+    Dvc  = Computer,
+    User = TargetUsername
+// ************************ 
+//      </Aliases> 
+// ************************
+| project-away Computer, MG, ManagementGroupName, RawData, SourceSystem, TenantId
+};
+let PostgreSQLDisconnect=(disabled:bool=false){
+PostgreSQL_CL 
+| where not(disabled)
+| where RawData has 'disconnection'
+| extend 
+    DvcHostname                 = Computer,
+    DvcIpAddr                   = extract(@'\d{1,3}\.\d{1.3}\.\d{1,3}\.\d{1,3}', 1, Computer),
+    EventCount                  = int(1),
+    EventEndTime                = TimeGenerated,
+    EventOriginalRestultDetails = 'User session closed',
+    EventProduct                = 'PostgreSQL',
+    EventResult                 = 'Success',
+    EventResultDetails          = 'Session expired',
+    EventSchema                 = 'Authentication',
+    EventSchemaVersion          = '0.1.1',
+    EventStartTime              = TimeGenerated,
+    EventType                   = 'Logoff',
+    EventVendor                 = 'PostgreSQL',
+    SrcIpAddr                   = extract(@'host=([\d.]+)', 1, RawData),
+    TargetUsername              = extract(@'user=([^\s,]+)', 1, RawData),
+    TargetUsernameType          = 'Simple'
+// ************************ 
+//      <Aliases> 
+// ************************
+| extend
+    Dvc  = Computer,
+    User = TargetUsername
+// ************************ 
+//      </Aliases> 
+// ************************
+| project-away Computer, MG, ManagementGroupName, RawData, SourceSystem, TenantId
+};
+union isfuzzy=false 
+  PostgreSQLSignInAuthorized(disabled = disabled), 
+  PostgreSQLAuthFailure1(disabled = disabled), 
+  PostgreSQLAuthFailure2(disabled = disabled), 
+  PostgreSQLAuthFailure3(disabled = disabled), 
+  PostgreSQLDisconnect(disabled = disabled)
+}
+
+
+

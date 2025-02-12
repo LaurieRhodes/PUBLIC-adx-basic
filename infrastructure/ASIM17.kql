@@ -1,0 +1,2406 @@
+//
+// Function Name: vimNetworkSessionCrowdStrikeFalconHost
+// Description: This ASIM parser supports normalizing CrowdStrike Falcon Endpoint Protection logs to the ASIM Network Session normalized schema. These events are captured through CrowdStrike Falcon Endpoint Protection data connector which allows you to easily connect your CrowdStrike Falcon Event Stream with Microsoft Sentinel.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimNetworkSessionCrowdStrikeFalconHost(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dstipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['ipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dstportnumber']:int=int(null),
+    ['dvcaction']:dynamic=dynamic([]),
+    ['hostname_has_any']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=false)
+{
+let EventSeverityLookup = datatable (LogSeverity: string, EventSeverity: string)
+[
+    "0", "Informational",
+    "1", "Informational",
+    "2", "Low",
+    "3", "Medium",
+    "4", "High",
+    "5", "High"
+];
+let EventFieldsLookup = datatable (
+    ruleAction: int,
+    DvcOriginalAction: string,
+    DvcAction: string,
+    EventResult: string
+)
+[
+    0, "invalid", "Deny", "Failure",
+    1, "allowed", "Allow", "Success",
+    2, "blocked", "Deny", "Failure"
+];
+//ActionLokkup is prepapred by considering facts as below:
+//Response bit: KILL PROCESS, modifier bit: '', DvcAction: Deny
+//Response bit: KILL PROCESS, modifier bit: POLICY_DISABLED, DvcAction: Allow as here process would have been killed or blocked if policy was enabled so current event is not killed.
+let ActionLookup = datatable (
+    EventOutcome: string,
+    DvcOriginalAction: string,
+    DvcAction: string,
+    EventResult: string
+)
+[
+    "0", "Detection", "Allow", "Success",
+    "2", "Detection", "Allow", "Success",
+    "16", "Prevention-killed", "Deny", "Failure",
+    "128", "Quarantine", "Allow", "Success",
+    "144", "Prevention-killed,quarantine", "Deny", "Failure",
+    "272", "Detection", "Allow", "Success",
+    "400", "Detection-quarantine", "Allow", "Success",
+    "512", "Prevention-killed", "Deny", "Failure",
+    "640", "Prevention-killed,quarantine", "Deny", "Failure",
+    "768", "Detection", "Allow", "Success", 
+    "1024", "Prevention-blocked", "Deny", "Failure",
+    "1040", "Prevention-killed,blocked", "Deny", "Failure",
+    "1152", "Prevention-blocked,quarantine", "Deny", "Failure",
+    "1168", "Prevention-killed,blocked,quarnatine", "Deny", "Failure",
+    "1280", "Detection", "Allow", "Success",
+    "1296", "Detection", "Allow", "Success",
+    "2048", "Prevention-blocked", "Deny", "Failure",
+    "2176", "Prevention-quarantine,blocked ", "Deny", "Failure",
+    "2304", "Detection", "Allow", "Success",
+    "2432", "Detection-quarantine", "Allow", "Success",
+    "4096", "Prevention-blocked", "Deny", "Failure",
+    "4112", "Prevention-blocked,killed", "Deny", "Failure",
+    "4224", "Prevention-blocked,quarantine", "Deny", "Failure",
+    "4240", "Prevention-killed,blocked,quarantine", "Deny", "Failure",
+    "4352", "Detection", "Allow", "Success",
+    "4368", "Detection", "Allow", "Success",
+    "4638", "Detection", "Allow", "Success",
+    "5120", "Prevention-blocked", "Deny", "Failure",
+    "8192", "Disabled", "Allow", "Success",
+    "8208", "Detection", "Allow", "Success",
+    "8320", "Detection-quarnatine", "Allow", "Success",
+    "8704", "Detection", "Allow", "Success",
+    "9216", "Detection", "Allow", "Success",
+    "10240", "Detection", "Allow", "Success",
+    "12304", "Detection", "Allow", "Success",
+    "16400", "Killed", "Deny", "Failure",
+    "32768", "Prevention-blocked", "Deny", "Failure",
+    "32896", "Prevention-blocked,quarantine", "Deny", "Failure",
+    "33024", "Detection", "Allow", "Success",
+    "65536", "Downgraded", "Allow", "Success",
+    "65552", "Prevention-killed", "Deny", "Failure",
+    "65792", "Detection-downgraded", "Allow", "Success",
+    "65808", "Detection-downgraded", "Allow", "Success",
+    "73728", "Detection-downgraded", "Allow", "Success",
+    "73744", "Detection-downgraded", "Allow", "Success",
+    "131088", "Prevention-killed", "Deny", "Failure",
+    "131216", "Prevention-killed,quarantine", "Deny", "Failure",
+    "131584", "Prevention-killed", "Deny", "Failure",
+    "131712", "Prevention-killed,quarantine", "Deny", "Failure",
+    "2099200", "Prevention-blocked", "Deny", "Failure",
+    "2099328", "Prevention-blocked,quarantine", "Deny", "Failure",
+    "4196352", "Prevention-blocked", "Deny", "Failure",
+    "4196480", "Prevention-blocked,quarantine", "Deny", "Failure",
+    "1048576", "Prevention-suspend", "Deny", "Failure",
+    "524288", "Prevention-suspend", "Deny", "Failure",
+    "262144", "Blocking Disabled", "Allow", "Success",
+    "16384", "Safeguard Enabled", "Allow", "Success",
+    "131072", "Kill Failed", "Deny", "Failure",
+    "256", "Policy Disabled", "Allow", "Success",
+    "2097152", "Response Action Already Applied", "Deny", "Failure",
+    "4194304", "Response Failed", "Deny", "Failure"
+];
+let parser = (starttime: datetime=datetime(null), 
+    endtime: datetime=datetime(null),
+    srcipaddr_has_any_prefix: dynamic=dynamic([]), 
+    dstipaddr_has_any_prefix: dynamic=dynamic([]), 
+    ipaddr_has_any_prefix: dynamic=dynamic([]),
+    dstportnumber: int=int(null), 
+    hostname_has_any: dynamic=dynamic([]), 
+    dvcaction: dynamic=dynamic([]), 
+    eventresult: string='*', 
+    disabled: bool=false) {
+    let src_or_any = set_union(srcipaddr_has_any_prefix, ipaddr_has_any_prefix); 
+    let dst_or_any = set_union(dstipaddr_has_any_prefix, ipaddr_has_any_prefix);
+    let alldata = CommonSecurityLog
+        | where not(disabled)
+            and (isnull(starttime) or TimeGenerated >= starttime)
+            and (isnull(endtime) or TimeGenerated <= endtime)
+        | where DeviceVendor == "CrowdStrike" and DeviceProduct == "FalconHost"
+        | where DeviceEventClassID in ("Network Access In A Detection Summary Event", "FirewallMatchEvent")
+        | where (array_length(hostname_has_any) == 0 or DestinationHostName has_any (hostname_has_any))
+            and (isnull(dstportnumber) or (DestinationPort == dstportnumber) or (AdditionalExtensions has tostring(dstportnumber)))
+    ;
+    let firewalldata = alldata
+        | where DeviceEventClassID == "FirewallMatchEvent"
+        | parse-kv AdditionalExtensions as (deviceId: string, cmdLine: string, connectionDirection: int, eventType: string, hostName: string, icmpCode: int, icmpType: string, localAddress: string, localPort: int, matchCount: int, networkProfile: string, protocol: int, remoteAddress: string, remotePort: int, ruleAction: int, ruleDescription: string, ruleGroupName: string, ruleName: string, status: string) with (pair_delimiter=";", kv_delimiter="=")
+        | lookup EventFieldsLookup on ruleAction
+        | where ((array_length(dvcaction) == 0) or DvcAction has_any (dvcaction))
+        | where ((eventresult == "*") or EventResult == eventresult)
+        | extend
+            EventCount = matchCount,
+            EventStartTime = unixtime_milliseconds_todatetime(tolong(ReceiptTime)),
+            NetworkDirection = case(
+                      connectionDirection == 1, "Inbound",
+                      connectionDirection == 2, "Outbound",
+                      ""
+                  ),
+              SrcIpAddr = case(
+                  connectionDirection == 1, remoteAddress,
+                  connectionDirection == 2, localAddress,
+                  ""
+              ),
+              SrcPortNumber = case(
+                      connectionDirection == 1, remotePort,
+                      connectionDirection == 2, localPort,
+                      int(null)
+                  ),
+              DstIpAddr = case(
+                  connectionDirection == 1, remoteAddress,
+                  connectionDirection == 2, localAddress,
+                  ""
+              ),
+              DstPortNumber = case(
+                      connectionDirection == 1, localPort,
+                      connectionDirection == 2, remotePort,
+                      int(null)
+                  )
+        | where (isnull(dstportnumber) or (DstPortNumber == dstportnumber))
+        | extend
+            temp_isSrcMatch = has_any_ipv4_prefix(SrcIpAddr, src_or_any), 
+            temp_isDstMatch = has_any_ipv4_prefix(DstIpAddr, dst_or_any)
+        | extend ASimMatchingIpAddr = case(
+                                  array_length(src_or_any) == 0 and array_length(dst_or_any) == 0,
+                                  "-", 
+                                  (temp_isSrcMatch and temp_isDstMatch),
+                                  "Both", 
+                                  temp_isSrcMatch,
+                                  "SrcIpAddr",
+                                  temp_isDstMatch,
+                                  "DstIpAddr",
+                                  "No match" 
+                              )        
+        | where ASimMatchingIpAddr != "No match"
+        | extend deviceIp = iff(hostName matches regex "(([0-9]{1,3})\\.([0-9]{1,3})\\.([0-9]{1,3})\\.(([0-9]{1,3})))", hostName, "")
+        | extend 
+            hostName = iff(isempty(deviceIp), hostName, ""),
+            AdditionalFields = bag_pack(
+                      "networkProfile", networkProfile,
+                      "ruleDescription", ruleDescription,
+                      "ruleGroupName", ruleGroupName,
+                      "cmdLine", cmdLine
+                  ),
+            NetworkIcmpCode = icmpCode
+        | invoke _ASIM_ResolveDvcFQDN('hostName')
+        | invoke _ASIM_ResolveNetworkProtocol('protocol')
+        | extend NetworkIcmpType = _ASIM_LookupICMPType('icmpType')
+        | project-rename
+            DvcId = deviceId,
+            DvcIpAddr = deviceIp,
+            EventOriginalSubType = eventType,
+            NetworkRuleName = ruleName
+        | extend
+            Rule = NetworkRuleName,
+            Dvc = coalesce(DvcId, DvcHostname, DvcIpAddr);
+    let networkaccessdata = alldata
+        | where DeviceEventClassID has "Network Access In A Detection Summary Event"
+        | lookup ActionLookup on EventOutcome
+        | where ((array_length(dvcaction) == 0) or DvcAction has_any (dvcaction))
+        | where ((eventresult == "*") or EventResult == eventresult)
+        | extend
+            temp_isSrcMatch = has_any_ipv4_prefix(SourceIP, src_or_any), 
+            temp_isDstMatch = has_any_ipv4_prefix(DestinationIP, dst_or_any)
+        | extend ASimMatchingIpAddr = case(
+                                  array_length(src_or_any) == 0 and array_length(dst_or_any) == 0,
+                                  "-", 
+                                  (temp_isSrcMatch and temp_isDstMatch),
+                                  "Both", 
+                                  temp_isSrcMatch,
+                                  "SrcIpAddr",
+                                  temp_isDstMatch,
+                                  "DstIpAddr",
+                                  "No match" 
+                              )        
+        | where ASimMatchingIpAddr != "No match"
+        | parse-kv AdditionalExtensions as (CSMTRPatternDisposition: string, tactic: string, technique: string, objective: string) with (pair_delimiter=";", kv_delimiter="=")
+        | invoke _ASIM_ResolveSrcFQDN('DestinationHostName')
+        | extend ASimMatchingHostname = case(
+                                    array_length(hostname_has_any) == 0,
+                                    "-",
+                                    SrcHostname has_any (hostname_has_any),
+                                    "SrcHostname",
+                                    "No match"
+                                )
+        | where ASimMatchingHostname != "No match"
+        | extend
+            EventStartTime = todatetime(DeviceCustomDate1),
+            DstIpAddr = coalesce(DestinationIP, DeviceCustomIPv6Address3),
+            SrcIpAddr = coalesce(SourceIP, DeviceCustomIPv6Address2),
+            EventCount = int(1),
+            SrcDomain = coalesce(SrcDomain, DestinationNTDomain),
+            EventOriginalResultDetails = CSMTRPatternDisposition,
+            SrcProcessId = tostring(FieldDeviceCustomNumber2),
+            SrcDomainType = iff(isnotempty(DestinationNTDomain), "Windows", SrcDomainType),
+            AdditionalFields = bag_pack(
+                      "CSMTRPatternDisposition", CSMTRPatternDisposition, 
+                      "Tactic", coalesce(tactic, Activity),
+                      "Technique", coalesce(technique, DeviceAction),
+                      "Objective", coalesce(objective, Reason),
+                      DeviceCustomString6Label, DeviceCustomString6
+                  )
+        | project-rename
+            DvcId = ExtID,
+            DstPortNumber = DestinationPort,
+            SrcPortNumber = SourcePort,
+            SrcMacAddr = SourceMACAddress,
+            SrcUsername = DestinationUserName,
+            SrcProcessName = FileName
+        | extend
+            Dvc = DvcId,
+            Hostname = SrcHostname,
+            User = SrcUsername,
+            SrcAppId = SrcProcessId,
+            SrcAppName = SrcProcessName,
+            SrcAppType = "Process",
+            SrcUserType = _ASIM_GetUserType(SrcUsername, ""),
+            SrcUsernameType = _ASIM_GetUsernameType(SrcUsername);
+    union firewalldata, networkaccessdata
+    | lookup EventSeverityLookup on LogSeverity
+    | extend NetworkProtocolVersion = case(
+                                      DstIpAddr contains ".", "IPv4",
+                                      DstIpAddr contains ":", "IPv6",
+                                      ""
+                                  )
+    | extend
+        EventSchema = "NetworkSession",
+        EventSchemaVersion = "0.2.6",
+        EventVendor = "CrowdStrike",
+        EventProduct = "FalconHost",
+        EventType = "EndpointNetworkSession"
+    | project-rename
+        EventOriginalType = DeviceEventClassID,
+        EventProductVersion = DeviceVersion,
+        EventUid = _ItemId,
+        EventOriginalSeverity= LogSeverity
+    | extend
+        EventEndTime = EventStartTime,
+        Dst = DstIpAddr,
+        Src = coalesce(SrcFQDN, SrcHostname, SrcIpAddr),
+        IpAddr = SrcIpAddr,
+        DvcIdType = iff(isnotempty(DvcId), "Other", "")
+    | project-away 
+        Source*,
+        Destination*,
+        Device*,
+        AdditionalExtensions,
+        CommunicationDirection,
+        Computer,
+        EndTime,
+        FieldDevice*,
+        Flex*,
+        File*,
+        Old*,
+        MaliciousIP*,
+        OriginalLogSeverity,
+        Process*,
+        Protocol,
+        Activity,
+        ReceivedBytes,
+        SentBytes,
+        Remote*,
+        Request*,
+        SimplifiedDeviceAction,
+        StartTime,
+        TenantId,
+        Threat*,
+        ExternalID,
+        ReportReferenceLink,
+        ReceiptTime,
+        Reason,
+        ApplicationProtocol,
+        _ResourceId,
+        ExtID,
+        Message,
+        EventOutcome,
+        IndicatorThreatType,
+        cmdLine,
+        connectionDirection,
+        hostName,
+        matchCount,
+        networkProfile,
+        protocol,
+        ruleAction,
+        ruleDescription,
+        ruleGroupName,
+        icmpCode,
+        icmpType,
+        status,
+        CSMTRPatternDisposition,
+        temp_*,
+        NetworkProtocolNumber,
+        localAddress,
+        localPort,
+        remoteAddress,
+        remotePort
+};
+parser(
+    starttime=starttime, 
+    endtime=endtime,
+    srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, 
+    dstipaddr_has_any_prefix=dstipaddr_has_any_prefix, 
+    ipaddr_has_any_prefix=ipaddr_has_any_prefix,
+    dstportnumber=dstportnumber, 
+    hostname_has_any=hostname_has_any, 
+    dvcaction=dvcaction, 
+    eventresult=eventresult, 
+    disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimNetworkSessionEmpty
+// Description: This function returns an empty ASIM Network Session schema 
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimNetworkSessionEmpty
+{
+let parser=datatable(
+   TimeGenerated:datetime
+ , _ResourceId:string
+ , Type:string
+ // -- Event Fields
+ , EventMessage:string // Optional
+ , EventCount:int // Mandatory
+ , EventStartTime:datetime // Mandatory
+ , EventEndTime:datetime // Alias
+ , EventType:string // Mandatory
+ , EventSubType:string // Optional
+ , EventResult:string // Mandatory
+ , EventResultDetails:string // Optional
+ , EventOriginalResultDetails:string // Optional
+ , EventSeverity:string // Mandatory
+ , EventOriginalSeverity:string // Optional
+ , EventOriginalUid:string // Optional
+ , EventOriginalType:string // Optional
+ , EventOriginalSubType:string // Optional
+ , EventProduct:string // Mandatory
+ , EventProductVersion:string // Optional
+ , EventVendor:string // Mandatory
+ , EventSchema:string // Mandatory
+ , EventSchemaVersion:string // Mandatory
+ , EventReportUrl:string // Mandatory
+ , Dvc:string // Alias
+ , DvcIpAddr:string // Mandatory
+ , DvcHostname:string // Mandatory
+ , DvcDomain:string // Recommended
+ , DvcDomainType:string // Recommended
+ , DvcFQDN:string // Optional
+ , DvcId:string // Optional
+ , DvcIdType:string // Optional
+ , DvcMacAddr:string // Optional
+ , DvcZone:string // Optional
+ , DvcDescription:string // Optional
+ // -- Network Session Fields
+ , Dst:string // Alias
+ , DstIpAddr:string // Recommended
+ , DstPortNumber:int // Optional
+ , DstHostname:string // Recommended
+ , Hostname:string // Alias
+ , DstDescription:string // Optional
+ , DstDomain:string // Recommended
+ , DstDomainType:string // Recommended
+ , DstFQDN:string // Optional
+ , DstDvcId:string // Optional
+ , DstDvcIdType:string // Optional
+ , DstDeviceType:string // Optional
+ , DstUserId:string // Optional
+ , DstUserIdType:string // Optional
+ , DstUsername:string // Optional
+ , User:string // Alias
+ , DstUsernameType:string // Alias
+ , DstUserType:string // Optional
+ , DstOriginalUserType:string // Optional
+ , DstUserDomain:string // Optional
+ , DstAppName:string // Optional
+ , DstAppId:string // Optional
+ , DstAppType:string // Optional
+ , DstZone:string // Optional
+ , DstInterfaceName:string // Optional
+ , DstInterfaceGuid:string // Optional
+ , DstMacAddr:string // Optional
+ , DstGeoCountry:string // Optional
+ , DstGeoRegion: string // Optional
+ , DstGeoCity:string // Optional
+ , DstGeoLatitude:real // Optional
+ , DstGeoLongitude:real // Optional
+ , Src:string // Alias
+ , SrcIpAddr:string // Recommended
+ , SrcPortNumber:int // Optional
+ , SrcHostname:string // Recommended
+ , SrcDescription:string // Optional
+ , SrcDomain:string // Recommended
+ , SrcDomainType:string // Recommended
+ , SrcFQDN:string // Optional
+ , SrcDvcId:string // Optional
+ , SrcDvcIdType:string // Optional
+ , SrcDeviceType:string // Optional
+ , SrcUserId:string // Optional
+ , SrcUserIdType:string // Optional
+ , SrcUsername:string // Optional
+ , SrcUsernameType:string // Alias
+ , SrcUserType:string // Optional
+ , SrcOriginalUserType:string // Optional
+ , SrcUserDomain:string // Optional
+ , SrcAppName:string // Optional
+ , SrcAppId:string // Optional
+ , IpAddr:string // Alias
+ , SrcAppType:string // Optional
+ , SrcZone:string // Optional
+ , SrcInterfaceName:string // Optional
+ , SrcInterfaceGuid:string // Optional
+ , SrcMacAddr:string // Optional
+ , SrcGeoCountry:string // Optional
+ , SrcGeoCity:string // Optional
+ , SrcGeoRegion: string // Optional 
+ , SrcGeoLatitude:real // Optional
+ , SrcGeoLongitude:real // Optional
+ , NetworkApplicationProtocol:string // Optional
+ , NetworkProtocol:string // Optional
+ , NetworkProtocolVersion:string // Optional
+ , NetworkDirection:string // Optional
+ , NetworkDuration:int // Optional
+ , Duration:int // Alias
+ , NetworkIcmpCode:int // Optional
+ , NetworkIcmpType:string // Optional
+ , DstBytes:long // Optional
+ , SrcBytes:long // Optional
+ , NetworkBytes:long // Optional
+ , DstPackets:long // Optional
+ , SrcPackets:long // Optional
+ , NetworkPackets:long // Optional
+ , NetworkSessionId:string // Optional
+ , SessionId:string // Alias
+ , NetworkConnectionHistory:string // Optional
+ , SrcVlanId:string // Optional
+ , DstVlanId:string // Alias
+ , InnerVlanId:string // Optional
+ , OuterVlanId: string // Alias
+ // -- Intermediary device fields
+ , DstNatIpAddr:string // Optional
+ , DstNatPortNumber:int // Optional
+ , SrcNatIpAddr:string // Optional
+ , SrcNatPortNumber:int // Optional
+ , DvcInboundInterface:string // Optional
+ , DvcOutboundInterface:string // Optional
+ , DvcInterface:string // Optional
+ // -- Inspection fields
+ , NetworkRuleName:string // Optional
+ , NetworkRuleNumber:int // Optional
+ , Rule:string // Optional
+ , DvcAction:string // Optional
+ , DvcOriginalAction:string // Optional
+ , ThreatId:string // Optional
+ , ThreatName:string // Optional
+ , ThreatCategory:string // Optional
+ , ThreatRiskLevel:int // Optional
+ , ThreatOriginalRiskLevel:string // Optional
+ , DvcSubscriptionId:string // Optional
+ , SrcSubscriptionId:string // Optional
+ , DstSubscriptionId:string // Optional 
+ )[];
+parser
+}
+
+
+
+//
+// Function Name: vimNetworkSessionForcePointFirewall
+// Description: This ASIM parser supports normalizing Force Point Firewall logs coming from CEF Data Connector to the ASIM Network Session normalized schema.ParserName: vimNetworkSessionForcePointFirewall
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimNetworkSessionForcePointFirewall(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dstipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['ipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dstportnumber']:int=int(null),
+    ['hostname_has_any']:dynamic=dynamic([]),
+    ['dvcaction']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=false)
+{
+let ApplicationProtocolLookup=datatable(ApplicationProtocol:string,NetworkApplicationProtocol:string)
+   [
+         "HTTPS","HTTPS",
+         "HTTP-Over-QUIC","HTTP",
+         "HTTP","HTTP",
+         "DNS Over TLS","DNS",
+         "HTTP proxy","HTTP",
+         "IMAPS","IMAPS",
+         "SMTP","SMTP",
+         "IMAP","IMAP",
+         "POP3S","POP3",
+         "SMTP Submission Service","SMTP",
+         "X11","X11",
+         "RTSP","RTSP",
+         "Telnet","TELNET",
+         "NNTP","NNTP",
+         "ISAKMP","ISAKMP","ISAKMP","ISAKMP",
+         "POP3","POP3",
+         "BGP","BGP",
+         "FTP","FTP",
+         "RIP","RIP",
+         "Squid HTTP proxy","HTTP",
+         "TFTP","TFTP",
+         "QOTD","QOTD",
+         "SCCP","SCCP",
+         "Modbus","MODBUS",
+         "SVN","SVN",
+         "RADIUS (Accounting)","RADIUS",
+         "Kerberos","KERBEROS",
+         "GRE","GRE",
+         "UUCP-rlogin","UUCP",
+         "GTP User Data Tunneling","GTP",
+         "NNTPS","NNTP",
+         "GTP Control","GTP",
+         "IRC-default","IRC",
+         "FTPS (Control)","FTPS",
+         "ICCP","ICCP",
+         "IRCS","IRC",
+         "Telnets","TELNET",
+         "Finger","FINGER",
+         "ESP","ESP",
+         "Rlogin","RLP",
+         "IMAP3","IMAP",
+         "MGCP","MGCP",
+         "RADIUS Accounting (Old)","RADIUS",
+         "RADIUS (Old)","RADIUS",
+         "CVS","CVS",
+         "Ident","IDENT",
+         "Gopher","GOPHER",
+         "BGMP","BGMP",
+         "FTPS (Data)","FTPS",
+         "POP2","POP",
+         "TLISRV","TLISRV",
+         "INGRES-NET","INGRES-NET",
+         "IPIP","IPIP",
+         "XTP","XTP",
+         "UUCP","UUCP",
+         "IRC","IRC",
+         "Photuris (ICMP)","ICMP",
+         "TACACS-DS","TACACS-DS",
+         "WESP","WESP",
+         "EGP","EGP",
+         "WSN","WSN",
+         "XDMCP","XDMCP",
+         "Kerberos IV","KERBEROS",
+         "IRTP","IRTP",
+         "TTP","TTP",
+         "IRC-SERV","IRC",
+         "I-NLSP","NLSP",
+         "SNP","SNP",
+         "XNS-IDP","XNS",
+         "SECURE-VMTP","VMTP",
+         "VMTP","VMTP",
+         "IPLT","IPLT",
+         "GGP","GGP",
+         "MFE-NSP","NSP",
+         "HIP","HIP",
+         "MERIT-NSP","NSP",
+         "NSFNET-IGP","IGP",
+         "DCN-MEAS","DCN",
+         "STP","STP",
+         "SRP","SRP",
+         "HMP","HMP",
+         "XNET","XNET",
+         "VRRP","VRRP",
+         "ENCAP","ENCAP",
+         "CPNX","CPNX",
+         "PTP","PTP",
+         "SKIP","SKIP",
+         "SCPS","SCPS",
+         "Sprite-RPC","RPC",
+         "IPv6 ICMP","ICMP",
+         "MUX","MUX",
+         "CHAOS","CHAOS",
+         "SSCOPMCE","SSCOPMCE",
+         "CBT","CBT",
+         "SPS","SPS",
+         "ETHERIP","ETHERIP",
+         "MTP","MTP",
+         "ROHC","ROHC",
+         "CRTP","CRTP",
+         "PNNI","PNNI",
+         "NETBLT","NETBLT",
+         "TLSP","TLSP",
+         "IDPR","IDPR",
+         "DDX","DDX",
+         "PUP","PUP",
+         "DSR","DSR",
+         "NARP","NARP",
+         "CPHB","CPHB",
+         "SMP","SMP",
+         "L2TP","L2TP",
+         "IPv6 ICMP/143/0","ICMP",
+         "MICP","MICP",
+         "GMTP","GMTP",
+         "LARP","LARP",
+         "IFMP","IFMP",
+         "IGP","IGP",
+         "CFTP","CFTP",
+         "PGM","PGM",
+         "DDP","DDP",
+         "PIPE","PIPE",
+         "IATP","IATP",
+         "IGMP","IGMP",
+         "3PC","3PC",
+         "DGP","DGP",
+         "TCF","TCF",
+         "UTI","UTI",
+         "DCCP","DCCP",
+         "SWIPE","SWIPE",
+         "EMCON","EMCON",
+         "PIM","PIM",
+         "RVD","RVD",
+   ];
+ let ActionLookup=datatable(DeviceAction:string,DvcAction_ActionLookup:string,EventResult_ActionLookup:string,EventSeverity_ActionLookup:string)
+ [
+           "Allow","Allow","Success","Informational",          
+           "Discard","Drop","Failure","Low",
+           "Permit","Allow","Success","Informational",          
+           "Refuse","Deny","Failure","Low",
+           "Terminate","Reset Source","Failure","Low",          
+           "Terminate (failed)","","Failure","Low",
+           "Terminate (passive)","Reset Destination","Failure","Low",          
+           "Terminate (reset)","Reset","Failure","Low",
+           "Wait for Authentication","","Success","Informational",
+           "Wait for Further Actions","","Success","Informational",          
+           "Wait for RPC Reply","","Success","Informational"
+ ];
+ let DeviceEventClassIDLookup_Packet=datatable(DeviceEventClassID:string,EventSubType:string,DvcAction_DeviceEventClassIDLookup:string,EventResult_DeviceEventClassIDLookup:string,EventSeverity_DeviceEventClassIDLookup:string) //Add more codes if needed
+ [
+           "70018","Start","Allow","Success","Informational", // Connection_Allowed
+           "70019","End","Deny","Failure","Low", // Connection_Discarded
+           "70021","End","Reset","Failure","Low", // Connection_Closed
+           "70022","End","Reset","Failure","Low", // Connection_Closed-Abnormally
+           "70026","","","Success","Informational", // Connection_Progress
+ ];
+ let DeviceEventClassIDLookup_File=datatable(DeviceEventClassID:string,DvcAction_DeviceEventClassIDLookup:string,EventResult_DeviceEventClassIDLookup:string,EventSeverity_DeviceEventClassIDLookup:string)
+ [
+           "76506","Allow","Success","Informational", // File_Allowed
+           "76508","Deny","Failure","Low", // File_Malware-Blocked
+           "76509","","Failure","Low" // File_Malware-Detected
+ ];
+ let MessageLookup = datatable (Message:string, DvcAction_MessageLookup:string, EventResult_MessageLookup:string, EventResultDetails:string, EventOriginalResultDetails:string)  
+ [
+         "Connection dropped", "Drop", "Failure","Terminated", "Connection dropped",
+         "Connection removed because NGFW Engine is low on memory.","Drop", "Failure","Terminated","Connection removed because NGFW Engine is low on memory.",
+         "Connection timeout in state TCP_CLOSE_WAIT", "", "Success", "Timeout",	"One end of the Connection waits for the FIN packet (passive close).",
+         "Connection timeout in state TCP_CLOSE_WAIT_ACK", "", "Success", "Timeout", "One end of the Connection waits for the FIN packet (passive close)",
+         "Connection timeout in state TCP_CLOSING", "", "Success", "Timeout", "Closing packet (FIN) sent by one end of the Connection (simultaneous).",
+         "Connection timeout in state TCP_CLOSING_ACK", "", "Success", "Timeout", "Waiting for ACK for the FIN before going to closing status (active close).",
+         "Connection timeout in state TCP_ESTABLISHED", "", "Failure", "Timeout", "Normal status of TCP Connections for data transfer.",
+         "Connection timeout in state TCP_FIN_WAIT_1", "", "Success", "Timeout",	"One end of the Connection waits for sending the FIN packet (active close).",
+         "Connection timeout in state TCP_FIN_WAIT_2", "", "Success", "Timeout", "One end of the Connection waits for receiving ACK packet.",
+         "Connection timeout in state TCP_LAST_ACK", "",	"Success", "Timeout", "One end of the Connection sent a FIN packet (passive close).",
+         "Connection timeout in state TCP_LAST_ACK_WAIT", "", "Failure",	"Timeout", "Waiting for the FIN packet to be acknowledged.",
+         "Connection timeout in state TCP_SYN_ACK_SEEN", "", "Failure",	"Timeout", "Second phase of the TCP three-way handshake, the server has replied to client sent SYN with SYN+ACK, next status will be established.",
+         "Connection timeout in state TCP_SYN_FIN_SEEN", "",	"Success", "Timeout", "T/TCP (Transactional TCP) Connection, RFC 1644.",
+         "Connection timeout in state TCP_SYN_RETURN", "", "Failure", "Timeout", "Received simultaneous SYN from the other end (simultaneous open).",
+         "Connection timeout in state TCP_SYN_SEEN", "", "Failure", "Timeout", "First packet sent by one end of the Connection.",
+         "Connection timeout in state TCP_TIME_WAIT", "", "Success", "Timeout", "One end of the Connection acknowledged closing packet (FIN).",
+         "Connection timeout in state TCP_TIME_WAIT_ACK", "", "Failure",	"Timeout", "Waiting for ACK for the FIN status before going to time wait status (active close).",
+         "Connection timeout in state ICMP_ECHO", "", "Failure", "Timeout", "Ping reply is expected.",
+         "Connection timeout in state ICMP_REPLY_WAIT", "", "Failure", "Timeout", "Other ICMP request or reply types.",
+         "Connection was reset by client", "Reset Source", "Failure","Reset", "",
+         "Connection was reset by server", "Reset Destination", "Failure","Reset", "",
+         "invalid packet (CT)", "", "Failure", "Invalid TCP", "",
+         "not a (valid) SYN packet [A] (CT)", "", "Failure", "Invalid TCP", "",
+         "not a (valid) SYN packet [FA] (CT)", "", "Failure", "Invalid TCP", "",
+         "not a (valid) SYN packet [FPA] (CT)", "", "Failure", "Invalid TCP", "",
+         "not a (valid) SYN packet [PA] (CT)", "", "Failure", "Invalid TCP", "",
+         "not a (valid) SYN packet [RA] (CT)", "", "Failure", "Invalid TCP", "",
+         "not a (valid) SYN packet [SA] (CT)", "", "Failure", "Invalid TCP", "",
+         "TCP state violation","Deny","Failure", "Invalid TCP", "",
+         "TCP state violation: Connection end-point replied with ACK to SYN-packet. Connection refused.", "Deny", "Failure", "Invalid TCP", "",
+         "TSC error: Query timed out", "", "Failure", "Timeout", ""
+ ];
+ let parser = (
+     starttime:datetime=datetime(null), 
+     endtime:datetime=datetime(null), 
+     srcipaddr_has_any_prefix:dynamic=dynamic([]), 
+     dstipaddr_has_any_prefix:dynamic=dynamic([]), 
+     ipaddr_has_any_prefix:dynamic=dynamic([]),
+     dstportnumber:int=int(null), 
+     hostname_has_any:dynamic=dynamic([]), 
+     dvcaction:dynamic=dynamic([]), 
+     eventresult:string='*', 
+     disabled:bool=false) {
+ let src_or_any = set_union(srcipaddr_has_any_prefix, ipaddr_has_any_prefix); 
+ let dst_or_any = set_union(dstipaddr_has_any_prefix, ipaddr_has_any_prefix);
+ let prefilter = (T:(DestinationPort:int,ApplicationProtocol:string,SourceIP:string,DestinationIP:string,AdditionalExtensions:string)) {
+     T
+     | where (isnull(dstportnumber) or (DestinationPort == dstportnumber) or (ApplicationProtocol has tostring(dstportnumber)))
+     | extend temp_isSrcMatch=has_any_ipv4_prefix(SourceIP,src_or_any), 
+              temp_isDstMatch=has_any_ipv4_prefix(DestinationIP,dst_or_any)
+     | extend ASimMatchingIpAddr = case(
+                     array_length(src_or_any) == 0 and array_length(dst_or_any) == 0, "-", // match not requested
+                     (temp_isSrcMatch and temp_isDstMatch), "Both", // has to be checked before the individual 
+                     temp_isSrcMatch, "SrcIpAddr",
+                     temp_isDstMatch, "DstIpAddr",
+                     "No match"
+                 )
+     | where ASimMatchingIpAddr != "No match"
+     | where array_length(hostname_has_any) == 0 or AdditionalExtensions has_any (hostname_has_any)
+ };
+ let ForcePointNetwork = CommonSecurityLog
+         | where not(disabled)
+         | where (isnull(starttime) or TimeGenerated >= starttime) 
+             and (isnull(endtime) or TimeGenerated <= endtime)
+         | where DeviceVendor=="FORCEPOINT" and DeviceProduct=="Firewall"
+         | where DeviceFacility in~ ("Inspection","Packet Filtering","File Filtering") and isnotempty(DeviceEventClassID) and DeviceEventClassID != "0"
+         ;
+ let PacketFilteringData = ForcePointNetwork
+         | where DeviceFacility == "Packet Filtering" and DeviceEventClassID !in ("70383","70393","70734","71009","71040")
+         | invoke prefilter()
+         | lookup DeviceEventClassIDLookup_Packet on DeviceEventClassID
+         | lookup MessageLookup on Message
+         | extend DvcAction = coalesce(DvcAction_MessageLookup, DvcAction_DeviceEventClassIDLookup), 
+                  EventResult = case (Message startswith "Referred connection not known", "Failure",
+                                     coalesce(EventResult_MessageLookup, EventResult_DeviceEventClassIDLookup)), 
+                  EventSeverity = case(Message startswith "Referred connection not known", "Low",
+                                     EventSeverity_DeviceEventClassIDLookup),
+                  EventOriginalResultDetails = case(Message startswith "Referred connection not known", Message,
+                                                 EventOriginalResultDetails),
+                 EventType = "NetworkSession"
+         | project-away DvcAction_*, EventResult_*, EventSeverity_DeviceEventClassIDLookup;
+ let FileFilteringData = ForcePointNetwork
+         | where DeviceFacility == "File Filtering"
+         | invoke prefilter()
+         | lookup DeviceEventClassIDLookup_File on DeviceEventClassID
+         | extend ThreatName = case (DeviceEventClassID in ("76508", "76509"), Activity,
+                                     "")
+         | project-rename DvcAction = DvcAction_DeviceEventClassIDLookup
+         | extend EventResult = case(isnotempty(Message), "Failure",
+                                     EventResult_DeviceEventClassIDLookup), 
+                  EventSeverity = case(isnotempty(Message), "Low",
+                                     EventSeverity_DeviceEventClassIDLookup),
+                  EventOriginalResultDetails = case(isnotempty(Message), Message,
+                                                 ""),
+                 EventType = "NetworkSession"
+         | project-away *_DeviceEventClassIDLookup;
+ let InspectionData = ForcePointNetwork
+         | where DeviceFacility == "Inspection" or DeviceEventClassID == "70734"
+         | invoke prefilter()
+         | extend MessageCode = toint(DeviceEventClassID)
+         | extend EventSeverity = case (DeviceAction in~ ("Allow","Permit"), "Informational",
+                                     MessageCode >= 200000, "High",
+                                     MessageCode < 200000, "Low",
+                                     ""),
+                  EventType = case (MessageCode < 80000, "NetworkSession",
+                                  "IDS")
+         | extend ThreatName = Activity
+         | project-away MessageCode;
+ union PacketFilteringData, FileFilteringData, InspectionData
+         | extend NetworkProtocol = _ASIM_LookupNetworkProtocol(Protocol)
+         | lookup ActionLookup on DeviceAction
+         | extend DvcAction = coalesce(DvcAction,DvcAction_ActionLookup), 
+                  EventResult = coalesce(EventResult,EventResult_ActionLookup), 
+                  EventSeverity = coalesce(EventSeverity, EventSeverity_ActionLookup)
+         | project-away *_ActionLookup
+         | where ((array_length(dvcaction) == 0) or DvcAction has_any (dvcaction))
+         | where ((eventresult == "*") or (EventResult == eventresult))
+         | lookup ApplicationProtocolLookup on ApplicationProtocol
+         | extend 
+                 EventCount = toint(1),
+                 EventSchema = "NetworkSession",
+                 EventSchemaVersion = "0.2.6",
+                 EventVendor = "Forcepoint",
+                 EventProduct = "Firewall"
+         | parse AdditionalExtensions with * "requestURL=" requestURL            
+         | project-rename
+                 EventOriginalType = DeviceEventClassID,
+                 DstPortNumber = DestinationPort,
+                 DstIpAddr = DestinationIP,
+                 SrcPortNumber = SourcePort,
+                 SrcIpAddr = SourceIP,
+                 DstNatIpAddr = DestinationTranslatedAddress,
+                 DstNatPortNumber = DestinationTranslatedPort,
+                 SrcNatIpAddr = SourceTranslatedAddress,
+                 SrcNatPortNumber = SourceTranslatedPort,
+                 EventProductVersion = DeviceVersion,
+                 EventMessage = Message,
+                 DvcOriginalAction = DeviceAction,
+                 SrcBytes = SentBytes,
+                 DstBytes = ReceivedBytes,
+                 EventOriginalSubType = DeviceFacility,
+                 DvcId = DeviceExternalID,
+                 DvcInboundInterface = DeviceInboundInterface,
+                 DvcOutboundInterface = DeviceOutboundInterface,
+                 DvcIpAddr = DeviceAddress,
+                 EventOriginalSeverity = LogSeverity,
+                 ThreatId = DeviceCustomString3
+         | invoke _ASIM_ResolveDvcFQDN('Computer')
+         | extend
+                 ThreatCategory = column_ifexists("DeviceEventCategory",""),
+                 EventStartTime = todatetime(ReceiptTime),
+                 EventEndTime = todatetime(ReceiptTime),
+                 ipv6_parts = extract_all (@'^\[(.+)\](?:\:(\d+))?$',requestURL)[0],
+                 ipv4_parts = extract_all (@'^(\d+\.\d+\.\d+\.\d+)(?:\:(\d+))?$',requestURL)[0],
+                 host_parts = extract_all (@'^([^\\\d:]+)(?:\:(\d+))?$',requestURL)[0]
+         | extend 
+                  NetworkRuleName = case(isnotempty(DeviceCustomString2), strcat(DeviceCustomString1,',',DeviceCustomString2),
+                                         DeviceCustomString1),
+                  DstDomainPart = tostring(host_parts[0]),
+                  DstIpAddr = coalesce(DstIpAddr, tostring(ipv4_parts[0]), tostring(ipv6_parts[0])),
+                  DstPortNumber = coalesce(DstPortNumber, toint(host_parts[1]), toint(ipv4_parts[1]), toint(ipv6_parts[1]))
+         | invoke _ASIM_ResolveDstFQDN('DstDomainPart')
+         | extend ASimMatchingHostname = case(array_length(hostname_has_any) == 0 ,"-",
+                                     DstHostname has_any (hostname_has_any), "DstHostname",
+                                     "No match"
+                                     )
+         | where ASimMatchingHostname != "No match"
+         | extend
+                  DvcIdType = case(isnotempty(DvcId), "ForcepointId",
+                                 ""),
+                  DstPortNumber = case(
+                                 isnotempty(DstPortNumber), DstPortNumber,
+                                 ApplicationProtocol startswith "TCP", toint(split(ApplicationProtocol,'/')[1]),
+                                 ApplicationProtocol startswith "UDP", toint(split(ApplicationProtocol,'/')[1]),
+                                 int(null)),
+                  AdditionalFields = pack(iff(isnotempty(RequestMethod) and RequestMethod != "UNKNOWN", "RequestMethod", ""),RequestMethod,
+                                          iff(isnotempty(DeviceCustomString4),"VirusId",""),DeviceCustomString4),
+                  DstAppName = case(DestinationServiceName in~ ("Generic-Web-HTTP","Application-Unknown","Unknown-Encrypted-Application"), "",
+                                     DestinationServiceName),
+                  DvcIpAddr = coalesce(DvcIpAddr,DeviceName)
+         | extend
+                 Dvc = DvcIpAddr,
+                 IpAddr = SrcIpAddr,
+                 Rule = NetworkRuleName,
+                 Dst = DstIpAddr,
+                 Src = SrcIpAddr,
+                 DvcInterface = DvcInboundInterface,
+                 Hostname = DstHostname
+         | project-away AdditionalExtensions, CommunicationDirection, Device*, Destination*, EndTime, ExternalID, File*, Flex*, IndicatorThreatType, Malicious*, Old*, OriginalLogSeverity, Process*, Protocol, ReceiptTime, Remote*, ReportReferenceLink, Request*, SimplifiedDeviceAction, Source*, StartTime, TenantId, ThreatConfidence, ThreatDescription, ThreatSeverity, ExtID, EventOutcome, FieldDevice*, Reason, ApplicationProtocol, Activity, requestURL, Computer, DstDomainPart, host_parts, ipv4_parts, ipv6_parts, temp_*
+     };
+     parser(starttime=starttime, 
+             endtime=endtime, 
+             srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, 
+             dstipaddr_has_any_prefix=dstipaddr_has_any_prefix, 
+             ipaddr_has_any_prefix=ipaddr_has_any_prefix, 
+             dstportnumber=dstportnumber, 
+             hostname_has_any=hostname_has_any, 
+             dvcaction=dvcaction, 
+             eventresult=eventresult, 
+             disabled=disabled)
+}
+
+
+
+//
+// Function Name: vimNetworkSessionFortinetFortiGate
+// Description: This ASIM parser supports filtering and normalizing Fortinet FortiGate logs produced by the Microsoft Sentinel Fortinet connector to the ASIM Network Session normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimNetworkSessionFortinetFortiGate(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dstipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['ipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dstportnumber']:int=int(null),
+    ['hostname_has_any']:dynamic=dynamic([]),
+    ['dvcaction']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=false)
+{
+let EventLookup=datatable(DeviceAction:string,DvcAction:string,EventResult:string,EventResultDetails:string)
+  [
+    "accept","Allow","Success",""
+    , "client-rst","Reset Source","Failure",""
+    , "close","","Success",""
+    , "deny","Deny","Failure",""
+    , "ip-conn","","Failure","IP connection error"
+    , "server-rst","Reset Destination","Failure",""
+    , "timeout","","Failure",""
+  ];
+  // -- See https://docs.fortinet.com/document/fortigate/7.2.4/fortios-log-message-reference/671442/cef-priority-levels
+  let SeverityLookup = datatable (EventOriginalSeverity:string, EventSeverity:string)
+  [
+    "1", "Informational", // Debug
+    "2", "Informational", // Information
+    "3", "Informational", // Notification
+    "4", "Low", // Warning
+    "5", "Low", // Error
+    "6", "Critical", // High
+    "7", "Alert", // Medium
+    "8", "High" // Emergency
+  ];
+  let Parser=(starttime:datetime=datetime(null), endtime:datetime=datetime(null), srcipaddr_has_any_prefix:dynamic=dynamic([]), dstipaddr_has_any_prefix:dynamic=dynamic([]), ipaddr_has_any_prefix:dynamic=dynamic([]), dstportnumber:int=int(null), hostname_has_any:dynamic=dynamic([]), dvcaction:dynamic=dynamic([]), eventresult:string='*', disabled:bool=false){
+    let src_or_any=set_union(srcipaddr_has_any_prefix, ipaddr_has_any_prefix); 
+    let dst_or_any=set_union(dstipaddr_has_any_prefix, ipaddr_has_any_prefix); 
+    CommonSecurityLog
+    | where not(disabled)
+    | where (isnull(starttime) or TimeGenerated>=starttime) and (isnull(endtime) or TimeGenerated<=endtime)
+    | where DeviceVendor == "Fortinet" and DeviceProduct startswith "FortiGate" and (column_ifexists("DeviceEventCategory","") has "traffic" or AdditionalExtensions has "cat=traffic")
+    | where DeviceAction != "dns" and Activity !has "dns" 
+    | where (array_length(hostname_has_any)==0)
+    | where  (isnull(dstportnumber) or DestinationPort==dstportnumber)
+    | extend temp_ResultMatch = case (
+        eventresult=="*", true,
+        (eventresult == "Success") and (DeviceAction in ("accept", "close") or Activity has_any ("accept", "close")), true,
+        (eventresult == "Failure") and (DeviceAction !in ("accept", "close") and not(Activity has_any ("accept", "close"))), true,
+        false
+    )
+    | where temp_ResultMatch
+    | extend temp_SrcMatch=has_any_ipv4_prefix(SourceIP,src_or_any)
+      , temp_DstMatch=has_any_ipv4_prefix(DestinationIP,dst_or_any)
+    | extend ASimMatchingIpAddr=case(
+        array_length(src_or_any) == 0 and array_length(dst_or_any) == 0 ,"-",
+        temp_SrcMatch and temp_DstMatch, "Both",
+        temp_SrcMatch, "SrcIpAddr",
+        temp_DstMatch, "DstIpAddr",
+        "No match"
+    )
+    | where ASimMatchingIpAddr != "No match" 
+    | parse Activity with "traffic:forward " temp_DeviceAction:string 
+    | extend DeviceAction = coalesce(DeviceAction, temp_DeviceAction)  
+    | lookup EventLookup on DeviceAction 
+    | where (array_length(dvcaction)==0 or DvcAction has_any (dvcaction))
+    | project Activity,AdditionalExtensions,DestinationIP,DestinationPort,DeviceAction,DeviceInboundInterface,DeviceOutboundInterface,DeviceProduct,DeviceVersion,LogSeverity,Protocol,ReceivedBytes,SentBytes,SourceIP,SourcePort,TimeGenerated, DeviceExternalID, Type, _ItemId, Computer, EventResult, EventResultDetails, ASimMatchingIpAddr, DvcAction
+    | project-rename DstBytes = ReceivedBytes
+      , DstInterfaceName = DeviceOutboundInterface
+      , DstIpAddr = DestinationIP
+      , DstPortNumber = DestinationPort
+      , Dvc = Computer
+      , EventMessage = Activity
+      , EventOriginalSeverity = LogSeverity
+      , EventProduct = DeviceProduct
+      , EventProductVersion = DeviceVersion
+      , SrcBytes = SentBytes
+      , SrcInterfaceName = DeviceInboundInterface
+      , SrcIpAddr = SourceIP
+      , SrcPortNumber = SourcePort
+      , DvcId = DeviceExternalID
+      , EventUid = _ItemId
+    | invoke _ASIM_ResolveNetworkProtocol ('Protocol')
+    | project-rename DvcOriginalAction = DeviceAction
+    | parse-kv AdditionalExtensions as (
+            FortinetFortiGatestart:datetime,
+            FortinetFortiGatesrcintfrole:string,
+            FortinetFortiGatedstintfrole:string,
+            FortinetFortiGateexternalID:string,
+            FortinetFortiGatepolicyid:int,
+            FortinetFortiGatedstcountry:string,
+            FortinetFortiGatesrccountry:string,
+            FortinetFortiGatecrscore:string,
+            FortinetFortiGateduration:int,
+            FortinetFortiGatesentpkt:long,
+            FortinetFortiGatercvdpkt:long
+        ) with (pair_delimiter=';', kv_delimiter='=')
+    | project-rename
+        EventStartTime          = FortinetFortiGatestart,
+        SrcZone                 = FortinetFortiGatesrcintfrole,
+        DstZone                 = FortinetFortiGatedstintfrole,
+        NetworkSessionId        = FortinetFortiGateexternalID,
+        NetworkRuleNumber       = FortinetFortiGatepolicyid,
+        NetworkDuration         = FortinetFortiGateduration,
+        DstGeoCountry           = FortinetFortiGatedstcountry,
+        SrcGeoCountry           = FortinetFortiGatesrccountry,
+        ThreatOriginalRiskLevel = FortinetFortiGatecrscore,
+        SrcPackets              = FortinetFortiGatesentpkt,
+        DstPackets              = FortinetFortiGatercvdpkt
+    | extend EventCount = int(1)
+      , EventSchema = "NetworkSession"
+      , EventSchemaVersion = "0.2.3"
+      , EventType = "NetworkSession"
+      , EventVendor = "Fortinet"
+      , DvcIdType = "Other"
+      , NetworkBytes = DstBytes + SrcBytes
+      , EventEndTime = TimeGenerated
+      , EventStartTime = coalesce(EventStartTime, TimeGenerated)
+      , NetworkProtocolVersion = case(DstIpAddr contains ".", "IPv4"
+          , DstIpAddr contains ":", "IPv6"
+          , "")
+      , NetworkPackets = DstPackets + SrcPackets
+      | lookup SeverityLookup on EventOriginalSeverity
+      | extend 
+          Src = SrcIpAddr,
+          Dst = DstIpAddr,
+          SessionId = NetworkSessionId,
+          IpAddr = SrcIpAddr,
+          Duration = NetworkDuration,
+          Rule = tostring(NetworkRuleNumber)
+    | project-away Protocol, AdditionalExtensions, NetworkProtocolNumber
+  };
+  Parser (starttime=starttime, endtime=endtime, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, dstipaddr_has_any_prefix=dstipaddr_has_any_prefix, ipaddr_has_any_prefix=ipaddr_has_any_prefix, dstportnumber=dstportnumber, hostname_has_any=hostname_has_any, dvcaction=dvcaction, eventresult=eventresult, disabled=disabled)
+}
+
+
+
+//
+// Function Name: vimNetworkSessionMD4IoTAgent
+// Description: This ASIM parser supports filtering and normalizing Microsoft Defender for IoT micro agent logs to the ASIM Network Session normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimNetworkSessionMD4IoTAgent(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dstipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['ipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dstportnumber']:int=int(null),
+    ['hostname_has_any']:dynamic=dynamic([]),
+    ['dvcaction']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=false)
+{
+let parser = (
+      starttime:datetime=datetime(null), 
+      endtime:datetime=datetime(null), 
+      srcipaddr_has_any_prefix:dynamic=dynamic([]), 
+      dstipaddr_has_any_prefix:dynamic=dynamic([]), 
+      ipaddr_has_any_prefix:dynamic=dynamic([]),
+      dstportnumber:int=int(null), 
+      hostname_has_any:dynamic=dynamic([]), 
+      dvcaction:dynamic=dynamic([]), 
+      eventresult:string='*', 
+      disabled:bool=false)
+{
+  let src_or_any=set_union(srcipaddr_has_any_prefix, ipaddr_has_any_prefix); 
+  let dst_or_any=set_union(dstipaddr_has_any_prefix, ipaddr_has_any_prefix); 
+  let ip_any  =  set_union(dstipaddr_has_any_prefix, ipaddr_has_any_prefix, srcipaddr_has_any_prefix); 
+  let DirectionNetworkEvents =
+  SecurityIoTRawEvent 
+  | where (isnull(starttime) or TimeGenerated>=starttime) 
+      and (isnull(endtime) or TimeGenerated<=endtime)
+  | where not(disabled)
+  | where RawEventName == "NetworkActivity"
+  // ***************  Prefilterring *****************************************************************
+  |where  (eventresult=='*' or eventresult=='Success')
+      and (array_length(hostname_has_any)==0) 
+      and (array_length(dvcaction) ==0  )     /// if filtered by action return nothing
+      and EventDetails has tostring(dstportnumber)
+      and (array_length (ip_any)==0 or has_any_ipv4_prefix(EventDetails,ip_any))
+      // *************** Prefilterring *****************************************************************
+  | parse EventDetails with * ',"LocalPort":' LocalPort:int ',"RemotePort":' RemotePort:int ',' *
+  | extend outbound = LocalPort > RemotePort
+  | where (isnull(dstportnumber) or (not(outbound) and dstportnumber == LocalPort) or (outbound and dstportnumber == RemotePort) ) 
+  ;
+  let parser = (T: (EventDetails: string)) {
+    T 
+    | parse EventDetails with 
+      '{"LocalAddress":"' LocalAddress:string '",'
+      '"RemoteAddress":"' RemoteAddress:string '",'
+      *
+      '"BytesIn":' BytesIn:long ','
+      '"BytesOut":' BytesOut:long ','
+      '"Protocol":"' Protocol:string '",'
+      '"ProcessId":' ProcessId:string ','
+      '"UserId":' UserId:string ','
+      '"ApplicationProtocol":"' ApplicationProtocol:string '",'
+      * // '"AzureResourceId":"' AzureResourceId:string '",'
+      '"DeviceId":"' DeviceId:string '",'
+      '"MessageSource":"' MessageSource:string '",'
+      '"OriginalEventId":"' OriginalEventId:string '",'
+      '"TimestampUTC":"' TimestampUTC:datetime '",'
+      *
+  }
+  ; 
+  let OutboundNetworkEvents = 
+    DirectionNetworkEvents
+    | where outbound
+    // ***************  Postfilterring *****************************************************************
+    | where (isnull(dstportnumber) or dstportnumber==LocalPort)
+    // ***************  Postfilterring *****************************************************************
+    | invoke parser ()
+    | extend temp_isSrcMatch=has_any_ipv4_prefix(LocalAddress,src_or_any)
+           , temp_isDstMatch=has_any_ipv4_prefix(RemoteAddress,dst_or_any)
+    | extend ASimMatchingIpAddr = case(
+          array_length(src_or_any) == 0 and array_length(dst_or_any) == 0, "-" // match not requested: probably most common case
+          , (temp_isSrcMatch and temp_isDstMatch), "Both" // has to be checked before the individual 
+          , temp_isSrcMatch, "SrcIpAddr"
+          , temp_isDstMatch, "DstIpAddr"
+          , "No match"
+  ) 
+  | where ASimMatchingIpAddr != "No match"
+  | project-away temp_*
+    | project-rename
+      SrcBytes = BytesOut,
+      DstBytes = BytesIn,
+      SrcPortNumber = LocalPort,
+      DstIpAddr = RemoteAddress,
+      DstPortNumber = RemotePort,
+      SrcProcessId = ProcessId
+    | extend
+      SrcIpAddr = LocalAddress,
+      SrcDvcIdType = "MD4IoTid",
+      SrcUserId = UserId,
+      SrcUserIdType = "UID",
+      SrcDvcId = DeviceId,
+      Process = SrcProcessId, // alias
+      SrcDvcOs = iif (MessageSource == "Linux", "Linux", "Windows")
+  ;
+  let InboundNetworkEvents = 
+    DirectionNetworkEvents
+    | where not(outbound)
+    // ***************  Postfilterring *****************************************************************
+    | where (isnull(dstportnumber) or dstportnumber==RemotePort)
+    // ***************  Postfilterring *****************************************************************
+    | invoke parser ()
+    | extend temp_isSrcMatch=( // only one of each pair has_any_ipv4_prefix is calculated
+                      has_any_ipv4_prefix(RemoteAddress,src_or_any)
+                  ) 
+         , temp_isDstMatch=(
+                   has_any_ipv4_prefix(LocalAddress,dst_or_any) 
+                  ) 
+    | extend ASimMatchingIpAddr = case(
+          array_length(src_or_any) == 0 and array_length(dst_or_any) == 0, "-" // match not requested: probably most common case
+          , (temp_isSrcMatch and temp_isDstMatch), "Both" // has to be checked before the individual 
+          , temp_isSrcMatch, "SrcIpAddr"
+          , temp_isDstMatch, "DstIpAddr"
+          , "No match"
+  ) 
+  | project-away temp_*
+  | where ASimMatchingIpAddr != "No match"
+    | project-rename
+      DstBytes = BytesOut,
+      SrcBytes = BytesIn,
+      DstPortNumber = LocalPort,
+      SrcIpAddr = RemoteAddress,
+      SrcPortNumber = RemotePort,
+      DstProcessId = ProcessId
+    | extend
+      DstIpAddr = LocalAddress,
+      DstDvcIdType = "MD4IoTid",
+      DstUserId = UserId,
+      DstUserIdType = "UID",
+      DstDvcId = DeviceId,
+      Process = DstProcessId, // alias
+      DstDvcOs = iif (MessageSource == "Linux", "Linux", "Windows")
+  ;
+  let NetworkSessionMD4IoT = 
+    union InboundNetworkEvents, OutboundNetworkEvents
+    | extend
+      EventCount = int(1),
+      EventProduct = 'Azure Defender for IoT', 
+      EventVendor = 'Microsoft',
+      EventSchemaVersion = '0.2.3',
+      EventSchema = "NetworkSession", 
+      EventType = 'NetworkSession',
+      EventStartTime = TimeGenerated, 
+      EventEndTime = TimeGenerated, 
+      EventResult = 'Success',
+      EventSeverity = 'Informational'
+    | project-rename
+      EventProductVersion = AgentVersion, // Not available in Windows
+      _ResourceId = AssociatedResourceId, 
+      _SubscriptionId = AzureSubscriptionId, 
+      EventOriginalUid = OriginalEventId,  // OK pending question
+      DvcOs = MessageSource,
+      NetworkProtocol = Protocol,
+      NetworkApplicationProtocol = ApplicationProtocol,
+      DvcId = DeviceId,
+      DvcIpAddr = LocalAddress
+    | project-away outbound
+    | extend
+      Dvc = DvcId,
+      DvcIdType = "MD4IoTid",
+      User = UserId,
+      IpAddr = SrcIpAddr,
+      Src = SrcIpAddr,
+      Dst = DstIpAddr
+  ;
+  NetworkSessionMD4IoT};
+  parser(starttime, endtime, srcipaddr_has_any_prefix, dstipaddr_has_any_prefix, ipaddr_has_any_prefix, dstportnumber, hostname_has_any, dvcaction, eventresult, disabled)
+}
+
+
+
+//
+// Function Name: vimNetworkSessionMD4IoTSensor
+// Description: This ASIM parser supports filtering and normalizing Microsoft Defender for IoT sensor logs to the ASIM Network Session normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimNetworkSessionMD4IoTSensor(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dstipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['ipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dstportnumber']:int=int(null),
+    ['hostname_has_any']:dynamic=dynamic([]),
+    ['dvcaction']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=false)
+{
+let parser = (
+      starttime:datetime=datetime(null), 
+      endtime:datetime=datetime(null), 
+      srcipaddr_has_any_prefix:dynamic=dynamic([]), 
+      dstipaddr_has_any_prefix:dynamic=dynamic([]), 
+      ipaddr_has_any_prefix:dynamic=dynamic([]),
+      dstportnumber:int=int(null), 
+      hostname_has_any:dynamic=dynamic([]), 
+      dvcaction:dynamic=dynamic([]), 
+      eventresult:string='*', 
+      disabled:bool=false)
+{
+  let src_or_any=set_union(srcipaddr_has_any_prefix, ipaddr_has_any_prefix); 
+  let dst_or_any=set_union(dstipaddr_has_any_prefix, ipaddr_has_any_prefix); 
+  DefenderIoTRawEvent
+  | where RawEventName == "NetworkConnectionData"
+  | where (isnull(starttime) or TimeGenerated>=starttime)
+    and (isnull(endtime) or TimeGenerated<=endtime)
+    and not(disabled)
+    and (array_length(dvcaction) == 0)
+    and (array_length(hostname_has_any) == 0)
+    and (eventresult in ("*","Success"))
+  | extend
+    DstIpAddr = tostring(EventDetails.Destination.IPAddress),
+    SrcIpAddr = tostring(EventDetails.Source.IPAddress)
+  | extend temp_SrcMatch=has_any_ipv4_prefix(SrcIpAddr,src_or_any)
+         , temp_DstMatch=has_any_ipv4_prefix(DstIpAddr,dst_or_any)
+  | extend ASimMatchingIpAddr=case(
+      array_length(src_or_any) == 0 and array_length(dst_or_any) == 0 ,"-",
+      temp_SrcMatch and temp_DstMatch, "Both",
+      temp_SrcMatch, "SrcIpAddr",
+      temp_DstMatch, "DstIpAddr",
+      "No match"
+    )
+  | where ASimMatchingIpAddr != "No match" 
+  | project-away temp_*
+  | extend
+    DstPortNumber = toint(EventDetails.Destination.Port)
+  | where (isnull(dstportnumber) or DstPortNumber==dstportnumber)
+  | project-rename 
+      DvcSubscriptionId = AzureSubscriptionId
+  | extend 
+      Dvc = tostring(EventDetails.SourceId),
+      DstDvcId = tostring(EventDetails.Destination.DeviceId),
+      DstMacAddr = tostring(EventDetails.Destination.MacAddress),
+      DstDescription = tostring(EventDetails.Destination.DeviceName),
+      SrcDvcId = tostring(EventDetails.Source.DeviceId),
+      SrcMacAddr = tostring(EventDetails.Source.MacAddress),
+      SrcPortNumber = toint(EventDetails.Source.Port),
+      SrcDescription = tostring(EventDetails.Source.DeviceName),
+      EventOriginalUid = tostring(EventDetails.Id),
+      EventEndTime = todatetime(EventDetails.LastSeen),
+      EventStartTime = todatetime(EventDetails.StartTime),
+      NetworkProtocol = tostring(EventDetails.TransportProtocol)
+  | extend
+      EventProduct = 'Defender for IoT',
+      EventResult = 'Success',
+      EventSchema = 'NetworkSession',
+      EventSchemaVersion='0.2.4',
+      EventCount = toint(1),
+      EventSeverity = 'Informational',
+      EventType = iff(DstIpAddr=='' and SrcIpAddr == '','L2NetworkSession','NetworkSession'),
+      NetworkDirection = iff(tobool(EventDetails.IsInternal), 'Local',''),
+      EventVendor = 'Microsoft',
+      DstDvcIdType = 'MD4IoTid',
+      SrcDvcIdType = 'MD4IoTid'
+  | extend // -- Aliases
+      Dst = coalesce(DstIpAddr,DstMacAddr),
+      Src = coalesce(SrcIpAddr,SrcMacAddr),
+      IpAddr = SrcIpAddr,
+      EventStartTime = EventEndTime
+  | project-away 
+      RawEventCategory, RawEventName, RawEventType, SourceSystem, TenantId, AgentVersion, IoTRawEventId, IsEmpty, AgentId, DeviceId, TimeStamp
+  | project-away EventDetails, AssociatedResourceId
+};
+parser (
+  starttime=starttime, 
+  endtime=endtime, 
+  srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, 
+  dstipaddr_has_any_prefix=dstipaddr_has_any_prefix, 
+  ipaddr_has_any_prefix=ipaddr_has_any_prefix, 
+  dstportnumber=dstportnumber, 
+  hostname_has_any=hostname_has_any, 
+  dvcaction=dvcaction,
+  eventresult=eventresult,
+  disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimNetworkSessionMicrosoft365Defender
+// Description: This ASIM parser supports filtering and normalizing M365 Defender for Endpoint to the ASIM Network Session schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimNetworkSessionMicrosoft365Defender(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dstipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['ipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dstportnumber']:int=int(null),
+    ['hostname_has_any']:dynamic=dynamic([]),
+    ['dvcaction']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=false)
+{
+let M365Defender=
+  (starttime:datetime=datetime(null)
+  , endtime:datetime=datetime(null)
+  , srcipaddr_has_any_prefix:dynamic=dynamic([])
+  , dstipaddr_has_any_prefix:dynamic=dynamic([])
+  , ipaddr_has_any_prefix:dynamic=dynamic([])
+  , dstportnumber:int=int(null)
+  , hostname_has_any:dynamic=dynamic([])
+  , dvcaction:dynamic=dynamic([])
+  , eventresult:string='*'
+  , disabled:bool=false
+ ){
+let DirectionLookup=datatable(ActionType:string,NetworkDirection:string,Outbound:boolean)[
+  'ConnectionSuccess','Outbound', true
+  ,'ConnectionFailed', 'Outbound', true
+  ,'ConnectionRequest','Outbound', true
+  ,'InboundConnectionAccepted', 'Inbound', false
+  ,'ConnectionFound', 'Unknown', false
+  ,'ListeningConnectionCreated', 'Listen', false 
+];
+let src_or_any=set_union(srcipaddr_has_any_prefix, ipaddr_has_any_prefix); 
+let dst_or_any=set_union(dstipaddr_has_any_prefix, ipaddr_has_any_prefix);  
+// -- Common preprocessing to both input and outbound events
+let RawNetworkEvents = (select_outbound:boolean) {
+  DeviceNetworkEvents 
+  | where    (isnull(starttime) or TimeGenerated>=starttime) 
+         and (isnull(endtime) or TimeGenerated<=endtime) 
+  | where not(disabled)
+  | lookup DirectionLookup on ActionType
+  | where Outbound == select_outbound
+  | project-away AppGuardContainerId, LocalIPType, MachineGroup, RemoteIPType, Timestamp // , SourceSystem, TenantId, 
+  // --  Pre-filtering
+  |where  (array_length(dvcaction)==0 )     /// if filtered by action return nothing
+         and (isnull(dstportnumber) or dstportnumber == LocalPort or dstportnumber == RemotePort)
+         and (array_length(hostname_has_any)==0 
+            or RemoteUrl has_any(hostname_has_any) or DeviceName has_any(hostname_has_any)
+            )
+  | extend temp_isSrcMatch=( // only one of each pair has_any_ipv4_prefix is calculated
+                  (Outbound and has_any_ipv4_prefix(LocalIP,src_or_any))
+                  or
+                  (not(Outbound) and has_any_ipv4_prefix(RemoteIP,src_or_any))
+                  ) 
+         , temp_isDstMatch=(
+                  (not(Outbound) and has_any_ipv4_prefix(LocalIP,dst_or_any))
+                  or
+                  (Outbound and has_any_ipv4_prefix(RemoteIP,dst_or_any))
+                  ) 
+  | extend ASimMatchingIpAddr = case(
+          array_length(src_or_any) == 0 and array_length(dst_or_any) == 0, "-" // match not requested: probably most common case
+          , (temp_isSrcMatch and temp_isDstMatch), "Both" // has to be checked before the individual 
+          , temp_isSrcMatch, "SrcIpAddr"
+          , temp_isDstMatch, "DstIpAddr"
+          , "No match"
+  ) 
+  | where ASimMatchingIpAddr != "No match"
+  | project-away temp_*
+  | extend EventResult = iff(ActionType=='ConnectionFailed','Failure','Success')
+  | where (eventresult=='*' or EventResult==eventresult)
+  // -- End of pre-filtering
+  | extend
+    // Event
+    EventOriginalUid = tostring(ReportId),
+    EventCount = int(1),
+    EventProduct = 'M365 Defender for Endpoint',
+    EventVendor = 'Microsoft',
+    EventSchema = 'NetworkSession',
+    EventSchemaVersion = '0.2.3',
+    EventStartTime = TimeGenerated,
+    EventEndTime = TimeGenerated,
+    EventType = 'NetworkSession',
+    EventSeverity = "Informational",
+    DvcIdType = 'MDEid'
+  | project-away 
+      ReportId, Outbound
+  | project-rename 
+      EventOriginalResultDetails = ActionType
+  | extend
+    RemoteUrl = extract (@"(?:https?://)?(.*)", 1, RemoteUrl)
+  | extend
+    User = iff (InitiatingProcessAccountDomain == '', InitiatingProcessAccountName, strcat(InitiatingProcessAccountDomain, '\\', InitiatingProcessAccountName)),
+    UsernameType = iff(InitiatingProcessAccountDomain == '','Simple', 'Windows'),
+    SplitHostname = split(DeviceName,"."),
+    SplitUrl = split(RemoteUrl,"."),
+    NetworkProtocol = case (
+      Protocol startswith "Tcp", "TCP",
+      Protocol == "Unknown", "",
+      toupper(Protocol)
+    )
+  | project-away Protocol
+  | extend  
+    DvcHostname = tostring(SplitHostname[0]),
+    DvcDomain = tostring(strcat_array(array_slice(SplitHostname, 1, -1), '.')),
+    DvcFQDN = iif (DeviceName contains ".", DeviceName, ""),
+    UrlHostname = tostring(SplitUrl[0]),
+    UrlDomain = tostring(strcat_array(array_slice(SplitUrl, 1, -1), '.')),
+    UrlFQDN = iif(RemoteUrl contains ".", RemoteUrl, "")
+  | project-away RemoteUrl, DeviceName
+  | extend
+    DvcDomainType = iif(DvcFQDN != "", "FQDN", ""),
+    UrlDomainType = iff(UrlFQDN != "", "FQDN", ""),
+    DvcIpAddr = LocalIP
+  | extend
+    Dvc = DvcHostname  
+  | project-rename
+    DvcId = DeviceId
+  | project-away SplitUrl, SplitHostname
+};
+let OutboundNetworkEvents = 
+  RawNetworkEvents (true)
+  // *************** Postfilterring *****************************************************************
+  | where (isnull(dstportnumber) or dstportnumber==RemotePort)
+  // *************** /Postfilterring *****************************************************************
+  | extend temp_isMatchSrcHostname=DvcHostname has_any(hostname_has_any)
+         , temp_isMatchDstHostname=UrlHostname has_any(hostname_has_any)
+  |extend ASimMatchingHostname = case(array_length(hostname_has_any) == 0 ,"-",
+                              temp_isMatchDstHostname and temp_isMatchSrcHostname, "Both",
+                              temp_isMatchDstHostname, "DstHostname",
+                              temp_isMatchSrcHostname, "SrcHostname",
+                                "No match"
+                            )
+  | project-away temp*
+  | where ASimMatchingHostname != "No match"
+  | project-rename
+     DstIpAddr = RemoteIP,
+     SrcIpAddr = LocalIP,
+     DstPortNumber = RemotePort,
+     SrcPortNumber = LocalPort,
+     SrcUsernameType = UsernameType,
+     SrcUserAadId = InitiatingProcessAccountObjectId,
+     SrcUserId = InitiatingProcessAccountSid,
+     SrcUserUpn = InitiatingProcessAccountUpn
+  | extend
+     SrcUsername = User,
+     SrcDvcId = DvcId,
+     SrcDvcIdType = 'MDEid',
+     SrcUserIdType = iff (SrcUserId <> "S-1-0-0", "SID", ""),
+     SrcUserId = iff (SrcUserId <> "S-1-0-0", SrcUserId, ""),
+     DstHostname = UrlHostname
+  | project-rename
+     DstDomain = UrlDomain,
+     DstFQDN = UrlFQDN,
+     DstDomainType = UrlDomainType
+  | extend  
+     SrcHostname = DvcHostname,
+     SrcDomain = DvcDomain,
+     SrcFQDN = DvcFQDN,
+     SrcDomainType = DvcDomainType
+  // Processes
+  | extend
+     SrcProcessId = tostring(InitiatingProcessId),
+     ParentProcessId = tostring(InitiatingProcessParentId)
+  | project-rename
+     SrcProcessName = InitiatingProcessFileName,
+     SrcProcessCommandLine = InitiatingProcessCommandLine,
+     SrcProcessCreationTime = InitiatingProcessCreationTime,
+     SrcProcessIntegrityLevel = InitiatingProcessIntegrityLevel,
+     SrcProcessTokenElevation = InitiatingProcessTokenElevation,
+     ParentProcessName = InitiatingProcessParentFileName,
+     ParentProcessCreationTime = InitiatingProcessParentCreationTime
+  | extend
+     Process = SrcProcessName,
+     ProcessId = SrcProcessId,
+     SrcAppName = SrcProcessName,
+     SrcAppType = "Process"
+;
+let InboundNetworkEvents = 
+  RawNetworkEvents (false)
+  // *************** Postfilterring *****************************************************************
+  | where (isnull(dstportnumber) or dstportnumber==LocalPort)
+  // *************** /Postfilterring *****************************************************************
+    |extend ASimMatchingHostname = case(array_length(hostname_has_any) == 0 ,"",
+                                UrlHostname has_any(hostname_has_any), "SrcHostname",
+                                DvcHostname has_any(hostname_has_any), "DstHostname",
+                                "No match"
+                            )
+  | where ASimMatchingHostname != "No match"
+  | project-rename
+     SrcIpAddr = RemoteIP,
+     DstIpAddr = LocalIP,
+     SrcPortNumber = RemotePort,
+     DstPortNumber = LocalPort,
+     DstUsernameType = UsernameType,
+     DstUserAadId = InitiatingProcessAccountObjectId,
+     DstUserId = InitiatingProcessAccountSid,
+     DstUserUpn = InitiatingProcessAccountUpn,
+     SrcDomain = UrlDomain,
+     SrcFQDN = UrlFQDN,
+     SrcDomainType = UrlDomainType
+  | extend
+     DstUsername = User,
+     DstDvcId = DvcId,
+     DstDvcIdType = 'MDEid',
+     DstUserIdType = 'SID',
+     SrcHostname = UrlHostname
+  | extend  
+     DstHostname = DvcHostname,
+     DstDomain = DvcDomain,
+     DstFQDN = DvcFQDN
+  // Processes
+  | extend
+     DstProcessId = tostring(InitiatingProcessId),
+     ParentProcessId = tostring(InitiatingProcessParentId)
+  | project-rename
+     DstProcessName = InitiatingProcessFileName,
+     DstProcessCommandLine = InitiatingProcessCommandLine,
+     DstProcessCreationTime = InitiatingProcessCreationTime,
+     DstProcessIntegrityLevel = InitiatingProcessIntegrityLevel,
+     DstProcessTokenElevation = InitiatingProcessTokenElevation,
+     ParentProcessName = InitiatingProcessParentFileName,
+     ParentProcessCreationTime = InitiatingProcessParentCreationTime
+  | extend
+     Process = DstProcessName,
+     DstAppName = DstProcessName,
+     DstAppType = "Process"
+;
+union InboundNetworkEvents, OutboundNetworkEvents
+| project-rename 
+   Hostname = UrlHostname
+| extend // aliases
+   IpAddr = SrcIpAddr,
+   Src = SrcIpAddr,
+   Dst = DstIpAddr 
+};
+M365Defender (starttime, endtime, srcipaddr_has_any_prefix, dstipaddr_has_any_prefix, ipaddr_has_any_prefix, dstportnumber, hostname_has_any, dvcaction, eventresult, disabled)
+}
+
+
+
+//
+// Function Name: vimNetworkSessionLinuxSysmon
+// Description: This ASIM parser supports filtering and normalizing Sysmon for Linux event 3 to the ASIM Network Session schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimNetworkSessionLinuxSysmon(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dstipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['ipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dstportnumber']:int=int(null),
+    ['hostname_has_any']:dynamic=dynamic([]),
+    ['dvcaction']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=false)
+{
+let src_or_any=set_union(srcipaddr_has_any_prefix, ipaddr_has_any_prefix); 
+let dst_or_any=set_union(dstipaddr_has_any_prefix, ipaddr_has_any_prefix); 
+let ip_any = set_union(srcipaddr_has_any_prefix, dstipaddr_has_any_prefix, ipaddr_has_any_prefix);    
+let DirectionNetworkEvents =
+    Syslog 
+    | where (isnull(starttime) or TimeGenerated>=starttime) 
+        and (isnull(endtime) or TimeGenerated<=endtime) 
+    | where not(disabled)
+    | project SyslogMessage, TimeGenerated, HostIP
+    | where SyslogMessage has_all ('<Provider Name="Linux-Sysmon"', '<EventID>3</EventID>')
+    // ***************  Prefilterring *****************************************************************
+    | where  
+             (eventresult=='*' or eventresult=='Success')
+        and (array_length(dvcaction) ==0  )     /// if filtered by action return nothing
+        and (array_length(ip_any)==0 
+              or has_any_ipv4_prefix(SyslogMessage,ip_any)
+            ) 
+       and (array_length(hostname_has_any)==0 
+              or SyslogMessage has_any(hostname_has_any)) 
+        and (isnull(dstportnumber) or SyslogMessage has (tostring(dstportnumber))) 
+    // *************** / Prefilterring ***************************************************************
+    | parse SyslogMessage with * '<Data Name="SourceIp">' SrcIpAddr:string '</Data>' *
+    | where (array_length(srcipaddr_has_any_prefix)==0 
+              or has_any_ipv4_prefix(SrcIpAddr,srcipaddr_has_any_prefix)
+            ) 
+    | extend outbound = (SrcIpAddr == HostIP or SrcIpAddr in ('127.0.0.1', '0.0.0.0'))
+;
+let parser = (T: (SyslogMessage: string)) {
+  T 
+  | parse SyslogMessage with 
+      *
+      '<EventRecordID>' EventOriginalUid:string '</EventRecordID>'
+      *
+      '<Computer>' SysmonComputer:string '</Computer>'
+      *
+      '<Data Name="RuleName">' RuleName:string '</Data>'
+      '<Data Name="UtcTime">' EventEndTime:datetime '</Data>'
+      '<Data Name="ProcessGuid">{' ProcessGuid:string '}</Data>'
+      '<Data Name="ProcessId">' ProcessId:string '</Data>'
+      '<Data Name="Image">' Process:string '</Data>'
+      '<Data Name="User">' User:string '</Data>'
+      '<Data Name="Protocol">' Protocol:string '</Data>' // -- source is lowercase
+      '<Data Name="Initiated">' Initiated:bool '</Data>' 
+      '<Data Name="SourceIsIpv6">' SourceIsIpv6:bool '</Data>'		
+      '<Data Name="SourceIp">' * '</Data>'
+      '<Data Name="SourceHostname">' SrcHostname:string '</Data>'
+      '<Data Name="SourcePort">' SrcPortNumber:int '</Data>'
+      '<Data Name="SourcePortName">' SrcPortName:string '</Data>'
+      '<Data Name="DestinationIsIpv6">' DestinationIsIpv6:bool '</Data>'
+      '<Data Name="DestinationIp">' DstIpAddr:string '</Data>'
+      '<Data Name="DestinationHostname">' DstHostname:string '</Data>'
+      '<Data Name="DestinationPort">' DstPortNumber:int '</Data>'
+      '<Data Name="DestinationPortName">' DstPortName:string '</Data>'
+      *
+    | project-away DstPortName, DestinationIsIpv6, Initiated, SourceIsIpv6, SrcPortName, RuleName
+};
+let OutboundNetworkEvents = 
+  DirectionNetworkEvents
+  | where outbound
+  | invoke parser ()
+  | extend 
+         temp_isSrcMatch=has_any_ipv4_prefix(SrcIpAddr,src_or_any) 
+       , temp_isDstMatch=has_any_ipv4_prefix(DstIpAddr,dst_or_any)
+| extend ASimMatchingIpAddr = case(
+        array_length(src_or_any) == 0 and array_length(dst_or_any) == 0, "-" // match not requested: probably most common case
+        , (temp_isSrcMatch and temp_isDstMatch), "Both" // has to be checked before the individual 
+        , temp_isSrcMatch, "SrcIpAddr"
+        , temp_isDstMatch, "DstIpAddr"
+        , "No match"
+)
+ | where ASimMatchingIpAddr != "No match"
+ | extend temp_isSrcHostMatch= (SrcHostname has_any (hostname_has_any))
+        , temp_isDstHostMatch = (DstHostname has_any (hostname_has_any))
+  | extend ASimMatchingHostname = case(
+        array_length(hostname_has_any) == 0, "-" // match not requested: probably most common case
+        , (temp_isSrcHostMatch and temp_isDstHostMatch), "Both" // has to be checked before the individual 
+        , temp_isSrcHostMatch, "SrcHostname"
+        , temp_isDstHostMatch, "DstHostname"
+        , "No match"
+)
+ | where ASimMatchingHostname != "No match"
+ | project-away temp_*
+ | extend
+    SrcUsernameType = 'Simple',
+    SrcUsername = User,
+    SrcAppType = 'Process'
+  | project-rename
+    SrcProcessId = ProcessId, 
+    SrcProcessGuid = ProcessGuid,
+    SrcProcessName = Process
+  | extend
+    SrcAppName = SrcProcessName
+  | project-away SyslogMessage
+;
+let InboundNetworkEvents = 
+    DirectionNetworkEvents
+    | where not(outbound)
+    | invoke parser ()
+    // *************** Postfilterring ***************************************************************
+    | where (array_length(hostname_has_any)==0 or DstHostname has_any (hostname_has_any)or SrcHostname has_any (hostname_has_any) )
+    and  (isnull(dstportnumber) or DstPortNumber ==dstportnumber)
+    // *************** Postfilterring ***************************************************************
+    | extend 
+        temp_isSrcMatch=has_any_ipv4_prefix(SrcIpAddr,src_or_any) 
+      , temp_isDstMatch=has_any_ipv4_prefix(DstIpAddr,dst_or_any)
+    | extend ASimMatchingIpAddr = case(
+      array_length(src_or_any) == 0 and array_length(dst_or_any) == 0, "-" // match not requested: probably most common case
+      , (temp_isSrcMatch and temp_isDstMatch), "Both" // has to be checked before the individual 
+      , temp_isSrcMatch, "SrcIpAddr"
+      , temp_isDstMatch, "DstIpAddr"
+      , "No match"
+  )
+  | project-away temp_*
+  | where ASimMatchingIpAddr != "No match"
+  | extend
+    DstUsernameType = 'Simple',
+    DstAppType = 'Process' 
+  | project-rename
+    DstUsername = User,
+    DstProcessId = ProcessId, 
+    DstProcessGuid = ProcessGuid,
+    DstProcessName = Process
+  | extend
+    DstAppName = DstProcessName
+  | project-away SyslogMessage
+;
+let SysmonForLinuxNetwork=
+    union OutboundNetworkEvents, InboundNetworkEvents
+    | extend 
+        EventType = 'NetworkSession',
+        EventStartTime = EventEndTime,
+        EventCount = int(1),
+        EventVendor = 'Microsoft',
+        EventSchemaVersion = '0.2.3',
+        EventSchema = 'NetworkSession', 
+        EventProduct = 'Sysmon for Linux',
+        EventResult = 'Success',
+        EventSeverity = 'Informational',
+        DvcOs = 'Linux',
+        NetworkProtocol = toupper(Protocol),
+        NetworkDirection = iff(outbound, "Outbound", "Inbound"),
+        EventOriginalType = '3' // Set with a constant value to avoid parsing
+    | project-away outbound, Protocol
+    | project-rename 
+        DvcIpAddr = HostIP,
+        DvcHostname = SysmonComputer
+    | extend // aliases
+        Dvc = DvcHostname,
+        Hostname = DstHostname,
+        IpAddr = SrcIpAddr,
+        Src = SrcIpAddr,
+        Dst = DstIpAddr
+;
+SysmonForLinuxNetwork
+}
+
+
+
+//
+// Function Name: vimNetworkSessionMicrosoftSecurityEventFirewall
+// Description: This ASIM parser supports normalizing Microsoft Windows Firewall Events logs ingested in 'SecurityEvent' table to the ASIM Network Session schema. Event IDs which are parsed as part of this parser: 5150, 5151, 5152, 5153, 5154, 5155, 5156, 5167, 5158, 5159
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimNetworkSessionMicrosoftSecurityEventFirewall(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dstipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['ipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dstportnumber']:int=int(null),
+    ['hostname_has_any']:dynamic=dynamic([]),
+    ['dvcaction']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=false)
+{
+let LayerCodeTable = datatable (LayerCode:string,LayerName:string)[
+  '%%14596', 'IP Packet',
+  '%%14597', 'Transport',
+  '%%14598', 'Forward',
+  '%%14599', 'Stream',
+  '%%14600', 'Datagram Data',
+  '%%14601', 'ICMP Error',
+  '%%14602', 'MAC 802.3',
+  '%%14603', 'MAC Native',
+  '%%14604', 'vSwitch',
+  '%%14608', 'Resource Assignment',
+  '%%14609', 'Listen',
+  '%%14610', 'Receive/Accept',
+  '%%14611', 'Connect',
+  '%%14612', 'Flow Established',
+  '%%14614', 'Resource Release',
+  '%%14615', 'Endpoint Closure',
+  '%%14616', 'Connect Redirect',
+  '%%14617', 'Bind Redirect',
+  '%%14624', 'Stream Packet'];
+let ProtocolTable = datatable (Protocol:int, NetworkProtocol: string)[
+  1, 'ICMP',
+  3, 'GGP',
+  6, 'TCP',
+  8, 'EGP',
+  12, 'PUP',
+  17, 'UDP',
+  20, 'HMP',
+  27, 'RDP',
+  46, 'RSVP',
+  47, 'PPTP data over GRE',
+  50, 'ESP',
+  51, 'AH',
+  66, 'RVD',
+  88, 'IGMP',
+  89, 'OSPF'];
+let Directions = datatable (DirectionCode:string,NetworkDirection:string, isOutBound:bool)[
+  '%%14592', 'Inbound', false,
+  '%%14593', 'Outbound', true,
+  '%%14594', 'Forward',false,
+  '%%14595', 'Bidirectional', false,
+  '%%14609', 'Listen', false];
+///////////////////////////////////////////////////////
+// this query extract data fields from EventData column from SecurityEvent table
+///////////////////////////////////////////////////////
+let parser = (starttime:datetime=datetime(null), endtime:datetime=datetime(null)
+, srcipaddr_has_any_prefix:dynamic=dynamic([]), dstipaddr_has_any_prefix:dynamic=dynamic([]), ipaddr_has_any_prefix:dynamic=dynamic([]),dstportnumber:int=int(null)
+, hostname_has_any:dynamic=dynamic([]), dvcaction:dynamic=dynamic([]),eventresult:string='*', disabled:bool=false
+) {   
+    let src_or_any=set_union(srcipaddr_has_any_prefix, ipaddr_has_any_prefix); 
+    let dst_or_any=set_union(dstipaddr_has_any_prefix, ipaddr_has_any_prefix); 
+    let ip_any =set_union(srcipaddr_has_any_prefix, dstipaddr_has_any_prefix, ipaddr_has_any_prefix);
+    let SecurityEventProjected =
+      SecurityEvent
+      | project EventID, EventData, Computer, TimeGenerated, _ResourceId, _SubscriptionId, Type
+    ;
+    // Event IDs between (5151 .. 5159)
+    // will be extracting Event specific fields from 'EventData' field
+    let SecurityEvent_5152 = 
+      SecurityEventProjected 
+      | where not(disabled)
+      | where (isnull(starttime) or TimeGenerated>=starttime)
+        and  (isnull(endtime) or TimeGenerated<=endtime)
+      | where EventID==5152
+      // ***************  Prefilterring *****************************************************************
+      |where  (isnull(dstportnumber) or EventData has tostring(dstportnumber) ) 
+        and  (array_length(ip_any)==0 
+              or has_any_ipv4_prefix(EventData ,ip_any)
+              ) 
+        and (array_length(dvcaction)==0 or (dvcaction=='Deny') ) 
+        and (array_length(hostname_has_any)==0 )
+        and (eventresult=='*' or eventresult=='Failure')
+        // *************** / Prefilterring *****************************************************************
+      | extend EventResult =  "Failure"
+        | parse EventData with * 
+            '<Data Name="ProcessId">'ProcessId:string'</Data>'
+            '\x0d\x0a  <Data Name="Application">'Application'</Data>'
+            '\x0d\x0a  <Data Name="Direction">'DirectionCode'</Data>'
+            '\x0d\x0a  <Data Name="SourceAddress">'SrcIpAddr:string'</Data>'
+            '\x0d\x0a  <Data Name="SourcePort">'SrcPortNumber:int'</Data>'
+            '\x0d\x0a  <Data Name="DestAddress">'DstIpAddr'</Data>'
+            '\x0d\x0a  <Data Name="DestPort">'DstPortNumber:int'</Data>'
+            '\x0d\x0a  <Data Name="Protocol">'Protocol:int'</Data>'
+            '\x0d\x0a  <Data Name="FilterRTID">'NetworkRuleNumber:int'</Data>'
+            '\x0d\x0a  <Data Name="LayerName">'LayerCode'</Data>'
+            '\x0d\x0a  <Data Name="LayerRTID">'LayerRTID'</Data>'*
+        | extend temp_isSrcMatch=has_any_ipv4_prefix(SrcIpAddr,src_or_any)
+        , temp_isDstMatch=has_any_ipv4_prefix(DstIpAddr,dst_or_any)
+        | extend ASimMatchingIpAddr = case(
+          array_length(src_or_any) == 0 and array_length(dst_or_any) == 0, "-" // match not requested: probably most common case
+          , (temp_isSrcMatch and temp_isDstMatch), "Both" // has to be checked before the individual 
+          , temp_isSrcMatch, "SrcIpAddr"
+          , temp_isDstMatch, "DstIpAddr"
+          , "No match"
+          )
+        | where ASimMatchingIpAddr != "No match"
+        | project-away temp_*, EventData
+      ;
+    let SecurityEvent_5154_5155_5158_5159 =
+    SecurityEventProjected 
+      | where not(disabled)
+      | where (isnull(starttime) or TimeGenerated>=starttime)
+          and  (isnull(endtime) or TimeGenerated<=endtime)
+        | where EventID in (5154, 5155, 5158, 5159)
+        // ***************  Prefilterring *****************************************************************
+        |where   (array_length(dstipaddr_has_any_prefix)==0 ) 
+          and  (array_length(hostname_has_any)==0 ) 
+          and  (isnull(dstportnumber) ) 
+          and  (array_length(ip_any)==0 
+                or has_any_ipv4_prefix(EventData ,ip_any)
+              ) 
+          and (array_length(dvcaction)==0 
+              or (dvcaction=='Allow' and EventID in  (5154,5158))  
+              or (dvcaction=='Deny'  and EventID !in (5154,5158))
+              ) 
+        | extend EventResult = iff(EventID in (5154, 5158), "Success", "Failure")
+        | where (eventresult=='*' or EventResult==eventresult)
+        // *************** / Prefilterring *****************************************************************
+        | parse EventData with * '<Data Name="ProcessId">'ProcessId:string'</Data>' 
+            '\x0d\x0a  <Data Name="Application">'Application:string'</Data>'
+            '\x0d\x0a  <Data Name="SourceAddress">'SrcIpAddr:string'</Data>'
+            '\x0d\x0a  <Data Name="SourcePort">'SrcPortNumber:int'</Data>'
+            '\x0d\x0a  <Data Name="Protocol">'Protocol:int'</Data>'
+            '\x0d\x0a  <Data Name="FilterRTID">'NetworkRuleNumber:int'</Data>'
+            '\x0d\x0a  <Data Name="LayerName">'LayerCode'</Data>'
+            '\x0d\x0a  <Data Name="LayerRTID">'LayerRTID'</Data>'*
+        | extend DirectionCode = "%%14609"
+        | extend temp_isSrcMatch=has_any_ipv4_prefix(SrcIpAddr,src_or_any)
+          , temp_isDstMatch=false
+        | extend ASimMatchingIpAddr = case(
+            array_length(src_or_any) == 0 and array_length(dst_or_any) == 0, "-" // match not requested: probably most common case
+          , (temp_isSrcMatch and temp_isDstMatch), "Both" // has to be checked before the individual 
+          , temp_isSrcMatch, "SrcIpAddr"
+          , temp_isDstMatch, "DstIpAddr"
+          , "No match"
+          )
+        | where ASimMatchingIpAddr != "No match"
+        | project-away temp_* , EventData
+        ;
+    let SecurityEvent_5156_5157 =
+        SecurityEventProjected
+        | where not(disabled) 
+        | where (isnull(starttime) or TimeGenerated>=starttime)
+          and  (isnull(endtime) or TimeGenerated<=endtime)
+        | where EventID in (5156, 5157)
+        | extend EventResult = iff(EventID == 5156, "Success", "Failure")
+        // ***************  Prefilterring *****************************************************************
+        | where (isnull(starttime) or TimeGenerated>=starttime)
+          and  (isnull(endtime) or TimeGenerated<=endtime)
+                      and  (array_length(ip_any)==0 
+                or has_any_ipv4_prefix(EventData ,ip_any)
+              ) 
+          and  (isnull(dstportnumber) or EventData has tostring(dstportnumber) ) 
+          and (array_length(dvcaction)==0 
+              or (dvcaction=='Allow' and EventID == 5156)  
+              or (dvcaction=='Deny'  and EventID <> 5156)
+              )
+          and (array_length(hostname_has_any)==0 )
+          and (eventresult=='*' or EventResult==eventresult) 
+        // *************** / Prefilterring *****************************************************************
+        | parse EventData with * '<Data Name="ProcessID">'ProcessId:string'</Data>'
+            '\x0d\x0a  <Data Name="Application">'Application:string'</Data>'
+            '\x0d\x0a  <Data Name="Direction">'DirectionCode:string'</Data>'
+            '\x0d\x0a  <Data Name="SourceAddress">'SrcIpAddr:string'</Data>'
+            '\x0d\x0a  <Data Name="SourcePort">'SrcPortNumber:int'</Data>'
+            '\x0d\x0a  <Data Name="DestAddress">'DstIpAddr:string'</Data>'
+            '\x0d\x0a  <Data Name="DestPort">'DstPortNumber:int'</Data>'
+            '\x0d\x0a  <Data Name="Protocol">'Protocol:int'</Data>'
+            '\x0d\x0a  <Data Name="FilterRTID">'NetworkRuleNumber:int'</Data>'
+            '\x0d\x0a  <Data Name="LayerName">'LayerCode'</Data>'
+            '\x0d\x0a  <Data Name="LayerRTID">'LayerRTID'</Data>'
+            '\x0d\x0a  <Data Name="RemoteUserID">'RemoteUserID:string'</Data>'
+            '\x0d\x0a  <Data Name="RemoteMachineID">'RemoteMachineID:string'</Data>'*
+            | project-away EventData
+            | extend temp_isSrcMatch=has_any_ipv4_prefix(SrcIpAddr,src_or_any), temp_isDstMatch=has_any_ipv4_prefix(DstIpAddr,dst_or_any)
+            | extend ASimMatchingIpAddr = case(
+            array_length(src_or_any) == 0 and array_length(dst_or_any) == 0, "-" // match not requested: probably most common case
+            , (temp_isSrcMatch and temp_isDstMatch), "Both" // has to be checked before the individual 
+            , temp_isSrcMatch, "SrcIpAddr"
+            , temp_isDstMatch, "DstIpAddr"
+            , "No match"
+            )
+          | where ASimMatchingIpAddr != "No match"
+          | project-away temp_*
+        ;
+    union SecurityEvent_5154_5155_5158_5159, SecurityEvent_5156_5157, SecurityEvent_5152
+    | lookup Directions on DirectionCode
+    | project-rename DvcHostname = Computer
+    | extend
+          SrcAppName = iff(isOutBound, Application, ""),
+          DstAppName = iff(not(isOutBound), Application, ""),
+          SrcDvcId = iff(isOutBound, RemoteMachineID, ""),
+          DstDvcId = iff(not(isOutBound), RemoteMachineID, ""),
+          SrcProcessId =  iff(isOutBound, tostring(ProcessId), ""),
+          DstProcessId =  iff(not(isOutBound), tostring(ProcessId), ""),
+          DstUserId = iff(isOutBound, RemoteUserID, ""),
+          SrcUserId = iff(not(isOutBound), RemoteUserID, ""),
+          DstHostname = iff(isOutBound, "", DvcHostname),
+          SrcHostname = iff(isOutBound, DvcHostname, "")
+        | project-away Application, RemoteMachineID, ProcessId, RemoteUserID
+          // *************** Postfilterring *****************************************************************
+        | where  (isnull(dstportnumber) or DstPortNumber == dstportnumber )
+        // *************** / Postfilterring *****************************************************************
+        | extend 
+            DvcAction = iff(EventID in (5154, 5156, 5158), "Allow", "Deny"),
+            DvcOs = 'Windows',
+            DstAppType = "Process",
+            SrcUserIdType = iff (SrcUserId <> "S-1-0-0", "SID", ""),
+            SrcUserId = iff (SrcUserId <> "S-1-0-0", SrcUserId, ""),
+            DstUserIdType = iff (DstUserId <> "S-1-0-0", "SID", ""),
+            DstUserId = iff (DstUserId <> "S-1-0-0", DstUserId, ""),
+            SrcAppType = "Process",
+            EventType = "NetworkSession",
+            EventSchema = "NetworkSession",
+            EventSchemaVersion="0.2.3",
+            EventCount=toint(1),
+            EventVendor = "Microsoft",
+            EventProduct = "Windows Firewall",
+            EventStartTime = TimeGenerated,
+            EventEndTime = TimeGenerated,
+            EventSeverity = iff(EventID  in (5154, 5156, 5158), "Informational", "Low")
+    // -- Aliases
+    | extend 
+        Dvc = DvcHostname,
+        Hostname = DvcHostname,
+        IpAddr = SrcIpAddr,
+        Src = SrcIpAddr,
+        Dst = DstIpAddr,
+        Rule = tostring(NetworkRuleNumber),
+        DstDvcIdType = iff (DstDvcId != "", "SID", ""),
+        SrcDvcIdType = iff (SrcDvcId != "", "SID", "")
+    | lookup LayerCodeTable on LayerCode
+    | lookup ProtocolTable on Protocol
+    | project-away LayerCode, DirectionCode, Protocol, isOutBound, LayerName, EventID, LayerRTID,_ResourceId,_SubscriptionId
+    };
+    parser(starttime = datetime(null),endtime = datetime(null),srcipaddr_has_any_prefix = dynamic([]),dstipaddr_has_any_prefix = dynamic([]),ipaddr_has_any_prefix = dynamic([]),dstportnumber = int(null),hostname_has_any = dynamic([]),dvcaction = dynamic([]),eventresult = '*',disabled = false)
+}
+
+
+
+//
+// Function Name: vimNetworkSessionMicrosoftSysmon
+// Description: This ASIM parser supports normalizing Sysmon network session events (event 3) collected using the Event or WEF (WindowsEvent table) connectors logs ingested in 'Event' table to the ASIM Process Event normalized schema. 
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimNetworkSessionMicrosoftSysmon(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dstipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['ipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dstportnumber']:int=int(null),
+    ['dvcaction']:dynamic=dynamic([]),
+    ['hostname_has_any']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=false)
+{
+let parser = (
+starttime: datetime=datetime(null), 
+endtime: datetime=datetime(null), 
+srcipaddr_has_any_prefix: dynamic=dynamic([]), 
+dstipaddr_has_any_prefix: dynamic=dynamic([]), 
+ipaddr_has_any_prefix: dynamic=dynamic([]),
+dstportnumber: int=int(null), 
+hostname_has_any: dynamic=dynamic([]), 
+dvcaction: dynamic=dynamic([]), 
+eventresult: string='*', 
+disabled: bool=false
+) {
+let src_or_any=set_union(srcipaddr_has_any_prefix, ipaddr_has_any_prefix); 
+let dst_or_any=set_union(dstipaddr_has_any_prefix, ipaddr_has_any_prefix); 
+let ip_any =set_union(srcipaddr_has_any_prefix, dstipaddr_has_any_prefix, ipaddr_has_any_prefix);
+let Sysmon3_Event=Event
+    | where (isnull(starttime) or TimeGenerated >= starttime)
+        and (isnull(endtime) or TimeGenerated <= endtime)
+    | where not(disabled)
+    // -- Pre-filtering:
+    | where (eventresult == '*' or eventresult == 'Success')
+        and array_length(dvcaction) == 0
+    // dstportnumber filter used later in the parser
+    // hostname_has_any used later in the parser 
+    // -- End pre-filtering
+    | where Source == "Microsoft-Windows-Sysmon" and EventID == 3
+    | parse-kv EventData as (
+        SourceIp: string,
+        DestinationIp: string,
+        SourceHostname: string,
+        DestinationHostname: string,
+        Initiated: bool,  // Initiated indicates the process initiated a connection (meaning outbound)
+        RuleName: string,
+        UtcTime: datetime,
+        ProcessGuid: string,
+        ProcessId: string,
+        Image: string,
+        User: string,
+        Protocol: string,
+        SourceIsIpv6: bool,
+        SourcePort: int,
+        SourcePortName: string,
+        DestinationIsIpv6: bool,
+        DestinationPort: int,
+        DestinationPortName: string
+        )
+        with (regex=@'<Data Name="(\w+)">{?([^>]*?)}?</Data>')
+    | where (array_length(ip_any) == 0 
+        or has_any_ipv4_prefix(EventData, ip_any)
+        ) 
+        and (isnull(dstportnumber)) or dstportnumber == DestinationPort
+        and (array_length(hostname_has_any) == 0) or SourceHostname has_any (hostname_has_any) or DestinationHostname has_any (hostname_has_any)
+    | extend
+        temp_isSrcMatch=has_any_ipv4_prefix(SourceIp, src_or_any)
+        ,
+        temp_isDstMatch=has_any_ipv4_prefix(DestinationIp, dst_or_any)
+    | extend ASimMatchingIpAddr = case(
+                              array_length(src_or_any) == 0 and array_length(dst_or_any) == 0,
+                              "-" // match not requested: probably most common case
+        ,
+                              (temp_isSrcMatch and temp_isDstMatch),
+                              "Both" // has to be checked before the individual 
+        ,
+                              temp_isSrcMatch,
+                              "SrcIpAddr"
+        ,
+                              temp_isDstMatch,
+                              "DstIpAddr"
+        ,
+                              "No match"
+                          )
+    | where ASimMatchingIpAddr != "No match"
+    | project-away EventData
+    | project-rename
+        SrcHostname = SourceHostname,
+        DstHostname = DestinationHostname
+    | project-away
+        Source,
+        EventLog,
+        EventCategory,
+        UserName,
+        Message,
+        ParameterXml,
+        RenderedDescription,
+        MG,
+        AzureDeploymentID,
+        Role; 
+Sysmon3_Event
+| extend
+    AppName = tostring(split(Image, "\\")[-1])
+| extend
+    SrcUsernameType = iff(not(Initiated), "Windows", ""),
+    SrcUsername = iff(not(Initiated), tostring(User), ""),
+    SrcProcessId = iff(not(Initiated), tostring(ProcessId), ""),
+    SrcProcessGuid = iff(not(Initiated), ProcessGuid, ""),
+    SrcProcessName = iff(not(Initiated), tostring(Image), ""),
+    SrcAppName = iff(not(Initiated), AppName, ""),
+    SrcAppType = iff(not(Initiated), 'Process', ""),
+    DstUsernameType = iff(Initiated, "Windows", ""),
+    DstUsername = iff(Initiated, tostring(User), ""),
+    DstProcessId = iff(Initiated, tostring(ProcessId), ""),
+    DstProcessGuid = iff(Initiated, ProcessGuid, ""),
+    DstProcessName = iff(Initiated, tostring(Image), ""),
+    DstAppName = iff(Initiated, AppName, ""),
+    DstAppType = iff(Initiated, 'Process', "")
+| project-away ProcessId, ProcessGuid, Image, AppName
+| project-rename 
+    EventStartTime = UtcTime,
+    Dvc = Computer,
+    SrcIpAddr = SourceIp,
+    DstIpAddr  = DestinationIp,
+    DstPortNumber = DestinationPort,
+    SrcPortNumber = SourcePort,
+    NetworkRuleName = RuleName
+| extend 
+    EventEndTime = EventStartTime,
+    Hostname = case(
+           Initiated,
+           DstHostname,
+           not(Initiated),
+           SrcHostname,
+           Dvc
+       ),
+    Src = SrcIpAddr,
+    Dst = DstIpAddr,
+    DvcIpAddr = iff(Initiated, SrcIpAddr, DstIpAddr),
+    IpAddr = SrcIpAddr,
+    EventType = 'EndpointNetworkSession',
+    EventCount = int(1),
+    EventVendor = 'Microsoft',
+    EventSchemaVersion = '0.2.5',
+    EventSchema = 'NetworkSession', 
+    EventProduct = 'Sysmon',
+    EventResult = 'Success',
+    EventSeverity = 'Informational',
+    DvcOs = 'Windows',
+    Protocol = toupper(Protocol),
+    EventOriginalType = '3' // Set with a constant value to avoid parsing   
+| extend
+    DvcHostname = Hostname
+| extend
+    SrcHostname = iff(SrcHostname == "-", "", SrcHostname),
+    DvcHostname = iff(DvcHostname == "-", "", DvcHostname),
+    DstHostname = iff(DstHostname == "-", "", DstHostname) // let's make empty values actually empty
+| project-rename
+    TmpSrcHostname = SrcHostname,
+    TmpDvcHostname = DvcHostname,
+    TmpDstHostname = DstHostname
+| invoke 
+    _ASIM_ResolveSrcFQDN('TmpSrcHostname')
+| invoke 
+    _ASIM_ResolveDvcFQDN('TmpDvcHostname')
+| invoke 
+    _ASIM_ResolveDstFQDN('TmpDstHostname')
+| project-away
+    TmpSrcHostname,
+    TmpDvcHostname,
+    TmpDstHostname
+| extend                         
+    NetworkProtocolVersion = iff((DestinationIsIpv6) or (SourceIsIpv6), "IPV6", "IPV4"),
+    NetworkProtocol = toupper(Protocol)
+| project-away 
+    Destination*,
+    Initiated,
+    ManagementGroupName,
+    TenantId,
+    Protocol,
+    Source*,
+    EventID,
+    EventLevelName,
+    EventLevel,
+    _ResourceId
+};
+  parser (starttime, endtime, srcipaddr_has_any_prefix, dstipaddr_has_any_prefix, ipaddr_has_any_prefix,dstportnumber, hostname_has_any, dvcaction, eventresult, disabled)
+}
+
+
+
+//
+// Function Name: vimNetworkSessionMicrosoftSysmonWindowsEvent
+// Description: This ASIM parser supports normalizing Sysmon network session events (event 3) collected using the Event or WEF (WindowsEvent table) connectors logs ingested in 'WindowsEvent' table to the ASIM Process Event normalized schema. 
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimNetworkSessionMicrosoftSysmonWindowsEvent(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dstipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['ipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['dstportnumber']:int=int(null),
+    ['dvcaction']:dynamic=dynamic([]),
+    ['hostname_has_any']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=false)
+{
+let parser = (
+starttime: datetime=datetime(null), 
+endtime: datetime=datetime(null), 
+srcipaddr_has_any_prefix: dynamic=dynamic([]), 
+dstipaddr_has_any_prefix: dynamic=dynamic([]), 
+ipaddr_has_any_prefix: dynamic=dynamic([]),
+dstportnumber: int=int(null), 
+hostname_has_any: dynamic=dynamic([]), 
+dvcaction: dynamic=dynamic([]), 
+eventresult: string='*', 
+disabled: bool=false
+) {
+let src_or_any=set_union(srcipaddr_has_any_prefix, ipaddr_has_any_prefix); 
+let dst_or_any=set_union(dstipaddr_has_any_prefix, ipaddr_has_any_prefix); 
+let ip_any =set_union(srcipaddr_has_any_prefix, dstipaddr_has_any_prefix, ipaddr_has_any_prefix);
+let Sysmon3_WindowsEvent=WindowsEvent
+    | where not(disabled) 
+    | where (isnull(starttime) or TimeGenerated >= starttime) 
+      and (isnull(endtime) or TimeGenerated <= endtime)
+    // -- Pre-filtering:
+    | where (eventresult == '*' or eventresult == 'Success') 
+        and array_length(dvcaction) == 0
+        // dstportnumber filter used later in the parser
+        // hostname_has_any used later in the parser 
+    // -- End pre-filtering
+    | where Provider == "Microsoft-Windows-Sysmon" and EventID == 3
+    | extend
+        SourceIp = tostring(EventData.SourceIp),
+        DestinationIp = tostring(EventData.DestinationIp),
+        DstHostname = tostring(EventData.DestinationHostname),
+        SrcHostname = tostring(EventData.SrcHostname),
+        RuleName = tostring(EventData.RuleName),
+        UtcTime = todatetime(EventData.UtcTime),
+        ProcessId = tostring(EventData.ProcessId),
+        Image = tostring(EventData.Image),
+        User = tostring(EventData.User),
+        Protocol = tostring(EventData.Protocol),
+        Initiated = tobool(EventData.Initiated), // Initiated indicates the process initiated a connection (meaning outbound)
+        SourceIsIpv6 = tobool(EventData.SourceIsIpv6),
+        SourcePort = toint(EventData.SourcePort),
+        SourcePortName = tostring(EventData.SourcePortName),
+        DestinationIsIpv6 = tobool(EventData.DestinationIsIpv6),
+        DestinationPort = toint(EventData.DestinationPort),
+        DestinationPortName = tostring(EventData.DestinationPortName)
+    | where (array_length(ip_any) == 0 
+        or has_any_ipv4_prefix(EventData, ip_any)
+        ) 
+        and (isnull(dstportnumber)) or dstportnumber == DestinationPort
+        and (array_length(hostname_has_any) == 0) or SrcHostname has_any (hostname_has_any) or DstHostname has_any (hostname_has_any)
+    | extend
+        temp_isSrcMatch=has_any_ipv4_prefix(SourceIp, src_or_any)
+        ,
+        temp_isDstMatch=has_any_ipv4_prefix(DestinationIp, dst_or_any)
+    | extend ASimMatchingIpAddr = case(
+                              array_length(src_or_any) == 0 and array_length(dst_or_any) == 0,
+                              "-" // match not requested: probably most common case
+        ,
+                              (temp_isSrcMatch and temp_isDstMatch),
+                              "Both" // has to be checked before the individual 
+        ,
+                              temp_isSrcMatch,
+                              "SrcIpAddr"
+        ,
+                              temp_isDstMatch,
+                              "DstIpAddr"
+        ,
+                              "No match"
+                          )
+    | where ASimMatchingIpAddr != "No match"
+    | parse EventData.ProcessGuid with "{" ProcessGuid "}"
+    | project-away EventData
+    | project-away
+        Provider,
+        Channel,
+        Task,
+        Data,
+        RawEventData,
+        EventOriginId;
+Sysmon3_WindowsEvent
+| extend
+    AppName = tostring(split(Image, "\\")[-1])
+| extend
+    SrcUsernameType = iff(not(Initiated), "Windows", ""),
+    SrcUsername = iff(not(Initiated), tostring(User), ""),
+    SrcProcessId = iff(not(Initiated), tostring(ProcessId), ""),
+    SrcProcessGuid = iff(not(Initiated), ProcessGuid, ""),
+    SrcProcessName = iff(not(Initiated), tostring(Image), ""),
+    SrcAppName = iff(not(Initiated), AppName, ""),
+    SrcAppType = iff(not(Initiated), 'Process', ""),
+    DstUsernameType = iff(Initiated, "Windows", ""),
+    DstUsername = iff(Initiated, tostring(User), ""),
+    DstProcessId = iff(Initiated, tostring(ProcessId), ""),
+    DstProcessGuid = iff(Initiated, ProcessGuid, ""),
+    DstProcessName = iff(Initiated, tostring(Image), ""),
+    DstAppName = iff(Initiated, AppName, ""),
+    DstAppType = iff(Initiated, 'Process', "")
+| project-away ProcessId, ProcessGuid, Image, AppName
+| project-rename 
+    EventStartTime = UtcTime,
+    Dvc = Computer,
+    SrcIpAddr = SourceIp,
+    DstIpAddr  = DestinationIp,
+    DstPortNumber = DestinationPort,
+    SrcPortNumber = SourcePort,
+    NetworkRuleName = RuleName 
+| extend 
+    EventEndTime = EventStartTime,
+    Hostname = case(
+           Initiated,
+           DstHostname,
+           not(Initiated),
+           SrcHostname,
+           Dvc
+       ),
+    Src = SrcIpAddr,
+    Dst = DstIpAddr,
+    DvcIpAddr = iff(Initiated, SrcIpAddr, DstIpAddr),
+    IpAddr = SrcIpAddr,
+    EventType = 'EndpointNetworkSession',
+    EventCount = int(1),
+    EventVendor = 'Microsoft',
+    EventSchemaVersion = '0.2.5',
+    EventSchema = 'NetworkSession', 
+    EventProduct = 'Sysmon',
+    EventResult = 'Success',
+    EventSeverity = 'Informational',
+    DvcOs = 'Windows',
+    Protocol = toupper(Protocol),
+    EventOriginalType = '3' // Set with a constant value to avoid parsing   
+| extend
+    DvcHostname = Hostname
+| extend
+    SrcHostname = iff(SrcHostname == "-", "", SrcHostname),
+    DvcHostname = iff(DvcHostname == "-", "", DvcHostname),
+    DstHostname = iff(DstHostname == "-", "", DstHostname) // let's make empty values actually empty
+| project-rename
+    TmpSrcHostname = SrcHostname,
+    TmpDvcHostname = DvcHostname,
+    TmpDstHostname = DstHostname
+| invoke 
+    _ASIM_ResolveSrcFQDN('TmpSrcHostname')
+| invoke 
+    _ASIM_ResolveDvcFQDN('TmpDvcHostname')
+| invoke 
+    _ASIM_ResolveDstFQDN('TmpDstHostname')
+| project-away
+    TmpSrcHostname,
+    TmpDvcHostname,
+    TmpDstHostname
+| extend                         
+    NetworkProtocolVersion = iff((DestinationIsIpv6) or (SourceIsIpv6), "IPV6", "IPV4"),
+    NetworkProtocol = toupper(Protocol)
+| project-away 
+    Destination*,
+    Initiated,
+    ManagementGroupName,
+    TenantId,
+    Protocol,
+    Source*,
+    EventID,
+    EventLevelName,
+    EventLevel,
+    Correlation,
+    EventRecordId,
+    Keywords,
+    Opcode,
+    SystemProcessId,
+    SystemThreadId,
+    SystemUserId,
+    TimeCreated,
+    _ResourceId,
+    Version
+};
+  parser (starttime, endtime, srcipaddr_has_any_prefix, dstipaddr_has_any_prefix, ipaddr_has_any_prefix,dstportnumber, hostname_has_any, dvcaction, eventresult, disabled)
+}
+
+
+

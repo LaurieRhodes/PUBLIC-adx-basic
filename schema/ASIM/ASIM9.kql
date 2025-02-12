@@ -1,0 +1,3034 @@
+//
+// Function Name: vimAuthenticationSentinelOne
+// Description: This ASIM parser supports normalizing SentinelOne logs to the ASIM Authentication normalized schema. SentinelOne events are captured through SentinelOne data connector which ingests SentinelOne server objects such as Threats, Agents, Applications, Activities, Policies, Groups, and more events into Microsoft Sentinel through the REST API.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimAuthenticationSentinelOne(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['username_has_any']:dynamic=dynamic([]),
+    ['targetappname_has_any']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False)
+{
+let EventResultDetailsLookup = datatable (comments_s: string, EventResultDetails: string)
+[
+"invalid 2FA code", "Incorrect password",
+"IP/User mismatch", "No such user or password",
+"invalid password", "Incorrect password",
+"user temporarily locked 2FA attempt", "User locked",
+"no active site", "Other"
+];
+let EventFieldsLookup = datatable (
+    activityType_d: real,
+    EventType: string,
+    EventResult: string,
+    EventOriginalResultDetails: string
+)
+    [
+    27, "Logon", "Success", "User Logged In",
+    33, "Logoff", "Success", "User Logged Out",
+    133, "Logon", "Failure", "Existing User Login Failure",
+    134, "Logon", "Failure", "Unknown User Login",
+    139, "Logon", "Failure", "User Failed to Start an Unrestricted Session",
+    3629, "Logon", "Success", "Login Using Saved 2FA Recovery Code"
+];
+let EventTypeLookup = datatable (alertInfo_eventType_s: string, EventType: string)
+    [
+    "WINLOGONATTEMPT", "Logon",
+    "WINLOGOFFATTEMPT", "Logoff"
+];
+let EventSubTypeLookup = datatable (alertInfo_loginType_s: string, EventSubType: string)
+    [
+    "BATCH", "System",
+    "CACHED_INTERACTIVE", "Interactive",
+    "CACHED_REMOTE_INTERACTIVE", "RemoteInteractive",
+    "CACHED_UNLOCK", "System",
+    "INTERACTIVE", "Interactive",
+    "NETWORK_CLEAR_TEXT", "Remote",
+    "NETWORK_CREDENTIALS", "Remote",
+    "NETWORK", "Remote",
+    "REMOTE_INTERACTIVE", "RemoteInteractive",
+    "SERVICE", "Service",
+    "SYSTEM", "System",
+    "UNLOCK", "System"
+];
+let DeviceTypeLookup = datatable (
+    agentDetectionInfo_machineType_s: string,
+    SrcDeviceType: string
+)
+    [
+    "desktop", "Computer",
+    "server", "Computer",
+    "laptop", "Computer",
+    "kubernetes node", "Other",
+    "unknown", "Other"
+];
+let ThreatConfidenceLookup_undefined = datatable(
+    alertInfo_analystVerdict_s: string,
+    ThreatConfidence_undefined: int
+)
+    [
+    "FALSE_POSITIVE", 5,
+    "Undefined", 15,
+    "SUSPICIOUS", 25,
+    "TRUE_POSITIVE", 33
+];
+let ThreatConfidenceLookup_suspicious = datatable(
+    alertInfo_analystVerdict_s: string,
+    ThreatConfidence_suspicious: int
+)
+    [
+    "FALSE_POSITIVE", 40,
+    "Undefined", 50,
+    "SUSPICIOUS", 60,
+    "TRUE_POSITIVE", 67 
+];
+let ThreatConfidenceLookup_malicious = datatable(
+    alertInfo_analystVerdict_s: string,
+    ThreatConfidence_malicious: int
+)
+    [
+    "FALSE_POSITIVE", 75,
+    "Undefined", 80,
+    "SUSPICIOUS", 90,
+    "TRUE_POSITIVE", 100
+];
+let TargetUserTypesList = dynamic(["Regular", "Machine", "Admin", "System", "Application", "Service Principal", "Service", "Anonymous"]);
+let parser=(
+starttime: datetime=datetime(null), 
+endtime: datetime=datetime(null), 
+username_has_any: dynamic = dynamic([]),
+targetappname_has_any: dynamic = dynamic([]),
+srcipaddr_has_any_prefix: dynamic = dynamic([]),
+srchostname_has_any: dynamic = dynamic([]),
+eventtype_in: dynamic = dynamic([]),
+eventresultdetails_in: dynamic = dynamic([]),
+eventresult: string = '*',
+disabled: bool=false
+) {
+let alldata = SentinelOne_CL
+    | where not(disabled)
+        and (isnull(starttime) or TimeGenerated >= starttime)
+        and (isnull(endtime) or TimeGenerated <= endtime)
+        and ((array_length(username_has_any) == 0) or DataFields_s has_any (username_has_any))
+        and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+        and ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(DataFields_s, srcipaddr_has_any_prefix)))
+        and ((array_length(srchostname_has_any) == 0) or (alertInfo_loginAccountDomain_s has_any (srchostname_has_any)))
+// Filtering for eventtype_in done later in the parser
+// Filtering for eventresultdetails_in done later in the parser
+// Filtering for eventresult done later in the parser
+;
+let activitydata = alldata
+    | where event_name_s == "Activities."
+        and activityType_d in (27, 33, 133, 134, 139, 3629)
+    | parse-kv DataFields_s as (ipAddress: string, username: string, userScope: string, accountName: string, fullScopeDetails: string, fullScopeDetailsPath: string, role: string, scopeLevel: string, source: string, sourceType: string) with (pair_delimiter=",", kv_delimiter=":", quote='"')
+    | lookup EventFieldsLookup on activityType_d
+    | lookup EventResultDetailsLookup on comments_s
+    // Filtering on eventtype_in, eventresultdetails_in and eventresult
+    | where (array_length(eventtype_in) == 0 or EventType has_any (eventtype_in))
+        and (array_length(eventresultdetails_in) == 0 or EventResultDetails has_any (eventresultdetails_in))
+        and (eventresult == '*' or EventResult has eventresult)
+    | extend 
+        SrcIpAddr = iff(ipAddress == "null", "", ipAddress),
+        EventOriginalType = tostring(toint(activityType_d)),
+        TargetUsername = username,
+        TargetUserScope = userScope,
+        AdditionalFields = bag_pack(
+                   "accountName",
+                   accountName,
+                   "fullScopeDetails",
+                   fullScopeDetails,
+                   "fullScopeDetailsPath",
+                   fullScopeDetailsPath,
+                   "scopeLevel",
+                   scopeLevel,
+                   "source",
+                   source,
+                   "sourceType",
+                   sourceType
+               ),
+        TargetOriginalUserType = role,
+        TargetUserType = case(
+                 role in (TargetUserTypesList),
+                 role,
+                 role == "null",
+                 "",
+                 "Other"
+             )
+    // Post-filtering on srcipaddr_has_any_prefix and username_has_any
+    | where ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(SrcIpAddr, srcipaddr_has_any_prefix)))
+        and ((array_length(username_has_any) == 0) or DataFields_s has_any (username_has_any))
+    | project-rename
+        EventStartTime = createdAt_t,
+        TargetUserId = userId_s,
+        EventOriginalUid = activityUuid_g,
+        EventMessage = primaryDescription_s
+    | extend TargetUserIdType = iff(isnotempty(TargetUserId), "Other", "");
+let alertdata = alldata
+    | where event_name_s == "Alerts."
+        and alertInfo_eventType_s in ("WINLOGONATTEMPT", "WINLOGOFFATTEMPT")
+        and array_length(eventresultdetails_in) == 0 // EventResultDetails not available in this event
+        and ((array_length(username_has_any) == 0) or alertInfo_loginsUserName_s has_any (username_has_any))
+        and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+        and (array_length(srcipaddr_has_any_prefix) == 0 or has_any_ipv4_prefix(alertInfo_srcMachineIp_s, srcipaddr_has_any_prefix))
+        and ((array_length(srchostname_has_any) == 0) or (alertInfo_loginAccountDomain_s has_any (srchostname_has_any)))
+    | lookup EventTypeLookup on alertInfo_eventType_s
+    // Filtering on eventtype_in
+    | where (array_length(eventtype_in) == 0 or EventType has_any (eventtype_in))
+    | lookup EventSubTypeLookup on alertInfo_loginType_s
+    | lookup DeviceTypeLookup on agentDetectionInfo_machineType_s
+    | extend EventResult = iff(alertInfo_loginIsSuccessful_s == "true", "Success", "Failure")
+    // Filtering on eventresult
+    | where (eventresult == '*' or EventResult has eventresult);
+let undefineddata = alertdata
+    | where ruleInfo_treatAsThreat_s == "UNDEFINED"
+    | lookup ThreatConfidenceLookup_undefined on alertInfo_analystVerdict_s;
+let suspiciousdata = alertdata
+    | where ruleInfo_treatAsThreat_s == "Suspicious"
+    | lookup ThreatConfidenceLookup_suspicious on alertInfo_analystVerdict_s;
+let maliciousdata = alertdata
+    | where ruleInfo_treatAsThreat_s == "Malicious"
+    | lookup ThreatConfidenceLookup_malicious on alertInfo_analystVerdict_s;
+let alertdatawiththreatfield = union undefineddata, suspiciousdata, maliciousdata
+    | invoke _ASIM_ResolveDvcFQDN('agentDetectionInfo_name_s')
+    | invoke _ASIM_ResolveSrcFQDN('alertInfo_loginAccountDomain_s')
+    // Post-filtering on srchostname_has_any
+    | where ((array_length(srchostname_has_any) == 0) or (SrcHostname has_any (srchostname_has_any)))
+    | extend
+        EventSeverity = iff(ruleInfo_severity_s == "Critical", "High", ruleInfo_severity_s),
+        ThreatConfidence = coalesce(ThreatConfidence_undefined, ThreatConfidence_suspicious, ThreatConfidence_malicious)
+    | project-rename
+        EventStartTime = alertInfo_createdAt_t,
+        SrcIpAddr = alertInfo_srcMachineIp_s,
+        ActingAppName = sourceProcessInfo_name_s,
+        DvcId = agentDetectionInfo_uuid_g,
+        DvcOs = agentDetectionInfo_osName_s,
+        DvcOsVersion = agentDetectionInfo_osRevision_s,
+        EventOriginalSeverity = ruleInfo_severity_s,
+        EventOriginalType = alertInfo_eventType_s,
+        EventOriginalSubType = alertInfo_loginType_s,
+        RuleName = ruleInfo_name_s,
+        TargetUserId = alertInfo_loginAccountSid_s,
+        TargetUsername = alertInfo_loginsUserName_s,
+        ThreatOriginalConfidence = ruleInfo_treatAsThreat_s
+    | extend
+        Rule = RuleName,
+        ActingAppType = iff(isnotempty(ActingAppName), "Process", ""),
+        DvcIdType = iff(isnotempty(DvcId), "Other", ""),
+        TargetUserType = _ASIM_GetUserType(TargetUsername, TargetUserId),
+        TargetUserIdType = iff(isnotempty(TargetUserId), "SID", "");
+union activitydata, alertdatawiththreatfield
+// mapping ASimMatchingUsername
+| extend temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+// ActorUsername not coming from source. Hence, not mapped.
+| extend ASimMatchingUsername = case
+    (
+                                array_length(username_has_any) == 0,
+                                "-",
+                                temp_isMatchTargetUsername,
+                                "TargetUsername",
+                                "No match"
+                            )
+| extend
+    EventCount = int(1),
+    EventProduct = "SentinelOne",
+    EventSchemaVersion = "0.1.3",
+    EventVendor = "SentinelOne",
+    EventSchema = "Authentication"
+| extend
+    Dvc = coalesce(DvcHostname, EventProduct),
+    EventEndTime = EventStartTime,
+    EventUid = _ItemId,
+    User = TargetUsername
+| extend
+    IpAddr = SrcIpAddr,
+    Src = SrcIpAddr
+| project-away
+    *_b,
+    *_d,
+    *_g,
+    *_s,
+    *_t,
+    ipAddress,
+    username,
+    accountName,
+    fullScopeDetails,
+    fullScopeDetailsPath,
+    role,
+    scopeLevel,
+    source,
+    sourceType,
+    userScope,
+    Computer,
+    MG,
+    ManagementGroupName,
+    RawData,
+    SourceSystem,
+    TenantId,
+    _ItemId,
+    _ResourceId,
+    ThreatConfidence_*
+};
+parser(
+  starttime=starttime,
+  endtime=endtime,
+  username_has_any=username_has_any,
+  targetappname_has_any=targetappname_has_any,
+  srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+  srchostname_has_any=srchostname_has_any,
+  eventtype_in=eventtype_in,
+  eventresultdetails_in=eventresultdetails_in,
+  eventresult=eventresult,
+  disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimAuthenticationSshd
+// Description: This ASIM parser supports filtering and normalizing OpenSSH server (sshd) sign in logs, collected using Syslog to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimAuthenticationSshd(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['username_has_any']:dynamic=dynamic([]),
+    ['targetappname_has_any']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False)
+{
+let parser = (
+  starttime: datetime=datetime(null), 
+  endtime: datetime=datetime(null), 
+  username_has_any: dynamic = dynamic([]),
+  targetappname_has_any: dynamic = dynamic([]),
+  srcipaddr_has_any_prefix: dynamic = dynamic([]),
+  srchostname_has_any: dynamic = dynamic([]),
+  eventtype_in: dynamic = dynamic([]),
+  eventresultdetails_in: dynamic = dynamic([]),
+  eventresult: string = '*',
+  disabled: bool=false
+  )
+{
+    let prefilter = (T: (SyslogMessage: string, TimeGenerated: datetime))
+{
+    T
+        | where 
+            (isnull(starttime) or TimeGenerated >= starttime) 
+            and (isnull(endtime) or TimeGenerated <= endtime)
+            and ((array_length(username_has_any) == 0) or SyslogMessage has_any (username_has_any))
+            and ((array_length(targetappname_has_any) == 0) or 'sshd' in~ (targetappname_has_any))
+            and ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(SyslogMessage, srcipaddr_has_any_prefix)))
+            and (array_length(srchostname_has_any) == 0) // SrcHostname not available in source
+            and ((array_length(eventtype_in) == 0) or "Logon" in~ (eventtype_in) or "Logoff" in~ (eventtype_in))
+// eventresultdetails_in filtering done later in the parser
+// eventresult filtering done later in the parser
+};
+    let SyslogProjects = Syslog
+        | project
+            TimeGenerated,
+            Computer,
+            SyslogMessage,
+            ProcessName,
+            ProcessID,
+            HostIP,
+            Type,
+            _ItemId,
+            _ResourceId,
+            _SubscriptionId;
+    //
+    // -- Successful login
+    let SSHDAccepted=(disabled: bool=false)
+{ 
+    // -- Parse events with the format "Accepted password for <User> from <IP address> port <port> ssh2"
+    SyslogProjects
+        | where not(disabled)
+        | where ProcessName == "sshd" and SyslogMessage startswith 'Accepted'
+        | invoke prefilter()
+        | parse SyslogMessage with "Accepted password for " TargetUsername: string " from " SrcIpAddr: string " port" SrcPortNumber: int *
+        | extend
+            EventResult     = 'Success'
+            ,
+            EventSeverity = 'Informational'
+            ,
+            EventType     = 'Logon'
+            ,
+            EventCount    = int(1)
+        | project-away SyslogMessage, ProcessName
+};
+    //
+    // -- Failed login - incorrect password
+    let SSHDFailed=(disabled: bool=false)
+{
+    // -- Parse events with the format Failed (password|none|publickey) for <User> from <IP address> port <port> ssh2[: RSA <cipher>:<key>]"
+    // -- Or a number of such events message repeated <n> times: [ <message> ]
+    SyslogProjects
+        | where not(disabled)
+        | where ProcessName == "sshd" and (
+            SyslogMessage startswith 'Failed' 
+            or (SyslogMessage startswith 'message repeated' and SyslogMessage has 'Failed')
+            )
+        | invoke prefilter()
+        | parse SyslogMessage with * "Failed " * " for " TargetUsername: string " from " SrcIpAddr: string " port" SrcPortNumber: int *
+        | parse SyslogMessage with "message repeated" EventCount: int " times:" * 
+        | extend
+            EventResult          = 'Failure'
+            ,
+            EventSeverity      = 'Low' 
+            ,
+            EventType          = 'Logon'
+            ,
+            LogonMethod        = iff (SyslogMessage has 'publickey', 'PKI', 'Username & password')
+            ,
+            EventResultDetails = iff (SyslogMessage has 'publickey', 'Incorrect key', 'Incorrect password')
+            ,
+            EventCount         = toint(coalesce(EventCount, 1))
+        | project-away SyslogMessage, ProcessName
+};
+    //
+    // -- Logoff - Timeout
+    let SSHDTimeout=(disabled: bool=false)
+{
+    // -- Parse events with the format "Timeout, client not responding from user yanivsh 131.107.174.198 port 7623"
+    SyslogProjects
+        | where not(disabled)
+        | where ProcessName == "sshd" and SyslogMessage startswith 'Timeout'
+        | invoke prefilter()
+        | parse-where SyslogMessage with * "user " TargetUsername: string " " SrcIpAddr: string " port " SrcPortNumber: int
+        | extend
+            EventSeverity    = 'Informational'
+            ,
+            EventType      = 'Logoff'
+            ,
+            EventResult    = 'Success'
+            ,
+            EventCount     = int(1)
+        | project-away SyslogMessage, ProcessName
+};
+    //
+    // -- Failed login - invalid user
+    let SSHDInvalidUser=(disabled: bool=false)
+{
+    // -- Parse events with the format "Invalid user [<User>] from <IP address> port <port>"
+    SyslogProjects
+        | where not(disabled)
+        | where ProcessName == "sshd" and SyslogMessage startswith 'Invalid user'
+        | invoke prefilter()
+        | parse SyslogMessage with "Invalid user " TargetUsername: string " from " SrcIpAddr: string " port " SrcPortNumber: int
+        | parse SyslogMessage with "Invalid user  from " SrcIpAddrNoUser: string " port " SrcPortNumberNoUser: int
+        | extend
+            EventResult             = 'Failure'
+            ,
+            EventSeverity         = 'Low'
+            ,
+            EventType             = 'Logon'
+            ,
+            EventResultDetails    = 'No such user'
+            ,
+            EventCount            = int(1)
+            ,
+            SrcIpAddr             = coalesce(SrcIpAddr, SrcIpAddrNoUser)
+            ,
+            SrcPortNumber         = coalesce(SrcPortNumber, SrcPortNumberNoUser)
+        | project-away SyslogMessage, ProcessName, SrcIpAddrNoUser, SrcPortNumberNoUser
+};
+    //
+    // -- Blocked intrusion attempts
+    let SSHDABreakInAttemptMappingFailed=(disabled: bool=false)
+{
+    // -- Parse events with the format "reverse mapping checking getaddrinfo for <host> [<Ip address>] failed - POSSIBLE BREAK-IN ATTEMPT!"
+    SyslogProjects
+        | where not(disabled)
+        | where ProcessName == "sshd" and SyslogMessage startswith "reverse mapping checking getaddrinfo for"
+        | invoke prefilter()
+        | parse SyslogMessage with * " for " Src " [" SrcIpAddr "]" *
+        | invoke _ASIM_ResolveSrcFQDN ('Src')
+        | extend
+            EventResult             = 'Failure'
+            ,
+            EventType             = 'Logon'
+            ,
+            DvcAction             = 'Block'
+            ,
+            TargetUsername        = ''
+            ,
+            EventSeverity         = 'Medium'
+            ,
+            EventCount            = int(1)
+            ,
+            EventResultDetails    = 'Logon violates policy'
+            ,
+            RuleName              = "Reverse mapping failed"
+        | extend
+            Rule = RuleName
+        | project-away SyslogMessage, ProcessName, Src
+};
+    let SSHDABreakInAttemptMappingMismatch=(disabled: bool=false)
+{
+    // -- Parse events with the format "Address 61.70.128.48 maps to host-61-70-128-48.static.kbtelecom.net, but this does not map back to the address - POSSIBLE BREAK-IN ATTEMPT!"
+    SyslogProjects
+        | where not(disabled)
+        | where ProcessName == "sshd" and SyslogMessage has "but this does not map back to the address"
+        | invoke prefilter()
+        | parse SyslogMessage with "Address " SrcIpAddr: string " maps to " Src: string ", but this" *
+        | invoke _ASIM_ResolveSrcFQDN ('Src')
+        | extend
+            EventResult          = 'Failure'
+            ,
+            EventType          = 'Logon'
+            ,
+            DvcAction          = 'Block'
+            ,
+            TargetUsername     = ''
+            ,
+            EventSeverity      = 'Medium'
+            ,
+            EventCount         = int(1)
+            ,
+            EventResultDetails = 'Logon violates policy'
+            ,
+            RuleName = "Address to host to address mapping does not map back to address"
+        | extend
+            Rule = RuleName
+        | project-away SyslogMessage, ProcessName, Src
+};
+    let SSHDABreakInAttemptNastyPtr=(disabled: bool=false)
+{
+    // -- Parse events with the format "Nasty PTR record "<RR>" is set up for <IP Address>, ignoring"
+    SyslogProjects
+        | where not(disabled)
+        | where ProcessName == "sshd" and SyslogMessage startswith "Nasty PTR record"
+        | invoke prefilter()
+        | parse SyslogMessage with * "set up for " SrcIpAddr: string ", ignoring"
+        | extend
+            EventResult          = 'Failure'
+            ,
+            EventType          = 'Logon'
+            ,
+            DvcAction          = 'Block'
+            ,
+            TargetUsername     = ''
+            ,
+            EventSeverity      = 'Medium'
+            ,
+            EventCount         = int(1)
+            ,
+            EventResultDetails = 'Logon violates policy'
+            ,
+            RuleName = "Nasty PTR record set for IP Address"
+        | extend
+            Rule = RuleName
+        | project-away SyslogMessage, ProcessName
+};
+    union isfuzzy=false 
+        SSHDAccepted (disabled=disabled)
+        ,
+        SSHDFailed (disabled=disabled)
+        ,
+        SSHDInvalidUser (disabled=disabled)
+        ,
+        SSHDTimeout (disabled=disabled)
+        ,
+        SSHDABreakInAttemptMappingFailed (disabled=disabled)
+        ,
+        SSHDABreakInAttemptMappingMismatch (disabled=disabled)
+        ,
+        SSHDABreakInAttemptNastyPtr (disabled=disabled)
+    // Post-filtering
+    | where ((array_length(username_has_any) == 0) or TargetUsername has_any (username_has_any))
+        and ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(SrcIpAddr, srcipaddr_has_any_prefix)))
+        and ((array_length(eventtype_in) == 0) or EventType in~ (eventtype_in))
+        and (array_length(eventresultdetails_in) == 0 or EventResultDetails in~ (eventresultdetails_in))
+        and (eventresult == "*" or (EventResult == eventresult))
+    // mapping ASimMatchingUsername
+    | extend temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+    // ActorUsername not coming from source. Hence, not mapped.
+    | extend ASimMatchingUsername = case
+                                (
+                                    array_length(username_has_any) == 0,
+                                    "-",
+                                    temp_isMatchTargetUsername,
+                                    "TargetUsername",
+                                    "No match"
+                                )
+    | invoke _ASIM_ResolveDvcFQDN ('Computer')
+    | extend 
+        EventVendor             = 'OpenBSD'
+        ,
+        EventProduct          = 'OpenSSH'
+        ,
+        DvcOs                 = 'Linux'
+        ,
+        TargetDvcOs           = 'Linux'
+        ,
+        LogonProtocol         = 'ssh'
+        ,
+        TargetAppName         = 'sshd'
+        ,
+        TargetAppType         = 'Service'
+        ,
+        EventSubType          = 'Remote'
+        ,
+        EventSchema           = 'Authentication'
+        ,
+        EventSchemaVersion    = '0.1.2'
+        ,
+        EventStartTime        = TimeGenerated
+        ,
+        EventEndTime          = TimeGenerated
+        ,
+        TargetUsernameType    = 'Simple'
+        ,
+        DvcIdType             = iff (isnotempty(_ResourceId), "AzureResourceId", "")
+        ,
+        TargetAppId           = tostring(ProcessID)
+    | project-away Computer, ProcessID, temp*
+    | project-rename 
+        EventUid                = _ItemId
+        ,
+        DvcScopeId            = _SubscriptionId
+        ,
+        DvcId                 = _ResourceId
+        ,
+        DvcIpAddr             = HostIP
+    //
+    // -- Aliases
+    | extend
+        User                    = TargetUsername
+        ,
+        Dvc                   = DvcHostname
+        ,
+        Dst                   = coalesce (DvcFQDN, DvcHostname, DvcIpAddr)
+        ,
+        TargetDomain          = DvcDomain
+        ,
+        TargetFQDN            = DvcFQDN
+        ,
+        TargetDomainType      = DvcDomainType
+        ,
+        TargetHostname        = DvcHostname
+        ,
+        TargetDvcId           = DvcId
+        ,
+        TargetDvcScopeId      = DvcScopeId
+        ,
+        TargetDvcIdType       = DvcDomainType
+        ,
+        IpAddr                = DvcIpAddr
+        ,
+        TargetIpAddr          = DvcIpAddr
+};
+  parser
+  (
+  starttime=starttime,
+  endtime=endtime,
+  username_has_any=username_has_any,
+  targetappname_has_any=targetappname_has_any,
+  srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+  srchostname_has_any=srchostname_has_any,
+  eventtype_in=eventtype_in,
+  eventresultdetails_in=eventresultdetails_in,
+  eventresult=eventresult,
+  disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimAuthenticationSu
+// Description: This ASIM parser supports filtering and normalizing Linux su elevation commands collected using Syslog to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimAuthenticationSu(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['username_has_any']:dynamic=dynamic([]),
+    ['targetappname_has_any']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False)
+{
+let parser = (
+  starttime: datetime=datetime(null), 
+  endtime: datetime=datetime(null), 
+  username_has_any: dynamic = dynamic([]),
+  targetappname_has_any: dynamic = dynamic([]),
+  srcipaddr_has_any_prefix: dynamic = dynamic([]),
+  srchostname_has_any: dynamic = dynamic([]),
+  eventtype_in: dynamic = dynamic([]),
+  eventresultdetails_in: dynamic = dynamic([]),
+  eventresult: string = '*',
+  disabled: bool=false
+  )
+{
+    let prefilter = (T: (SyslogMessage: string, TimeGenerated: datetime))
+{
+    T
+        | where 
+            (isnull(starttime) or TimeGenerated >= starttime) 
+            and (isnull(endtime) or TimeGenerated <= endtime)
+            and ((array_length(username_has_any) == 0) or SyslogMessage has_any (username_has_any))
+            and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+            and (array_length(srcipaddr_has_any_prefix) == 0) // SrcIpAddr not available in source
+            and (array_length(srchostname_has_any) == 0) // SrcHostname not available in source
+            and ((array_length(eventtype_in) == 0) or ('Logoff' in~ (eventtype_in)) or ('Elevation' in~ (eventtype_in)))
+            and (array_length(eventresultdetails_in) == 0) // EventResultDetails not available in source
+            and (eventresult == "*" or (eventresult == "Success"))
+};
+    let SyslogProjects = Syslog
+        | project
+            TimeGenerated,
+            Computer,
+            SyslogMessage,
+            ProcessName,
+            ProcessID,
+            HostIP,
+            Type,
+            _ItemId,
+            _ResourceId,
+            _SubscriptionId;
+    //
+    // -- Sucessful SU
+    // Parses the event "Successful su for <user> by <user>"
+    let SuSignInAuthorized=(disabled: bool=false)
+{
+    SyslogProjects 
+        | where not(disabled)
+        | where ProcessName == "su" and SyslogMessage startswith "Successful su for"
+        | invoke prefilter()
+        | parse SyslogMessage with * "for " TargetUsername: string " by " ActorUsername: string
+        | extend
+            EventType = 'Elevation'
+        | project-away SyslogMessage, ProcessName
+};
+    // 
+    // -- SU end
+    // Parsers the event "pam_unix(su[-l]:session): session closed for user <user>"
+    let SuDisconnect=(disabled: bool=false)
+{
+    SyslogProjects 
+        | where not(disabled)
+        | where ProcessName == "su" and SyslogMessage has_all ('pam_unix(su', 'session): session closed for user')
+        | invoke prefilter()
+        | parse SyslogMessage with * "for user " TargetUsername: string
+        | extend
+            EventType = 'Logoff'
+        | project-away SyslogMessage, ProcessName
+};
+    union isfuzzy=false 
+        SuSignInAuthorized (disabled = disabled)
+        ,
+        SuDisconnect(disabled = disabled)
+    // Post-filtering
+    | where ((array_length(username_has_any) == 0) or (TargetUsername has_any (username_has_any)) or (ActorUsername has_any (username_has_any)))
+        and (array_length(eventtype_in) == 0 or EventType in~ (eventtype_in))
+    // mapping ASimMatchingUsername
+    | extend
+        temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+        ,
+        temp_isMatchActorUsername=ActorUsername has_any(username_has_any)
+    | extend ASimMatchingUsername = case
+                                (
+                                    array_length(username_has_any) == 0,
+                                    "-",
+                                    temp_isMatchTargetUsername and temp_isMatchActorUsername,
+                                    "Both",
+                                    temp_isMatchTargetUsername,
+                                    "TargetUsername",
+                                    temp_isMatchActorUsername,
+                                    "ActorUsername",
+                                    "No match"
+                                )
+    | invoke _ASIM_ResolveDvcFQDN ('Computer')
+    | extend
+        EventVendor             = 'Linux'
+        ,
+        EventProduct          = 'su'
+        ,
+        DvcOs                 = 'Linux'
+        ,
+        TargetDvcOs           = 'Linux'
+        ,
+        EventCount            = int(1)
+        ,
+        EventSchema           = 'Authentication'
+        ,
+        EventSchemaVersion    = '0.1.2'
+        ,
+        EventResult           = 'Success'
+        ,
+        EventStartTime        = TimeGenerated
+        ,
+        EventEndTime          = TimeGenerated
+        ,
+        ActorUsernameType     = 'Simple'
+        ,
+        TargetUsernameType    = 'Simple'
+        ,
+        EventSeverity         = 'Informational'
+        ,
+        ActingAppType         = 'Process'
+        ,
+        DvcIdType             = iff (isnotempty(_ResourceId), "AzureResourceId", "")
+        ,
+        ActingAppId           = tostring(ProcessID)
+    | project-away Computer, ProcessID, temp*
+    | project-rename 
+        EventUid                = _ItemId
+        ,
+        DvcScopeId            = _SubscriptionId
+        ,
+        DvcId                 = _ResourceId
+        ,
+        DvcIpAddr             = HostIP
+    //
+    // -- Aliases
+    | extend
+        User                    = TargetUsername
+        ,
+        Dvc                   = DvcHostname
+        ,
+        Dst                   = coalesce (DvcFQDN, DvcHostname, DvcIpAddr)
+        ,
+        TargetDomain          = DvcDomain
+        ,
+        TargetFQDN            = DvcFQDN
+        ,
+        TargetDomainType      = DvcDomainType
+        ,
+        TargetHostname        = DvcHostname
+        ,
+        TargetDvcId           = DvcId
+        ,
+        TargetDvcScopeId      = DvcScopeId
+        ,
+        TargetDvcIdType       = DvcDomainType
+        ,
+        IpAddr                = DvcIpAddr
+        ,
+        TargetIpAddr          = DvcIpAddr
+};
+parser (
+  starttime=starttime,
+  endtime=endtime,
+  username_has_any=username_has_any,
+  targetappname_has_any=targetappname_has_any,
+  srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+  srchostname_has_any=srchostname_has_any,
+  eventtype_in=eventtype_in,
+  eventresultdetails_in=eventresultdetails_in,
+  eventresult=eventresult,
+  disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimAuthenticationSudo
+// Description: This ASIM parser supports normalizing Syslog sudo sign in logs to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimAuthenticationSudo(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['username_has_any']:dynamic=dynamic([]),
+    ['targetappname_has_any']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False)
+{
+let SudoSignInAuthorized=(
+  starttime: datetime=datetime(null), 
+  endtime: datetime=datetime(null), 
+  username_has_any: dynamic = dynamic([]),
+  targetappname_has_any: dynamic = dynamic([]),
+  srcipaddr_has_any_prefix: dynamic = dynamic([]),
+  srchostname_has_any: dynamic = dynamic([]),
+  eventtype_in: dynamic = dynamic([]),
+  eventresultdetails_in: dynamic = dynamic([]),
+  eventresult: string = '*',
+  disabled: bool=false
+  ) {
+  Syslog 
+  | where not(disabled)
+  | where ProcessName == "sudo" and 
+      SyslogMessage has 'TTY=' and 
+      SyslogMessage has 'USER=' and
+      SyslogMessage has 'COMMAND='
+      and (isnull(starttime) or TimeGenerated >= starttime)
+      and (isnull(endtime) or TimeGenerated <= endtime)
+      and ((array_length(username_has_any) == 0) or SyslogMessage has_any (username_has_any))
+      and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+      and ((array_length(srcipaddr_has_any_prefix) == 0)) // SrcIpAddr not available in source
+      and (array_length(srchostname_has_any) == 0) // SrcHostname not available in source
+      and ((array_length(eventtype_in) == 0) or "Logon" in~ (eventtype_in))
+      and (array_length(eventresultdetails_in) == 0 or 'Other' in~ (eventresultdetails_in))
+      and (eventresult == "*" or ('Success' == eventresult))
+  | parse-kv SyslogMessage as (TTY: string, PWD: string, USER: string, COMMAND: string) with (pair_delimiter=' ', kv_delimiter='=')
+  | project-rename TargetUsername = USER
+  | extend
+      EventVendor                 = 'Linux',
+      EventProduct                = 'sudo',
+      EventCount                  = int(1),
+      EventSchema                 = 'Authentication',
+      EventSchemaVersion          = '0.1.1',
+      EventResult                 = 'Success',
+      EventStartTime              = TimeGenerated,
+      EventEndTime                = TimeGenerated,
+      EventType                   = 'Logon',
+      DvcHostname                 = Computer,
+      ActorUsernameType           = 'Simple',
+      ActorUsername               = extract(@'^(.*?):', 1, SyslogMessage),
+      TargetUsernameType          = 'Simple',
+      EventResultDetails          = 'Other',
+      EventOriginalRestultDetails = 'Connection authorized'
+  // Post-filtering on username_has_any
+  | where ((array_length(username_has_any) == 0) or (TargetUsername has_any (username_has_any)) or (ActorUsername has_any (username_has_any)))
+  // mapping ASimMatchingUsername
+  | extend
+      temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+      ,
+      temp_isMatchActorUsername=ActorUsername has_any(username_has_any)
+  | extend ASimMatchingUsername = case
+      (
+                                  array_length(username_has_any) == 0,
+                                  "-",
+                                  temp_isMatchTargetUsername and temp_isMatchActorUsername,
+                                  "Both",
+                                  temp_isMatchTargetUsername,
+                                  "TargetUsername",
+                                  temp_isMatchActorUsername,
+                                  "ActorUsername",
+                                  "No match"
+                              )
+  // ************************
+  //      <Aliases>
+  // ************************
+  | extend
+      User  = TargetUsername,
+      Dvc   = Computer
+  // ************************
+  //      </Aliases>
+  // ************************
+  | project-away Computer, MG, SourceSystem, TenantId, temp_*
+};
+let SudoAuthFailure1=(
+    starttime: datetime=datetime(null), 
+    endtime: datetime=datetime(null), 
+    username_has_any: dynamic = dynamic([]),
+    targetappname_has_any: dynamic = dynamic([]),
+    srcipaddr_has_any_prefix: dynamic = dynamic([]),
+    srchostname_has_any: dynamic = dynamic([]),
+    eventtype_in: dynamic = dynamic([]),
+    eventresultdetails_in: dynamic = dynamic([]),
+    eventresult: string = '*',
+    disabled: bool=false
+    ) {
+    Syslog
+    | where not(disabled)
+    | where ProcessName == "sudo" and (SyslogMessage has 'user NOT in sudoers' or SyslogMessage has 'incorrect password attempts')
+        and (isnull(starttime) or TimeGenerated >= starttime)
+        and (isnull(endtime) or TimeGenerated <= endtime)
+        and ((array_length(username_has_any) == 0) or SyslogMessage has_any (username_has_any))
+        and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+        and ((array_length(srcipaddr_has_any_prefix) == 0)) // SrcIpAddr not available in source
+        and (array_length(srchostname_has_any) == 0) // SrcHostname not available in source
+        and ((array_length(eventtype_in) == 0) or "Logon" in~ (eventtype_in))
+        and (array_length(eventresultdetails_in) == 0 or 'No such user or password' in~ (eventresultdetails_in))
+        and (eventresult == "*" or ('Failure' == eventresult))
+    | parse-kv SyslogMessage as (TTY: string, PWD: string, USER: string, COMMAND: string) with  (pair_delimiter=' ', kv_delimiter='=')
+    | project-rename 
+        EventUid       = _ItemId,
+        TargetUsername = USER
+    | extend
+        ActorUsername               = extract(@'^(.*?):', 1, SyslogMessage),
+        ActorUsernameType           = 'Simple',
+        DvcHostname                 = Computer,
+        EventCount                  = int(1),
+        EventEndTime                = TimeGenerated,
+        EventOriginalRestultDetails = 'User authentication failed',
+        EventProduct                = 'sudo',
+        EventResult                 = 'Failure',
+        EventResultDetails          = 'No such user or password',
+        EventSchema                 = 'Authentication',
+        EventSchemaVersion          = '0.1.1',
+        EventStartTime              = TimeGenerated,
+        EventType                   = 'Logon',
+        EventVendor                 = 'Linux',
+        TargetUsernameType          = 'Simple'
+    // Post-filtering on username_has_any
+    | where ((array_length(username_has_any) == 0) or (TargetUsername has_any (username_has_any)) or (ActorUsername has_any (username_has_any)))
+    // mapping ASimMatchingUsername
+    | extend
+        temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+        ,
+        temp_isMatchActorUsername=ActorUsername has_any(username_has_any)
+    | extend ASimMatchingUsername = case
+        (
+                                    array_length(username_has_any) == 0,
+                                    "-",
+                                    temp_isMatchTargetUsername and temp_isMatchActorUsername,
+                                    "Both",
+                                    temp_isMatchTargetUsername,
+                                    "TargetUsername",
+                                    temp_isMatchActorUsername,
+                                    "ActorUsername",
+                                    "No match"
+                                )
+    | project-away Computer, MG, SourceSystem, TenantId, temp_*
+};
+let SudoDisconnect=(
+    starttime: datetime=datetime(null), 
+    endtime: datetime=datetime(null), 
+    username_has_any: dynamic = dynamic([]),
+    targetappname_has_any: dynamic = dynamic([]),
+    srcipaddr_has_any_prefix: dynamic = dynamic([]),
+    srchostname_has_any: dynamic = dynamic([]),
+    eventtype_in: dynamic = dynamic([]),
+    eventresultdetails_in: dynamic = dynamic([]),
+    eventresult: string = '*',
+    disabled: bool=false
+    ) {
+    Syslog 
+    | where not(disabled)
+    | where ProcessName == "sudo"
+        and SyslogMessage has 'session closed for user '
+        and (isnull(starttime) or TimeGenerated >= starttime)
+        and (isnull(endtime) or TimeGenerated <= endtime)
+        and ((array_length(username_has_any) == 0) or SyslogMessage has_any (username_has_any))
+        and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+        and ((array_length(srcipaddr_has_any_prefix) == 0)) // SrcIpAddr not available in source
+        and (array_length(srchostname_has_any) == 0) // SrcHostname not available in source
+        and ((array_length(eventtype_in) == 0) or "Logoff" in~ (eventtype_in))
+        and (array_length(eventresultdetails_in) == 0 or 'Other' in~ (eventresultdetails_in))
+        and (eventresult == "*" or ('Success' == eventresult))
+    | parse SyslogMessage with * "for user " TargetUsername: string
+    // Post-filtering on username_has_any
+    | where ((array_length(username_has_any) == 0) or TargetUsername has_any (username_has_any))
+    // mapping ASimMatchingUsername
+    | extend temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+    // ActorUsername not coming from source. Hence, not mapped.
+    | extend ASimMatchingUsername = case
+        (
+                                    array_length(username_has_any) == 0,
+                                    "-",
+                                    temp_isMatchTargetUsername,
+                                    "TargetUsername",
+                                    "No match"
+                                )
+    | extend
+        DvcHostname                 = Computer,
+        EventCount                  = int(1),
+        EventEndTime                = TimeGenerated,
+        EventOriginalRestultDetails = 'User session closed',
+        EventProduct                = 'sudo',
+        EventResult                 = 'Success',
+        EventResultDetails          = 'Other',
+        EventSchema                 = 'Authentication',
+        EventSchemaVersion          = '0.1.1',
+        EventStartTime              = TimeGenerated,
+        EventType                   = 'Logoff',
+        EventVendor                 = 'Linux',
+        TargetUsernameType          = 'Simple'
+    // ************************
+    //      <Aliases>
+    // ************************
+    | extend
+        Dvc   = Computer,
+        User  = TargetUsername
+    // ************************
+    //      </Aliases>
+    // ************************
+    | project-away Computer, MG, SourceSystem, TenantId, temp_*
+};
+union isfuzzy=false 
+  SudoSignInAuthorized(starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled=disabled), 
+  SudoAuthFailure1(starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled=disabled), 
+  SudoDisconnect(starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled=disabled)
+}
+
+
+
+//
+// Function Name: vimAuthenticationVectraXDRAudit
+// Description: This ASIM parser supports filtering and normalizing Vectra XDR Audit Logs Event in the Audits_Data_CL table to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimAuthenticationVectraXDRAudit(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['username_has_any']:dynamic=dynamic([]),
+    ['targetappname_has_any']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False)
+{
+let parser = (
+    starttime: datetime=datetime(null), 
+    endtime: datetime=datetime(null), 
+    username_has_any: dynamic = dynamic([]),
+    targetappname_has_any: dynamic = dynamic([]),
+    srcipaddr_has_any_prefix: dynamic = dynamic([]),
+    srchostname_has_any: dynamic = dynamic([]),
+    eventtype_in: dynamic = dynamic([]),
+    eventresultdetails_in: dynamic = dynamic([]),
+    eventresult: string = '*',
+    disabled: bool=false
+    ) {
+    Audits_Data_CL
+    | where not(disabled)
+        and event_action_s in ("login", "logout")
+        and (isnull(starttime) or event_timestamp_t >= starttime)
+        and (isnull(endtime) or event_timestamp_t <= endtime)
+        and ((array_length(username_has_any) == 0) or username_s has_any (username_has_any))
+        and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+        and (array_length(srcipaddr_has_any_prefix) == 0) // SrcIpAddr not available in source
+        and (array_length(srchostname_has_any) == 0) // SrcHostname not available in source
+        and ((array_length(eventtype_in) == 0) or ("Logon" in~ (eventtype_in)) or ("Logoff" in~ (eventtype_in)))
+        and (array_length(eventresultdetails_in) == 0) // EventResultDetails not available in source
+    // eventresult filtering done later in the parser
+    | extend
+        EventCount = int(1),
+        EventEndTime = event_timestamp_t,
+        EventProduct = 'Vectra XDR',
+        EventResult = case(result_status_s == "success", "Success", result_status_s == "failure", "Failure", "NA"),
+        EventSchema = "Authentication",
+        EventSchemaVersion = "0.1.3",
+        EventStartTime = event_timestamp_t,
+        EventType = case(event_action_s == "login", "Logon", event_action_s == "logout", "Logoff", ""),
+        EventVendor = 'Vectra',
+        ActorUserId = tostring(toint(user_id_d)),
+        ActorUserIdType = "VectraUserId",
+        ActorUsernameType = "UPN",
+        EventUid = tostring(toint(id_d))
+    // Post-filtering on eventtype_in and eventresult
+    | where ((array_length(eventtype_in) == 0) or (EventType in~ (eventtype_in)))
+        and ((eventresult == "*") or (EventResult == eventresult))
+    | project-rename
+        DvcIpAddr = source_ip_s,
+        ActorOriginalUserType = user_type_s,
+        ActorUsername = username_s,
+        EventMessage = Message,
+        EventProductVersion = version_s
+    // mapping ASimMatchingUsername
+    | extend temp_isMatchActorUsername=ActorUsername has_any(username_has_any)
+    // TargetUsername not coming from source. Hence, not mapped.
+    | extend ASimMatchingUsername = case
+        (
+                                    array_length(username_has_any) == 0,
+                                    "-",
+                                    temp_isMatchActorUsername,
+                                    "ActorUsername",
+                                    "No match"
+                                )
+    | extend
+        User = ActorUsername,
+        Dvc = DvcIpAddr
+    | project-away
+        *_d,
+        *_s,
+        event_timestamp_t,
+        api_client_id_g,
+        TenantId,
+        _ResourceId,
+        RawData,
+        SourceSystem,
+        Computer,
+        MG,
+        ManagementGroupName
+};
+parser (
+  starttime=starttime,
+  endtime=endtime,
+  username_has_any=username_has_any,
+  targetappname_has_any=targetappname_has_any,
+  srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+  srchostname_has_any=srchostname_has_any,
+  eventtype_in=eventtype_in,
+  eventresultdetails_in=eventresultdetails_in,
+  eventresult=eventresult,
+  disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimAuthenticationVMwareCarbonBlackCloud
+// Description: This ASIM parser supports normalizing VMware Carbon Black Cloud logs to the ASIM Authentication normalized schema. VMware Carbon Black Cloud events are captured through VMware Carbon Black Cloud data connector which ingests Carbon Black Audit, Notification and Event data into Microsoft Sentinel through the REST API.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimAuthenticationVMwareCarbonBlackCloud(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['username_has_any']:dynamic=dynamic([]),
+    ['targetappname_has_any']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False)
+{
+let parser = (
+  starttime: datetime=datetime(null), 
+  endtime: datetime=datetime(null), 
+  username_has_any: dynamic = dynamic([]),
+  targetappname_has_any: dynamic = dynamic([]),
+  srcipaddr_has_any_prefix: dynamic = dynamic([]),
+  srchostname_has_any: dynamic = dynamic([]),
+  eventtype_in: dynamic = dynamic([]),
+  eventresultdetails_in: dynamic = dynamic([]),
+  eventresult: string = '*',
+  disabled: bool=false
+  ) {
+  CarbonBlackAuditLogs_CL
+  | where not(disabled)
+  | where (isnull(starttime) or TimeGenerated >= starttime)
+      and (isnull(endtime) or TimeGenerated <= endtime)
+      and (description_s has_any ("logged in", "login", "second factor authentication") and description_s !has "connector")
+      and ((array_length(username_has_any) == 0) or (loginName_s has_any (username_has_any)))
+      and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+      and ((array_length(srcipaddr_has_any_prefix) == 0) or has_any_ipv4_prefix(clientIp_s, srcipaddr_has_any_prefix))
+      and (array_length(srchostname_has_any) == 0) // SrcHostname not available in source
+      and (array_length(eventtype_in) == 0 or 'Logon' has_any (eventtype_in))
+  // Filtering for eventresultdetails_in done later in the parser
+  // Filtering for eventresult done later in the parser
+  | extend
+      EventResult = iff(description_s has "successfully", "Success", "Failure"),
+      EventType = "Logon"
+  | where (array_length(eventtype_in) == 0 or EventType has_any (eventtype_in))
+      and (eventresult == '*' or EventResult has eventresult)
+  | extend EventResultDetails = case(
+                                EventResult == "Failure" and description_s has ("locked"),
+                                "User locked",
+                                EventResult == "Failure" and description_s has_any ("logged in", "login"),
+                                "Incorrect password",
+                                EventResult == "Failure" and description_s has ("second factor authentication"),
+                                "MFA not satisfied",
+                                ""
+                            )
+  // Filtering on eventresultdetails_in
+  | where (array_length(eventresultdetails_in) == 0 or EventResultDetails has_any (eventresultdetails_in))
+  | extend
+      EventStartTime = unixtime_milliseconds_todatetime(eventTime_d),
+      AdditionalFields = bag_pack("flagged", flagged_b),
+      EventSeverity = iff(flagged_b == true, "Low", "Informational"),
+      EventCount = int(1),
+      EventProduct = "Carbon Black Cloud",
+      EventSchema = "Authentication",
+      EventSchemaVersion = "0.1.3",
+      EventVendor = "VMware",
+      EventOriginalResultDetails = iff(EventResult == "Failure", tostring(split(description_s, ';')[1]), "")
+  | project-rename
+      EventMessage = description_s,
+      EventOriginalUid = eventId_g,
+      TargetUsername = loginName_s,
+      SrcIpAddr = clientIp_s,
+      EventUid=_ItemId,
+      EventOwner = orgName_s
+  | extend
+      IpAddr = SrcIpAddr,
+      TargetUsernameType = _ASIM_GetUsernameType(TargetUsername),
+      TargetUserType = _ASIM_GetUserType(TargetUsername, ""),
+      Dvc = EventProduct,
+      EventEndTime = EventStartTime,
+      User = TargetUsername,
+      Src = SrcIpAddr
+  // mapping ASimMatchingUsername
+    | extend temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+    // ActorUsername not coming from source. Hence, not mapped.
+    | extend ASimMatchingUsername = case
+        (
+                                    array_length(username_has_any) == 0,
+                                    "-",
+                                    temp_isMatchTargetUsername,
+                                    "TargetUsername",
+                                    "No match"
+                                )
+  | project-away
+      *_s,
+      *_d,
+      *_b,
+      _ResourceId,
+      Computer,
+      MG,
+      ManagementGroupName,
+      RawData,
+      SourceSystem,
+      TenantId,
+      temp_*
+};
+parser(
+  starttime=starttime,
+  endtime=endtime,
+  username_has_any=username_has_any,
+  targetappname_has_any=targetappname_has_any,
+  srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+  srchostname_has_any=srchostname_has_any,
+  eventtype_in=eventtype_in,
+  eventresultdetails_in=eventresultdetails_in,
+  eventresult=eventresult,
+  disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: ASimDhcpEvent
+// Description: This ASIM parser supports normalizing Dhcp event logs from all supported sources to the ASIM Dhcp Event normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimDhcpEvent(    ['pack']:bool=False)
+{
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludeASimDhcpEvent') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser| where isnotempty(SourceSpecificParser));
+let ASimBuiltInDisabled=toscalar('ExcludeASimDhcpEvent' in (DisabledParsers) or 'Any' in (DisabledParsers)); 
+let parser=(pack:bool=false){
+union isfuzzy=true
+  vimDhcpEventEmpty,
+  ASimDhcpEventNative (disabled=(ASimBuiltInDisabled or ('ExcludeASimDhcpEventNative' in (DisabledParsers))))
+}; 
+parser (pack=pack)
+}
+
+
+
+//
+// Function Name: ASimDhcpEventNative
+// Description: This ASIM parser supports normalizing the native Dhcp Event table (ASimDhcpEventLogs) to the ASIM Dhcp Event normalized schema. While the native table is ASIM compliant, the parser is needed to add capabilities, such as aliases, available only at query time.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimDhcpEventNative(    ['disabled']:bool=False)
+{
+let parser = (
+  disabled:bool = false
+)
+{
+  ASimDhcpEventLogs
+  | where not(disabled)
+  | project-rename
+      EventUid = _ItemId
+  | extend          
+      EventSchema = "DhcpEvent",
+      DvcScopeId = iff(isempty(DvcScopeId), _SubscriptionId, DvcScopeId)
+  //  -- Aliases
+  | extend
+      EventEndTime = iff (isnull(EventEndTime), TimeGenerated, EventEndTime),
+      EventStartTime = iff (isnull(EventEndTime), TimeGenerated, EventStartTime),
+      Dvc = coalesce (DvcFQDN, DvcHostname, DvcIpAddr, DvcId, _ResourceId),
+      Rule = coalesce(RuleName, tostring(RuleNumber)),
+      SessionId = DhcpSessionId,
+      Duration = DhcpSessionDuration,
+      Src = coalesce (SrcFQDN, SrcHostname, SrcIpAddr, SrcDvcId),
+      User = SrcUsername,
+      IpAddr = SrcIpAddr,
+      Hostname = SrcHostname
+};
+parser (disabled = disabled)
+}
+
+
+
+//
+// Function Name: imDhcpEvent
+// Description: This ASIM parser supports filtering and normalizing Dhcp event logs from all supported sources to the ASIM Dhcp Event normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) imDhcpEvent(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['srcusername_has_any']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False,
+    ['pack']:bool=False)
+{
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludevimDhcpEvent') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser | where isnotempty(SourceSpecificParser));
+let vimBuiltInDisabled=toscalar('ExcludevimDhcpEvent' in (DisabledParsers) or 'Any' in (DisabledParsers)); 
+let parser=(
+  starttime:datetime=datetime(null), 
+  endtime:datetime=datetime(null),
+  srcipaddr_has_any_prefix:dynamic=dynamic([]),
+  srchostname_has_any:dynamic=dynamic([]),
+  srcusername_has_any:dynamic=dynamic([]),
+  eventresult:string='*',
+  pack:bool=false)
+{
+union isfuzzy=true
+  vimDhcpEventEmpty,
+  vimDhcpEventNative (starttime=starttime, endtime=endtime, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, srcusername_has_any=srcusername_has_any, eventresult=eventresult, disabled=(vimBuiltInDisabled or ('ExcludevimDhcpEventNative' in (DisabledParsers))))
+};
+parser (starttime=starttime, endtime=endtime, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, srcusername_has_any=srcusername_has_any, eventresult=eventresult, pack=pack)
+}
+
+
+
+//
+// Function Name: vimDhcpEventEmpty
+// Description: This function returns an empty ASIM Dhcp Event schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimDhcpEventEmpty
+{
+let EmptyDhcpEvents =datatable (
+  TimeGenerated:datetime
+, _ResourceId:string
+, Type:string
+// ****** Event fields ******
+, EventType:string
+, EventProduct:string
+, EventProductVersion:string
+, EventCount:int
+, EventMessage:string
+, EventVendor:string
+, EventSchema:string
+, EventSchemaVersion:string
+, EventSeverity:string
+, EventSubType:string
+, EventOriginalUid:string
+, EventOriginalType:string
+, EventOriginalResultDetails:string
+, EventOriginalSeverity:string
+, EventOriginalSubType:string
+, EventStartTime:datetime
+, EventEndTime:datetime
+, EventReportUrl:string
+, EventResult: string
+, EventResultDetails: string
+, AdditionalFields:dynamic
+, EventOwner:string
+// ****** Device fields ******
+,  DvcId:string
+,  DvcHostname:string
+,  DvcDomain:string
+,  DvcDomainType:string
+,  DvcFQDN:string
+,  DvcIpAddr:string
+,  DvcOs:string
+,  DvcOsVersion:string
+,  DvcMacAddr:string
+,  DvcAction:string
+,  DvcOriginalAction:string
+,  DvcDescription: string
+,  DvcIdType: string
+,  DvcInterface: string
+,  DvcZone: string
+,  DvcScopeId:string
+,  DvcScope:string
+// ****** Source User fields ******
+, SrcUserId:string
+, SrcUserUid:string
+, SrcUserIdType:string
+, SrcUserScopeId:string
+, SrcUserScope:string
+, SrcUsername:string
+, SrcUsernameType:string
+, SrcUserType:string
+, SrcOriginalUserType:string
+, SrcUserSessionId:string
+// ****** Source System fields ******
+, SrcIpAddr: string
+, SrcPortNumber:int
+, SrcHostname:string
+, SrcMacAddr:string
+, SrcDomain:string
+, SrcDomainType:string
+, SrcFQDN:string
+, SrcDescription:string
+, SrcDvcId:string
+, SrcDvcIdType:string
+, SrcDvcScopeId:string
+, SrcDvcScope:string
+, SrcDeviceType:string
+, SrcGeoCountry:string
+, SrcGeoLatitude:real
+, SrcGeoLongitude:real
+, SrcGeoRegion:string
+, SrcGeoCity:string
+, SrcRiskLevel:int
+, SrcOriginalRiskLevel:string
+// ****** Dhcp Event Fields ******
+, RequestedIpAddr:string //Optional
+, DhcpLeaseDuration:int
+, DhcpSessionId:string
+, DhcpSessionDuration:int
+, DhcpSrcDHCId:string
+, DhcpCircuitId:string
+, DhcpSubscriberId:string
+, DhcpVendorClassId:string
+, DhcpVendorClass:string
+, DhcpUserClassId:string
+, DhcpUserClass:string
+// ****** aliases ******
+, SessionId:string
+, Duration:int
+, Src: string
+, Dst: string
+, User: string
+, IpAddr:string
+, Hostname:string
+//****** Inspection fields ******
+,  RuleName:string
+,  RuleNumber:int
+,  ThreatId:string
+,  ThreatName:string
+,  ThreatCategory:string
+,  ThreatRiskLevel:int
+,  ThreatOriginalRiskLevel:string
+,  ThreatConfidence:int
+,  ThreatOriginalConfidence:string
+,  ThreatIsActive:bool
+,  ThreatFirstReportedTime:datetime
+,  ThreatLastReportedTime:datetime
+,  ThreatField:string
+)[];
+EmptyDhcpEvents
+}
+
+
+
+//
+// Function Name: vimDhcpEventNative
+// Description: This ASIM parser supports filtering and normalizing the native Dhcp Event table (ASimDhcpEventLogs) to the ASIM Dhcp Event normalized schema. While the native table is ASIM compliant, the parser is needed to add capabilities, such as aliases, available only at query time.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimDhcpEventNative(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['srcusername_has_any']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False)
+{
+let parser = (
+  starttime:datetime=datetime(null), 
+  endtime:datetime=datetime(null),
+  srcipaddr_has_any_prefix:dynamic=dynamic([]),
+  srchostname_has_any:dynamic=dynamic([]),
+  srcusername_has_any:dynamic=dynamic([]),
+  eventresult:string='*',
+  disabled:bool=false
+)
+{
+  ASimDhcpEventLogs
+  | where not(disabled)
+  | where (isnull(starttime) or TimeGenerated >= starttime) 
+      and (isnull(endtime) or TimeGenerated <= endtime)
+      and (array_length(srcipaddr_has_any_prefix) == 0 or has_any_ipv4_prefix(SrcIpAddr, srcipaddr_has_any_prefix))
+      and (array_length(srchostname_has_any) == 0 or (SrcHostname has_any (srchostname_has_any)))
+      and (array_length(srcusername_has_any) == 0 or (SrcUsername has_any (srcusername_has_any)))
+      and ((eventresult == "*") or (EventResult == eventresult))
+  | project-rename
+      EventUid = _ItemId
+  | extend          
+      EventSchema = "DhcpEvent",
+      DvcScopeId = iff(isempty(DvcScopeId), _SubscriptionId, DvcScopeId)
+  //  -- Aliases
+  | extend
+      EventEndTime = iff (isnull(EventEndTime), TimeGenerated, EventEndTime),
+      EventStartTime = iff (isnull(EventEndTime), TimeGenerated, EventStartTime),
+      Dvc = coalesce (DvcFQDN, DvcHostname, DvcIpAddr, DvcId, _ResourceId),
+      Rule = coalesce(RuleName, tostring(RuleNumber)),
+      SessionId = DhcpSessionId,
+      Duration = DhcpSessionDuration,
+      Src = coalesce (SrcFQDN, SrcHostname, SrcIpAddr, SrcDvcId),
+      User = SrcUsername,
+      IpAddr = SrcIpAddr,
+      Hostname = SrcHostname
+};
+parser (
+    starttime                = starttime,
+    endtime                  = endtime,
+    srcipaddr_has_any_prefix = srcipaddr_has_any_prefix,
+    srchostname_has_any      = srchostname_has_any,
+    srcusername_has_any      = srcusername_has_any,
+    eventresult              = eventresult,
+    disabled                 = disabled
+)
+}
+
+
+
+//
+// Function Name: ASimDns
+// Description: This ASIM parser supports normalizing DNS activity logs from all supported sources to the ASIM DNS activity normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimDns(    ['pack']:bool=False)
+{
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludeASimDns') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser);
+let imDnsBuiltInDisabled=toscalar('ExcludeASimDnsBuiltIn' in (DisabledParsers) or 'Any' in (DisabledParsers)); 
+union isfuzzy=true
+  vimDnsEmpty,
+  ASimDnsAzureFirewall     (imDnsBuiltInDisabled or ('ExcludeASimASimDnsAzureFirewall'  in (DisabledParsers) )),
+  ASimDnsCiscoUmbrella     (imDnsBuiltInDisabled or ('ExcludeASimDnsCiscoUmbrella'      in (DisabledParsers) )),
+  ASimDnsCorelightZeek     (imDnsBuiltInDisabled or ('ExcludeASimDnsCorelightZeek'      in (DisabledParsers) )),
+  ASimDnsFortinetFortiGate (imDnsBuiltInDisabled or ('ExcludeASimDnsFortinetFortiGate'  in (DisabledParsers) )),
+  ASimDnsGcp               (imDnsBuiltInDisabled or ('ExcludeASimDnsDnsGcp'             in (DisabledParsers) )),
+  ASimDnsInfobloxNIOS      (imDnsBuiltInDisabled or ('ExcludeASimDnsInfobloxNIOS'       in (DisabledParsers) )),
+  ASimDnsMicrosoftNXlog    (imDnsBuiltInDisabled or ('ExcludeASimDnsMicrosoftNXlog'     in (DisabledParsers) )),
+  ASimDnsMicrosoftOMS      (imDnsBuiltInDisabled or ('ExcludeASimDnsMicrosoftOMS'       in (DisabledParsers) )),
+  ASimDnsMicrosoftSysmon   (imDnsBuiltInDisabled or ('ExcludeASimDnsMicrosoftSysmon'    in (DisabledParsers) )),
+  ASimDnsMicrosoftSysmonWindowsEvent   (imDnsBuiltInDisabled or ('ExcludeASimDnsMicrosoftSysmonWindowsEvent'    in (DisabledParsers) )),
+  ASimDnsNative            (imDnsBuiltInDisabled or ('ExcludeASimDnsNative'             in (DisabledParsers) )),
+  ASimDnsSentinelOne       (imDnsBuiltInDisabled or ('ExcludeASimDnsSentinelOne'        in (DisabledParsers) )),
+  ASimDnsVectraAI          (imDnsBuiltInDisabled or ('ExcludeASimDnsVectraAI'           in (DisabledParsers) )),
+  ASimDnsZscalerZIA        (imDnsBuiltInDisabled or ('ExcludeASimDnsZscalerZIA'         in (DisabledParsers) ))
+}
+
+
+
+//
+// Function Name: ASimDnsAzureFirewall
+// Description: This ASIM parser supports normalizing Azure Firewall logs to the ASIM Dns normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimDnsAzureFirewall(    ['disabled']:bool=False)
+{
+let DNS_query=(disabled:bool=false){
+  AzureDiagnostics | where not(disabled)
+  // | where ResourceType == "AZUREFIREWALLS" -- Implicit in the next line
+  | where Category == "AzureFirewallDnsProxy"
+  | where msg_s startswith "DNS Request:"
+  | project msg_s, TimeGenerated, ResourceId
+  | parse msg_s with
+      "DNS Request: " 
+      SrcIpAddr:string ":" SrcPortNumber:int 
+      " - " EventOriginalUid:string 
+      " " DnsQueryTypeName:string 
+      " " DnsQueryClassName:string
+      " " DnsQuery:string
+      ". " NetworkProtocol:string 
+      " " SrcBytes:int 
+      " " DnsDNSSECflag:bool 
+      " " DnsDNSSECBufferSize:int 
+      " " EventResultDetails:string 
+      " " DnsFlags:string
+      " " DstBytes:int
+      " " DnsNetworkDuration:double
+      "s"
+  | project-away msg_s
+  | extend
+    EventResult = iff (EventResultDetails == "NOERROR", "Success", "Failure"),
+    EventSubType = "response",
+    DnsNetworkDuration = toint(DnsNetworkDuration*1000)     
+};
+let DNS_error=(disabled:bool=false) {
+  AzureDiagnostics | where not(disabled)
+  // | where ResourceType == "AZUREFIREWALLS" -- Implicit in the next line
+  | where Category == "AzureFirewallDnsProxy"
+  | project msg_s, TimeGenerated, ResourceId
+  | where msg_s startswith " Error:"
+  | parse msg_s with 
+      " Error: " nu:string 
+      " " DnsQuery:string 
+      ". " DnsQueryTypeName:string 
+      ": " op:string 
+      " " NetworkProtocol:string
+      " " SrcIpAddr:string ":" SrcPortNumber:int 
+      "->" DstIpAddr:string ":" DstPortNumber:int  
+      ": " EventResultOriginalDetails:string
+  | project-away msg_s
+  | extend 
+    EventResult = "Failure",
+    EventSubType = "request"
+};
+let DNS = (disabled:bool=false) {
+  union DNS_query(disabled), DNS_error(disabled)
+  | extend
+    NetworkProtocol = toupper(NetworkProtocol)
+  | project-rename
+      DvcId = ResourceId
+  | extend
+      DvcIdType = "AzureResourceId",
+      EventCount = int(1),
+      EventStartTime = TimeGenerated,
+      EventVendor = "Microsoft",
+      EventProduct = "Azure Firewall",
+      EventSchema = "Dns",
+      EventSchemaVersion = "0.1.3",
+      EventEndTime = TimeGenerated, 
+      EventType = 'Query',
+      DnsFlagsAuthenticated = DnsFlags has "aa",
+      DnsFlagsAuthoritative = DnsFlags has "ad",
+      DnsFlagsCheckingDisabled = DnsFlags has "cd",
+      DnsFlagsRecursionAvailable = DnsFlags has "ra",
+      DnsFlagsRecursionDesired = DnsFlags has "rd",
+      DnsFlagsTruncates = DnsFlags has "tc"
+  | extend
+     // -- Aliases
+      DnsResponseCodeName=EventResultDetails,
+      Domain=DnsQuery,
+      IpAddr=SrcIpAddr,
+      Src=SrcIpAddr,
+      Dst=DstIpAddr,
+      Duration = DnsNetworkDuration,
+      Dvc=DvcId
+  | extend
+      // -- Backward Compatibility
+      Query = DnsQuery,
+      QueryTypeName = DnsQueryTypeName,
+      ResponseCodeName = DnsResponseCodeName,
+      Flags = DnsFlags
+};
+DNS(disabled)
+}
+
+
+
+//
+// Function Name: ASimDnsCiscoUmbrella
+// Description: This ASIM parser supports normalizing Cisco Umbrella DNS logs to the ASIM Dns normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimDnsCiscoUmbrella(    ['disabled']:bool=False)
+{
+let DNSQuery_CiscoUmbrella=(disabled:bool=false){
+    Cisco_Umbrella_dns_CL | where not(disabled)
+    // 
+    // *********** Parsing
+    | parse QueryType_s with DnsQueryType:int " ("DnsQueryTypeName:string ")"
+    //
+    | project 
+    //
+    // ******************* Mandatory
+       EventCount=int(1),
+       EventStartTime= column_ifexists("Timestamp_t", todatetime(column_ifexists("Timestamp_s",""))),
+       EventProduct="Umbrella",
+       EventVendor="Cisco",
+       EventSchema="Dns",
+       EventSchemaVersion="0.1.3",
+       Dvc="CiscoUmbrella",
+       EventType="Query",
+       EventResult=iff(ResponseCode_s=~'NOERROR','Success','Failure'),
+       EventResultDetails=ResponseCode_s,  // => ResponseCodeNames
+       //
+       TimeGenerated, // not handled by schema, but we need to preserve it
+       SrcIpAddr=column_ifexists('InternalIp_s', ''),
+       EventSubType='response',
+  // ********** Renamed columns
+       UrlCategory=column_ifexists('Categories_s', ''),
+       DnsQuery=trim_end(@'\.',column_ifexists('Domain_s', '')) , 
+       ThreatCategory=column_ifexists('Blocked_Categories_s', ''),
+       SrcNatIpAddr=column_ifexists('ExternalIp_s', ''),
+       DvcAction=column_ifexists('Action_s', ''),
+       EventEndTime=todatetime(column_ifexists('Timestamp_t',  column_ifexists('Timestamp_s',"")  )),  
+   //
+   // *************** keep Parsed data
+       DnsQueryType, DnsQueryTypeName
+  // **************Aliases
+  | extend 
+      DnsResponseCodeName=EventResultDetails, 
+      DomainCategory=UrlCategory,
+      Domain=DnsQuery,
+      IpAddr=SrcIpAddr,
+      Src=SrcIpAddr
+  };
+DNSQuery_CiscoUmbrella(disabled)
+}
+
+
+
+//
+// Function Name: ASimDnsCorelightZeek
+// Description: This ASIM parser supports normalizing Corelight Zeek DNS logs to the ASIM Dns normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimDnsCorelightZeek(    ['disabled']:bool=False)
+{
+let query_type_lookup=datatable(DnsQueryType:int,DnsQueryTypeName:string)[
+  0, "Reserved",
+  1, "A",
+  2, "NS",
+  3, "MD",
+  4, "MF",
+  5, "CNAME",
+  6, "SOA",
+  7, "MB",
+  8, "MG",
+  9, "MR",
+  10, "NULL",
+  11, "WKS",
+  12, "PTR",
+  13, "HINFO",
+  14, "MINFO",
+  15, "MX",
+  16, "TXT",
+  17, "RP",
+  18, "AFSDB",
+  19, "X25",
+  20, "ISDN",
+  21, "RT",
+  22, "NSAP",
+  23, "NSAP-PTR",
+  24, "SIG",
+  25, "KEY",
+  26, "PX",
+  27, "GPOS",
+  28, "AAAA",
+  29, "LOC",
+  30, "NXT",
+  31, "EID",
+  32, "NIMLOC",
+  33, "SRV",
+  34, "ATMA",
+  35, "NAPTR",
+  36, "KX",
+  37, "CERT",
+  38, "A6",
+  39, "DNAME",
+  40, "SINK",
+  41, "OPT",
+  42, "APL",
+  43, "DS",
+  44, "SSHFP",
+  45, "IPSECKEY",
+  46, "RRSIG",
+  47, "NSEC",
+  48, "DNSKEY",
+  49, "DHCID",
+  50, "NSEC3",
+  51, "NSEC3PARAM",
+  52, "TLSA",
+  53, "SMIMEA",
+  54, "Unassigned",
+  55, "HIP",
+  56, "NINFO",
+  57, "RKEY",
+  58, "TALINK",
+  59, "CDS",
+  60, "CDNSKEY",
+  61, "OPENPGPKEY",
+  62, "CSYNC",
+  99, "SPF",
+  100, "UINFO",
+  101, "UID",
+  102, "GID",
+  103, "UNSPEC",
+  104, "NID",
+  105, "L32",
+  106, "L64",
+  107, "LP",
+  108, "EUI48",
+  109, "EUI64",
+  249, "TKEY",
+  250, "TSIG",
+  251, "IXFR",
+  252, "AXFR",
+  253, "MAILB",
+  254, "MAILA",
+  255, "ANY",
+  256, "URI",
+  257, "CAA",
+  258, "AVC",
+  259, "DOA",
+  32768, "TA",
+  32769, "DLV"];
+let class_lookup = datatable(DnsQueryClass:int, DnsQueryClassName: string)[
+    0, 'Reserved',
+    1, 'IN',
+    2, 'Unassigned',
+    3, 'CH',
+    4, 'HS',
+    254, 'None',
+    255, 'Any'];
+let parser=(disabled:bool=false){
+  Corelight_CL | where not(disabled)
+  | project Message, TimeGenerated
+  | where Message has '"_path":"dns"' or Message has '"_path":"dns_red"'
+  | parse-kv Message as (
+      ['"_system_name"']:string,
+      ['"_write_ts"']:datetime,
+      ['"ts"']:datetime,
+      ['"uid"']:string,
+      ['"id.orig_h"']:string,
+      ['"id.orig_p"']:int,
+      ['"id.resp_h"']:string,
+      ['"id.resp_p"']:int,
+      ['"proto"']:string,
+      ['"trans_id"']:int,
+      ['"query"']:string,
+      ['"qclass"']:int,
+      ['"qtype"']:int,
+      ['"AA"']:bool,
+      ['"TC"']:bool,
+      ['"CD"']:bool,
+      ['"RD"']:bool,
+      ['"RA"']:bool,
+      ['"Z"']:int,
+      ['"rejected"']:bool,
+      ['"rcode"']:int,
+      ['"rcode_name"']:string,
+      ['"rtt"']:real,
+  ) 
+  with (quote = '"')
+  | parse Message with * '"answers":' answers:string ',"TTLs":' TTLs:string ',"rejected"' *
+  | extend 
+      EventCount=int(1),
+      EventProduct="Zeek",
+      EventVendor="Corelight",
+      EventSchema = "Dns",
+      EventSchemaVersion="0.1.4",
+      EventType="Query"
+  | project-rename
+      EventStartTime= ['"ts"'],
+      EventEndTime = ['"_write_ts"'],
+      EventOriginalUid = ['"uid"'],
+      SrcIpAddr = ['"id.orig_h"'],
+      SrcPortNumber = ['"id.orig_p"'],
+      DstIpAddr = ['"id.resp_h"'],
+      DstPortNumber = ['"id.resp_p"'],
+      NetworkProtocol = ['"proto"'],
+      DnsQuery = ['"query"'],
+      DnsResponseCode = ['"rcode"'],
+      EventResultDetails = ['"rcode_name"'],
+      DnsFlagsAuthoritative = ['"AA"'],
+      DnsFlagsTruncated = ['"TC"'],
+      DnsFlagsRecursionDesired = ['"RD"'],
+      DnsFlagsCheckingDisabled = ['"CD"'],
+      DnsFlagsRecursionAvailable = ['"RA"'],
+      DnsQueryClass = ['"qclass"'],
+      DnsQueryType = ['"qtype"'],
+      rtt = ['"rtt"'],
+      Z = ['"Z"'],
+      trans_id = ['"trans_id"'],
+      rejected = ['"rejected"'],
+      Dvc = ['"_system_name"']
+  | lookup query_type_lookup on DnsQueryType
+  | lookup class_lookup on DnsQueryClass
+  | extend
+      EventSubType=iff(isnull(DnsResponseCode),'request','response'),
+      DnsNetworkDuration = toint(rtt*1000),
+      EventResult = iff (EventResultDetails!~'NOERROR' or rejected,'Failure','Success'),
+      DnsQueryTypeName = case (DnsQueryTypeName == "" and not(isnull(DnsQueryType)), strcat("TYPE", DnsQueryType), DnsQueryTypeName),
+      DnsQueryClassName = case (DnsQueryClassName == "" and not(isnull(DnsQueryClass)), strcat("CLASS", DnsQueryClass), DnsQueryClassName),
+      TransactionIdHex = tohex(toint(trans_id)),
+      DnsFlagsZ = (Z != 0),
+      DnsResponseName = tostring(pack ('answers', answers, 'ttls', TTLs)) // support of auth & addl to be added.
+  | project-away rtt
+  // Aliases
+  | extend 
+      DnsResponseCodeName=EventResultDetails, 
+      Domain=DnsQuery,
+      IpAddr=SrcIpAddr,
+      Src=SrcIpAddr,
+      Duration=DnsNetworkDuration,
+      Dst=DstIpAddr
+  | project-away Message, Z, TTLs, answers, trans_id, rejected
+};
+parser (disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimDnsFortinetFortiGate
+// Description: This ASIM parser supports normalizing Fortinet FortiGate logs ingested in 'CommonSecurityLogs' table produced by the Microsoft Sentinel Fortinet connector to the ASIM DNS normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimDnsFortinetFortiGate(    ['disabled']:bool=False)
+{
+let Parser = (disabled:bool=false) {
+    let DeviceEventClassIDLookup = datatable(EventOriginalSubType:string,EventSubType:string, EventSeverity:string, DvcAction:string, ThreatCategory:string, ThreatField:string)[
+        "54000", "request", "Informational", "", "", "",
+        "54200", "response", "Low", "", "", "",
+        "54400", "response", "Low", "Blocked", "", "",
+        "54401", "response", "Informational", "", "", "",
+        "54600", "response", "Low", "Blocked", "Botnet", "DstIpAddr",
+        "54601", "response", "Low", "Blocked", "Botnet", "Domain",
+        "54800", "response", "Low", "", "", "",
+        "54801", "response", "Low", "", "", "",
+        "54802", "response", "Informational", "", "", "",
+        "54803", "response", "Low", "Blocked", "", "",
+        "54804", "response", "Informational", "", "", "",
+        "54805", "response", "Informational", "", "", "",
+    ];
+    let EventOriginalResultDetailsLookup = datatable(EventOriginalResultDetails:string, EventResultDetails:string, EventResult:string)[
+        "", "NOERROR", "Success",
+        "0", "NOERROR", "Success",
+        "1", "FORMERR", "Failure",
+        "2", "SERVFAIL", "Failure",
+        "3", "NXDOMAIN", "Failure",
+        "4", "NOTIMP", "Failure",
+        "5", "REFUSED", "Failure",
+        "6", "YXDOMAIN", "Failure",
+        "7", "YXRRSET", "Failure",
+        "8", "NXRRSET", "Failure",
+        "9", "NOTAUTH", "Failure",
+        "10", "NOTZONE", "Failure",
+        "11", "DSOTYPENI", "Failure",
+        "16", "BADVERS", "Failure",
+        "16", "BADSIG", "Failure",
+        "17", "BADKEY", "Failure",
+        "18", "BADTIME", "Failure",
+        "19", "BADMODE", "Failure",
+        "20", "BADNAME", "Failure",
+        "21", "BADALG", "Failure",
+        "22", "BADTRUNC", "Failure",
+        "23", "BADCOOKIE", "Failure"
+    ];
+    let DnsQueryTypeLookup = datatable(DnsQueryType:int, DnsQueryTypeName:string)[
+        0, "Reserved",
+        1, "A",
+        2, "NS",
+        3, "MD",
+        4, "MF",
+        5, "CNAME",
+        6, "SOA",
+        7, "MB",
+        8, "MG",
+        9, "MR",
+        10, "NULL",
+        11, "WKS",
+        12, "PTR",
+        13, "HINFO",
+        14, "MINFO",
+        15, "MX",
+        16, "TXT",
+        17, "RP",
+        18, "AFSDB",
+        19, "X25",
+        20, "ISDN",
+        21, "RT",
+        22, "NSAP",
+        23, "NSAP-PTR",
+        24, "SIG",
+        25, "KEY",
+        26, "PX",
+        27, "GPOS",
+        28, "AAAA",
+        29, "LOC",
+        30, "NXT",
+        31, "EID",
+        32, "NIMLOC",
+        33, "SRV",
+        34, "ATMA",
+        35, "NAPTR",
+        36, "KX",
+        37, "CERT",
+        38, "A6",
+        39, "DNAME",
+        40, "SINK",
+        41, "OPT",
+        42, "APL",
+        43, "DS",
+        44, "SSHFP",
+        45, "IPSECKEY",
+        46, "RRSIG",
+        47, "NSEC",
+        48, "DNSKEY",
+        49, "DHCID",
+        50, "NSEC3",
+        51, "NSEC3PARAM",
+        52, "TLSA",
+        53, "SMIMEA",
+        55, "HIP",
+        56, "NINFO",
+        57, "RKEY",
+        58, "TALINK",
+        59, "CDS",
+        60, "CDNSKEY",
+        61, "OPENPGPKEY",
+        62, "CSYNC",
+        63, "ZONEMD",
+        64, "SVCB",
+        65, "HTTPS",
+        99, "SPF",
+        100, "UINFO",
+        101, "UID",
+        102, "GID",
+        103, "UNSPEC",
+        104, "NID",
+        105, "L32",
+        106, "L64",
+        107, "LP",
+        108, "EUI48",
+        109, "EUI64",
+        249, "TKEY",
+        250, "TSIG",
+        251, "IXFR",
+        252, "AXFR",
+        253, "MAILB",
+        254, "MAILA",
+        255, "*",
+        256, "URI",
+        257, "CAA",
+        258, "AVC",
+        259, "DOA",
+        32768, "TA",
+        32769, "DLV"
+    ];
+    CommonSecurityLog
+    | where not(disabled)
+    | where DeviceVendor    == "Fortinet" and 
+        DeviceProduct       == "Fortigate"
+    | where DeviceEventClassID in(54000,54200,54400,54401,54600,54601,54800,54801,54802,54803,54804,54805)
+    | project TimeGenerated, EventOriginalSubType = DeviceEventClassID, AdditionalExtensions, EventUid = _ItemId, EventOriginalSeverity = LogSeverity, EventProductVersion = DeviceVersion ,Computer, Type, SrcIpAddr = SourceIP, SrcPortNumber = SourcePort, DstIpAddr = DestinationIP, DstPortNumber = DestinationPort, EventMessage = Message, NetworkProtocolNumber = Protocol, DvcId = DeviceExternalID, DnsSessionId = ExtID
+    | lookup DeviceEventClassIDLookup on EventOriginalSubType
+    | parse-kv  AdditionalExtensions as (FTNTFGTlogid:string, FTNTFGTsubtype:string, FTNTFGTsrccountry:string, FTNTFGTdstcountry:string,FTNTFGTsrcintfrole:string, FTNTFGTrcode:string, FTNTFGTqname:string, FTNTFGTqtype:string, FTNTFGTxid:string, FTNTFGTqtypeval:int, FTNTFGTqclass:string, FTNTFGTcatdesc:string, FTNTFGTipaddr:string, FTNTFGTunauthuser:string, FTNTFGTuser:string, FTNTFGTbotnetip:string, sessionid:int) with (pair_delimiter=";", kv_delimiter="=")
+    | project-rename 
+        EventOriginalResultDetails  = FTNTFGTrcode,
+        EventOriginalUid            = FTNTFGTlogid,
+        DvcZone                     = FTNTFGTsrcintfrole,
+        EventOriginalType           = FTNTFGTsubtype,
+        SrcGeoCountry               = FTNTFGTsrccountry,
+        DstGeoCountry               = FTNTFGTdstcountry,
+        DnsQuery                    = FTNTFGTqname,
+        DnsQueryTypeName            = FTNTFGTqtype,
+        TransactionIdHex            = FTNTFGTxid,
+        DnsQueryClass               = FTNTFGTqtypeval,
+        DnsQueryClassName           = FTNTFGTqclass,
+        UrlCategory                 = FTNTFGTcatdesc,
+        DnsResponseName             = FTNTFGTipaddr,
+        ThreatIpAddr                = FTNTFGTbotnetip
+    | extend 
+        DnsQueryTypeName = case(
+            DnsQueryTypeName == "Unknown","",
+            DnsQueryTypeName
+        )
+    | lookup EventOriginalResultDetailsLookup on EventOriginalResultDetails
+    | lookup DnsQueryTypeLookup on DnsQueryTypeName
+    | invoke _ASIM_ResolveDvcFQDN ("Computer")
+    | invoke _ASIM_ResolveNetworkProtocol("NetworkProtocolNumber")
+    | extend 
+        SrcUsername         = coalesce(FTNTFGTuser, FTNTFGTunauthuser),
+        IpAddr              = SrcIpAddr,
+        Src                 = SrcIpAddr,
+        Dst                 = DstIpAddr,
+        Dvc                 = DvcHostname,
+        DnsResponseCodeName = EventResultDetails,
+        EventType           = "Query",
+        EventSchemaVersion  = "0.1.7",
+        EventSchema         = "Dns",
+        EventCount          = int(1),
+        EventEndTime        = TimeGenerated,
+        EventStartTime      = TimeGenerated,
+        EventVendor         = "Fortinet",
+        EventProduct        = "FortiGate",
+        Domain              = DnsQuery,
+        DomainCategory      = UrlCategory,
+        SessionId           = DnsSessionId
+    | extend 
+        User            = SrcUsername,
+        SrcUsernameType = _ASIM_GetUsernameType(SrcUsername),
+        SrcUserType     = _ASIM_GetUserType(SrcUsername, "")
+    | project-away FTNTFGTuser, FTNTFGTunauthuser, AdditionalExtensions, Computer, NetworkProtocolNumber
+};
+Parser(
+  disabled = disabled
+)
+}
+
+
+
+//
+// Function Name: ASimDnsGcp
+// Description: This ASIM parser supports normalizing Google cloud platform (GCP) DNS logs to the ASIM Dns normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimDnsGcp(    ['disabled']:bool=False)
+{
+// https://cloud.google.com/logging/docs/reference/v2/rest/v2/LogEntry
+let GCPSeverityTable=datatable(severity_s:string,EventSeverity:string)
+["DEFAULT","Informational",
+"DEBUG","Informational",
+"INFO","Informational",
+"NOTICE","Medium",
+"WARNING","Medium",
+"ERROR","High",
+"CRITICAL","High",
+"ALERT","High",
+"EMERGENCY","High"
+];
+let DNSQuery_GcpDns=(disabled:bool=false){
+  GCP_DNS_CL | where not(disabled)
+  | project-away MG, ManagementGroupName, RawData, SourceSystem, Computer
+  | where resource_type_s == "dns_query"
+  | lookup GCPSeverityTable on severity_s
+  | project-rename
+      DnsQueryTypeName=payload_queryType_s,
+      DnsResponseName=payload_rdata_s, 
+      EventResultDetails=payload_responseCode_s,
+      NetworkProtocol=payload_protocol_s, 
+      SrcIpAddr=payload_sourceIP_s,
+      EventOriginalUid=insert_id_s,
+      EventOriginalSeverity=severity_s    
+  | extend
+      DnsQuery=trim_end(@'\.',payload_queryName_s), 
+      EventCount=int(1),
+      EventProduct='Cloud DNS',
+      EventVendor='GCP',
+      EventSchema = 'Dns',
+      EventSchemaVersion="0.1.3",
+      Dvc="GCPDNS" ,
+      EventType = iif (resource_type_s == "dns_query", "Query", resource_type_s),
+      EventResult=iff(EventResultDetails=~'NOERROR','Success','Failure'),
+      EventSubType='response',
+      EventEndTime=todatetime(timestamp_t)
+  | extend
+      EventStartTime = EventEndTime,
+      EventResult = iff (EventResultDetails=~'NOERROR','Success','Failure')
+ // -- Aliases
+  | extend 
+      DnsResponseCodeName=EventResultDetails, 
+      Domain=DnsQuery,
+      IpAddr=SrcIpAddr,
+      Src=SrcIpAddr
+ // Backward Computability
+  | project-away *_s, *_d, *_b, *_t
+  };
+  DNSQuery_GcpDns(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimDnsInfobloxNIOS
+// Description: This ASIM parser supports normalizing Infoblox NIOS DNS logs to the ASIM Dns normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimDnsInfobloxNIOS(    ['disabled']:bool=False)
+{
+let SyslogProjected = Syslog | project SyslogMessage, ProcessName, TimeGenerated, Computer, HostIP;
+let response = (disabled: boolean=false) {
+   SyslogProjected
+   | where not(disabled)
+   | where ProcessName == "named" and SyslogMessage has_all ("client", "query:", "response:")
+   | parse SyslogMessage with *
+       "client " SrcIpAddr: string
+       "#" SrcPortNumber: string
+       " " NetworkProtocol: string
+       ": query: " DnsQuery: string
+       " " DnsQueryClassName: string
+       " " DnsQueryTypeName: string
+       " response: " DnsResponseCodeName: string
+       " " DnsFlags: string
+   | extend DnsResponseNameIndex= indexof(DnsFlags, " ")
+   | extend DnsResponseName =iif(DnsResponseNameIndex != "-1", substring(DnsFlags, DnsResponseNameIndex+1), "")
+   | extend DnsFlags =iif(DnsResponseNameIndex != "-1", substring(DnsFlags, 0, DnsResponseNameIndex), DnsFlags)
+   | extend SrcPortNumber = iif(SrcPortNumber has ':',replace_string(SrcPortNumber,':',''),SrcPortNumber)
+   | extend SrcPortNumber = toint(SrcPortNumber)
+   | extend EventSubType = "response"
+   | project-away SyslogMessage, ProcessName, DnsResponseNameIndex
+ };
+ let request = (disabled: boolean=false) {
+   SyslogProjected 
+   | where not(disabled)
+   | where ProcessName == "named" and SyslogMessage has_all ("client", "query:") and SyslogMessage !has "response:"
+   | extend SyslogMessage = (split(SyslogMessage,"client "))[1]
+   | extend SyslogMessage = iif(SyslogMessage startswith "@", (substring(SyslogMessage, indexof(SyslogMessage, " ")+1)), SyslogMessage)
+   | extend SyslogMessage = replace_string(SyslogMessage,"\\ ","@@@")
+   | parse SyslogMessage with 
+       SrcIpAddr: string
+       "#" SrcPortNumber: int *
+       "query: " DnsQuery: string
+       " " DnsQueryClassName: string
+       " " DnsQueryTypeName: string
+       " " DnsFlags: string
+   | extend DnsQuery = replace_string (DnsQuery, '@@@', ' ')
+   | extend DnsFlags= tostring((split(DnsFlags," "))[0])
+   | extend 
+       EventSubType = "request",
+       DnsResponseCodeName = "NA"
+   | project-away SyslogMessage, ProcessName
+ };
+ let parser = (disabled:boolean=false) {
+   union response (disabled), request (disabled)
+   | extend
+       EventCount=int(1),
+       EventStartTime=todatetime(TimeGenerated),
+       EventEndTime=todatetime(TimeGenerated),
+       EventProduct="NIOS",
+       EventVendor="Infoblox",
+       EventSchema="Dns",
+       EventSchemaVersion="0.1.3",
+       EventType="Query", 
+       EventResult=iff(EventSubType=="request" or DnsResponseCodeName=="NOERROR","Success","Failure"),
+       DvcIpAddr=iff (HostIP == "Unknown IP", "", HostIP)
+   // -- Aliases
+   | invoke _ASIM_ResolveDvcFQDN ("Computer")
+   | project-away Computer
+   | extend
+       Dvc=DvcHostname,
+       Domain=DnsQuery,
+       IpAddr=SrcIpAddr,
+       Src=SrcIpAddr,
+       EventResultDetails = DnsResponseCodeName
+   | project-away HostIP
+ };
+ parser (disabled)
+}
+
+
+
+//
+// Function Name: ASimDnsMicrosoftNXlog
+// Description: This ASIM parser supports normalizing Microsoft DNS logs, collected using NXlog, to the ASIM Dns normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimDnsMicrosoftNXlog(    ['disabled']:bool=False)
+{
+let ASimDnsMicrosoftNXLog = (disabled:bool=false) {
+let EventTypeTable=datatable(EventOriginalType:real,EventType:string)[
+    256, 'Query'
+  , 257, 'Query'
+  , 258, 'Query'
+  , 259, 'Query'
+  , 260, 'Query'
+  , 261, 'Query'
+  , 262, 'Query'
+  , 263, 'Dynamic update'
+  , 264, 'Dynamic update'
+  , 265, 'Zone XFR'
+  , 266, 'Zone XFR'
+  , 267, 'Zone XFR'
+  , 268, 'Zone XFR'
+  , 269, 'Zone XFR'
+  , 270, 'Zone XFR'
+  , 271, 'Zone XFR'
+  , 272, 'Zone XFR'
+  , 273, 'Zone XFR'
+  , 274, 'Zone XFR'
+  , 275, 'Zone XFR'
+  , 276, 'Zone XFR'
+  , 277, 'Dynamic update'
+  , 278, 'Dynamic update'
+  , 279, 'Query'
+  , 280, 'Query'
+];
+let EventSubTypeTable=datatable(EventOriginalType:real,EventSubType:string)[
+  256, 'request'
+, 257, 'response'
+, 258, 'response'
+, 259, 'response'
+, 260, 'request'
+, 261, 'response'
+, 262, 'response'
+, 263, 'request'
+, 264, 'response'
+, 265, 'request'
+, 266, 'request'
+, 267, 'response'
+, 268, 'response'
+, 269, 'request'
+, 270, 'request'
+, 271, 'response'
+, 272, 'response'
+, 273, 'request'
+, 274, 'request'
+, 275, 'response'
+, 276, 'response'
+, 277, 'request'
+, 278, 'response'
+, 279, 'response'
+, 280, 'response'
+];
+let EventResultTable=datatable(EventOriginalType:real,EventResult:string)[
+    256, 'NA'
+  , 257, 'Success'
+  , 258, 'Failure'
+  , 259, 'Failure'
+  , 260, 'NA'
+  , 261, 'NA'
+  , 262, 'Failure'
+  , 263, 'NA'
+  , 264, 'Based on RCODE'
+  , 265, 'NA'
+  , 266, 'NA'
+  , 267, 'Based on RCODE'
+  , 268, 'Based on RCODE'
+  , 269, 'NA'
+  , 270, 'NA'
+  , 271, 'Based on RCODE'
+  , 272, 'Based on RCODE'
+  , 273, 'NA'
+  , 274, 'NA'
+  , 275, 'Success'
+  , 276, 'Success'
+  , 277, 'NA'
+  , 278, 'Based on RCODE'
+  , 279, 'NA'
+  , 280, 'NA'
+];
+let RCodeTable=datatable(DnsResponseCode:int,ResponseCodeName:string)[
+    0,'NOERROR'
+  , 1,'FORMERR'
+  , 2,'SERVFAIL'
+  , 3,'NXDOMAIN'
+  , 4,'NOTIMP'
+  , 5,'REFUSED'
+  , 6,'YXDOMAIN'
+  , 7,'YXRRSET'
+  , 8,'NXRRSET'
+  , 9,'NOTAUTH'
+  , 10,'NOTZONE'
+  , 11,'DSOTYPENI'
+  , 16,'BADVERS'
+  , 16,'BADSIG'
+  , 17,'BADKEY'
+  , 18,'BADTIME'
+  , 19,'BADMODE'
+  , 20,'BADNAME'
+  , 21,'BADALG'
+  , 22,'BADTRUNC'
+  , 23,'BADCOOKIE'
+];
+let QTypeTable=datatable(DnsQueryType:int,QTypeName:string)[
+    0, 'Reserved'
+  , 1, 'A'
+  , 2, 'NS'
+  , 3, 'MD'
+  , 4, 'MF'
+  , 5, 'CNAME'
+  , 6, 'SOA'
+  , 7, 'MB'
+  , 8 ,'MG'
+  , 9 ,'MR'
+  , 10,'NULL'
+  , 11,'WKS'
+  , 12,'PTR'
+  , 13,'HINFO'
+  , 14,'MINFO'
+  , 15,'MX'
+  , 16,'TXT'
+  , 17,'RP'
+  , 18,'AFSDB'
+  , 19,'X25'
+  , 20,'ISDN'
+  , 21,'RT'
+  , 22,'NSAP'
+  , 23,'NSAP-PTR'
+  , 24,'SIG'
+  , 25,'KEY'
+  , 26,'PX'
+  , 27,'GPOS'
+  , 28,'AAAA'
+  , 29,'LOC'
+  , 30,'NXT'
+  , 31,'EID'
+  , 32,'NIMLOC'
+  , 33,'SRV'
+  , 34,'ATMA'
+  , 35,'NAPTR'
+  , 36,'KX'
+  , 37,'CERT'
+  , 38,'A6'
+  , 39,'DNAME'
+  , 40,'SINK'
+  , 41,'OPT'
+  , 42,'APL'
+  , 43,'DS'
+  , 44,'SSHFP'
+  , 45,'IPSECKEY'
+  , 46,'RRSIG'
+  , 47,'NSEC'
+  , 48,'DNSKEY'
+  , 49,'DHCID'
+  , 50,'NSEC3'
+  , 51,'NSEC3PARAM'
+  , 52,'TLSA'
+  , 53,'SMIMEA'
+  , 55,'HIP'
+  , 56,'NINFO'
+  , 57,'RKEY'
+  , 58,'TALINK'
+  , 59,'CDS'
+  , 60,'CDNSKEY'
+  , 61,'OPENPGPKEY'
+  , 62,'CSYNC'
+  , 63,'ZONEMD'
+  , 64,'SVCB'
+  , 65,'HTTPS'
+  , 99,'SPF'
+  , 100,'UINFO'
+  , 101,'UID'
+  , 102,'GID'
+  , 103,'UNSPEC'
+  , 104,'NID'
+  , 105,'L32'
+  , 106,'L64'
+  , 107,'LP'
+  , 108,'EUI48'
+  , 109,'EUI64'
+  , 249,'TKEY'
+  , 250,'TSIG'
+  , 251,'IXFR'
+  , 252,'AXFR'
+  , 253,'MAILB'
+  , 254,'MAILA'
+  , 255,'*'
+  , 256,'URI'
+  , 257,'CAA'
+  , 258,'AVC'
+  , 259,'DOA'
+  , 32768,'TA'
+  , 32769,'DLV'
+];
+NXLog_DNS_Server_CL | where not(disabled)
+| where EventID_d < 281
+| project-rename
+    DnsFlags=Flags_s,
+    DnsQuery=QNAME_s,
+    DnsQueryType=QTYPE_s,
+    DnsResponseCode=RCODE_s,
+    DnsResponseName=PacketData_s,
+    Dvc=Hostname_s,
+    EventOriginalType=EventID_d,
+    EventOriginalUid=GUID_g,
+    EventStartTime=EventTime_t,
+    SrcIpAddr=Source_s,
+    EventUid=_ItemId
+| extend
+    DnsQuery=trim_end(".",DnsQuery),
+    DnsQueryType=toint(DnsQueryType),
+    DnsResponseCode=toint(DnsResponseCode),
+    SrcPortNumber=toint(Port_s),
+    DvcHostname=Dvc,
+    DvcIpAddr=HostIP_s,
+    EventEndTime=EventStartTime,
+    EventProduct = "DNS Server",
+    EventSchemaVersion = "0.1.7",
+    EventVendor = "Microsoft",
+    EventSchema = "Dns",
+    EventCount = int(1),
+    NetworkProtocol=iff(TCP_s == "0","UDP","TCP"),
+    TransactionIdHex=tohex(toint(XID_s)),
+    DnsFlagsAuthenticated = tobool(AD_s),
+    DnsFlagsAuthoritative = tobool(AA_s),
+    DnsFlagsRecursionDesired = tobool(RD_s)
+| lookup EventTypeTable on EventOriginalType
+| lookup EventSubTypeTable on EventOriginalType
+| lookup EventResultTable on EventOriginalType
+| lookup RCodeTable on DnsResponseCode
+| lookup QTypeTable on DnsQueryType
+| extend
+    EventResultDetails = case (isnotempty(ResponseCodeName), ResponseCodeName
+      , DnsResponseCode between (3841 .. 4095), 'Reserved for Private Use'
+      , 'Unassigned'),
+    EventOriginalType = tostring(EventOriginalType)
+| extend
+    Domain=DnsQuery,
+    DnsResponseCodeName=EventResultDetails,
+    DnsQueryTypeName = case (isnotempty(QTypeName), QTypeName
+      , DnsQueryType between (66 .. 98), 'Unassigned'
+      , DnsQueryType between (110 .. 248), 'Unassigned'
+      , DnsQueryType between (261 .. 32767), 'Unassigned'
+      , 'Unassigned'),
+    EventResult=iff (EventResult == "Based on RCODE", iff(DnsResponseCode == 0, "Success", "Failure"),EventResult)
+  | extend
+  // Aliases
+    IpAddr = SrcIpAddr,
+    Src = SrcIpAddr
+| project-away
+    *_s, *_d, QTypeName, TenantId, SourceSystem, MG, ManagementGroupName, Computer, RawData, ResponseCodeName, EventReceivedTime_t, ProviderGuid_g, _ResourceId
+};
+ASimDnsMicrosoftNXLog(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimDnsMicrosoftOMS
+// Description: This ASIM parser supports normalizing Windows DNS logs, collected using the Log Analytics agent, to the ASIM Dns normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimDnsMicrosoftOMS(    ['disabled']:bool=False)
+{
+let EventTypeTable=datatable(EventOriginalType:int,EventType:string,EventSubType:string, EventResult:string)[
+  256, 'Query', 'request', 'NA'
+, 257, 'Query', 'response', 'Success'
+, 258, 'Query', 'response', 'Based on RCODE'
+, 259, 'Query', 'response', 'Based on RCODE'
+, 260, 'Query', 'request', 'NA'
+, 261, 'Query', 'response', 'NA'
+, 262, 'Query', 'response', 'Based on RCODE'
+, 263, 'Update', 'request', 'NA'
+, 264, 'Update', 'response', 'Based on RCODE'
+, 265, 'XFR', 'request', 'NA' 
+, 266, 'XFR', 'request', 'NA'
+, 267, 'XFR', 'response', 'Based on RCODE'
+, 268, 'XFR', 'response', 'Based on RCODE'
+, 269, 'XFR', 'request', 'NA'
+, 270, 'XFR', 'request', 'NA'
+, 271, 'XFR', 'response', 'Based on RCODE'
+, 272, 'XFR', 'response', 'Based on RCODE'
+, 273, 'XFR', 'request', 'NA'
+, 274, 'XFR', 'request', 'NA'
+, 275, 'XFR', 'response', 'Success'
+, 276, 'XFR', 'response', 'Success'
+, 277, 'Update', 'request', 'NA'
+, 278, 'Update', 'response', 'Based on RCODE'
+, 279, 'Query', 'NA', 'NA'
+, 280, 'Query', 'NA', 'NA'
+];
+let RCodeTable=datatable(DnsResponseCode:int,DnsResponseCodeName:string)[
+   0, 'NOERROR'
+ , 1, "FORMERR"
+ , 2,"SERVFAIL"
+ , 3,'NXDOMAIN'
+ , 4,'NOTIMP'
+ , 5,'REFUSED'
+ , 6,'YXDOMAIN'
+ , 7,'YXRRSET'
+ , 8,'NXRRSET'
+ , 9,'NOTAUTH'
+ , 10,'NOTZONE'
+ , 11,'DSOTYPENI'
+ , 16,'BADVERS'
+ , 16,'BADSIG'
+ , 17,'BADKEY'
+ , 18,'BADTIME'
+ , 19,'BADMODE'
+ , 20,'BADNAME'
+ , 21,'BADALG'
+ , 22,'BADTRUNC'
+ , 23,'BADCOOKIE'];
+let QueryTypeSymbols=datatable(QTypeSeq:string,QTypeName:string)[
+"0", "Reserved",
+"1", "A",
+"2", "NS",
+"3", "MD",
+"4", "MF",
+"5", "CNAME",
+"6", "SOA",
+"7", "MB",
+"8", "MG",
+"9", "MR",
+"10", "NULL",
+"11", "WKS",
+"12", "PTR",
+"13", "HINFO",
+"14", "MINFO",
+"15", "MX",
+"16", "TXT",
+"17", "RP",
+"18", "AFSDB",
+"19", "X25",
+"20", "ISDN",
+"21", "RT",
+"22", "NSAP",
+"23", "NSAP-PTR",
+"24", "SIG",
+"25", "KEY",
+"26", "PX",
+"27", "GPOS",
+"28", "AAAA",
+"29", "LOC",
+"30", "NXT",
+"31", "EID",
+"32", "NIMLOC",
+"33", "SRV",
+"34", "ATMA",
+"35", "NAPTR",
+"36", "KX",
+"37", "CERT",
+"38", "A6",
+"39", "DNAME",
+"40", "SINK",
+"41", "OPT",
+"42", "APL",
+"43", "DS",
+"44", "SSHFP",
+"45", "IPSECKEY",
+"46", "RRSIG",
+"47", "NSEC",
+"48", "DNSKEY",
+"49", "DHCID",
+"50", "NSEC3",
+"51", "NSEC3PARAM",
+"52", "TLSA",
+"53", "SMIMEA",
+"54", "Unassigned",
+"55", "HIP",
+"56", "NINFO",
+"57", "RKEY",
+"58", "TALINK",
+"59", "CDS",
+"60", "CDNSKEY",
+"61", "OPENPGPKEY",
+"62", "CSYNC",
+"99", "SPF",
+"100", "UINFO",
+"101", "UID",
+"102", "GID",
+"103", "UNSPEC",
+"104", "NID",
+"105", "L32",
+"106", "L64",
+"107", "LP",
+"108", "EUI48",
+"109", "EUI64",
+"249", "TKEY",
+"250", "TSIG",
+"251", "IXFR",
+"252", "AXFR",
+"253", "MAILB",
+"254", "MAILA",
+"255", "All",
+"256", "URI",
+"257", "CAA",
+"258", "AVC",
+"259", "DOA",
+"32768", "TA",
+"32769", "DLV"];
+let DNSQuery_MS=(disabled:bool=false){
+  DnsEvents | where not(disabled)
+| where EventId < 500
+| lookup QueryTypeSymbols on $left.QueryType == $right.QTypeSeq
+| extend DnsQueryTypeName=coalesce(QTypeName, QueryType)
+| project-rename
+       Dvc=Computer ,
+       SrcIpAddr = ClientIP,
+       EventMessage = Message,
+       EventOriginalType = EventId,
+       EventReportUrl = ReportReferenceLink,
+       DnsResponseName = IPAddresses,
+       DnsQuery = Name,
+       DnsResponseCode = ResultCode
+| extend hostelements=split(Dvc,'.')
+| extend DvcHostname=tostring(hostelements[0])
+       , DvcDomain=strcat_array( array_slice(hostelements,1,-1), '.')
+       , DvcFQDN = iff(Dvc contains ".",Dvc,"" )
+| extend  DvcDomainType=iff(DvcFQDN !="","FQDN","" )
+| project-away hostelements
+| extend
+       EventCount=int(1),
+       EventStartTime=TimeGenerated,
+       EventVendor = "Microsoft",
+       EventProduct = "DNS Server",
+       EventSchema = "Dns",
+       EventSchemaVersion="0.1.3",
+       EventEndTime=TimeGenerated,
+       EventSeverity = tostring(Severity)
+  | lookup RCodeTable on DnsResponseCode
+  | lookup EventTypeTable on EventOriginalType
+  | extend EventResultDetails = case (isnotempty(DnsResponseCodeName), DnsResponseCodeName
+                                  , DnsResponseCode between (3841 .. 4095), 'Reserved for Private Use'
+                                  , 'Unassigned'),
+    EventResult = iff (EventResult == "Based on RCODE", iff(DnsResponseCode == 0, "Success", "Failure"),EventResult)
+// **************Aliases
+  | extend
+      DnsResponseCodeName=EventResultDetails,
+      Domain=DnsQuery,
+      IpAddr=SrcIpAddr,
+      Src=SrcIpAddr,
+      EventOriginalType=tostring(EventOriginalType)
+  | project-away 
+      SubType, QTypeName, QueryType, SourceSystem, TaskCategory, Remote*, Severity, Result, Confidence, Description, IndicatorThreatType, MaliciousIP
+      };
+DNSQuery_MS (disabled)
+}
+
+
+
+//
+// Function Name: ASimDnsMicrosoftSysmon
+// Description: This ASIM parser supports normalizing Sysmon for Windows DNS logs (event number 22) logs ingested in 'Event' table  to the ASIM Dns normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimDnsMicrosoftSysmon(    ['disabled']:bool=False)
+{
+let parser = (disabled:bool=false) {
+let RCodeTable=datatable(DnsResponseCode:int,DnsResponseCodeName:string)[
+    // See https://docs.microsoft.com/windows/win32/debug/system-error-codes--9000-11999-
+    0, 'NOERROR'
+  , 9001, "FORMERR"
+  , 9002,"SERVFAIL"
+  , 9003,'NXDOMAIN'
+  , 9004,'NOTIMP'
+  , 9005,'REFUSED'
+  , 9006,'YXDOMAIN'
+  , 9007,'YXRRSET'
+  , 9008,'NXRRSET'
+  , 9009,'NOTAUTH'
+  , 9010,'NOTZONE'
+  , 9011,'DSOTYPENI'
+  , 9016,'BADVERS'
+  , 9016,'BADSIG'
+  , 9017,'BADKEY'
+  , 9018,'BADTIME'
+  , 9019,'BADMODE'
+  , 9020,'BADNAME'
+  , 9021,'BADALG'
+  , 9022,'BADTRUNC'
+  , 9023,'BADCOOKIE'
+  , 1460, 'TIMEOUT'
+  ];
+let ParsedDnsEvent_Event =(disabled:bool=false) {
+    Event | where not(disabled)
+    | project EventID, EventData, Computer, TimeGenerated, _ResourceId, _SubscriptionId, Source, Type , _ItemId 
+    | where Source == "Microsoft-Windows-Sysmon" and EventID==22
+    | project-away Source, EventID
+    | parse-kv EventData as (
+        RuleName:string,
+        UtcTime:datetime, 
+        ProcessGuid:string,
+        ProcessId:string,
+        QueryName:string,
+        QueryStatus:int,
+        QueryResults:string,
+        Image:string,
+        User:string
+      )
+      with (regex=@'<Data Name="(\w+)">{?([^<]*?)}?</Data>')
+    | project-rename 
+        EventEndTime = UtcTime,
+        SrcProcessId = ProcessId,
+        SrcProcessGuid = ProcessGuid,
+        DnsQuery = QueryName,
+        DnsResponseCode = QueryStatus,
+        DnsResponseName = QueryResults,
+        SrcProcessName = Image,
+        SrcUsername = User
+    | project-away EventData
+};
+ParsedDnsEvent_Event(disabled)
+  | lookup RCodeTable on DnsResponseCode
+  | project-rename 
+      DvcHostname = Computer,
+      // EventUid = _ItemId, 
+      DvcScopeId = _SubscriptionId,
+      DvcId = _ResourceId
+  | extend
+      EventOriginalType = '22',
+      EventCount=int(1),
+      EventProduct = 'Sysmon',
+      EventVendor = 'Microsoft',
+      EventSchema = 'Dns',
+      EventSchemaVersion="0.1.6",
+      EventType = 'Query',
+      EventResult = iff (DnsResponseCode == 0,'Success','Failure'),
+      EventStartTime = EventEndTime,
+      EventSubType= 'response',
+      EventSeverity= iif (DnsResponseCode == 0, 'Informational', 'Low'),
+      SrcUsernameType = 'Windows',
+      RuleName = iff (RuleName == "-", "", RuleName),
+      DnsResponseName = iff (DnsResponseName == "-", "", DnsResponseName),
+      DnsResponseCodeName = iff (DnsResponseCodeName == "", "NA", DnsResponseCodeName),
+      DvcIdType = iff (DvcId != "", "AzureResourceId", ""),
+      EventUid = _ItemId
+  // -- Aliases
+  | extend 
+      EventResultDetails = DnsResponseCodeName,
+      Domain = DnsQuery,
+      Dvc = DvcHostname,
+      SrcHostname = DvcHostname,
+      Hostname=DvcHostname,
+      Src = DvcHostname,
+      DnsResponseCode = toint(iff (DnsResponseCode > 9000 and DnsResponseCode < 9100, DnsResponseCode-9000, DnsResponseCode)),
+      User = SrcUsername,
+      Process = SrcProcessName,
+      Rule = RuleName,
+      DvcAzureResourceId = DvcId
+      | project-away DvcAzureResourceId
+};
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimDnsMicrosoftSysmonWindowsEvent
+// Description: This ASIM parser supports normalizing Sysmon for Windows DNS logs (event number 22) logs ingested in 'Event' table to the ASIM Dns normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimDnsMicrosoftSysmonWindowsEvent(    ['disabled']:bool=False)
+{
+let parser = (disabled:bool=false) {
+let RCodeTable=datatable(DnsResponseCode:int,DnsResponseCodeName:string)[
+    // See https://docs.microsoft.com/windows/win32/debug/system-error-codes--9000-11999-
+    0, 'NOERROR'
+  , 9001, "FORMERR"
+  , 9002,"SERVFAIL"
+  , 9003,'NXDOMAIN'
+  , 9004,'NOTIMP'
+  , 9005,'REFUSED'
+  , 9006,'YXDOMAIN'
+  , 9007,'YXRRSET'
+  , 9008,'NXRRSET'
+  , 9009,'NOTAUTH'
+  , 9010,'NOTZONE'
+  , 9011,'DSOTYPENI'
+  , 9016,'BADVERS'
+  , 9016,'BADSIG'
+  , 9017,'BADKEY'
+  , 9018,'BADTIME'
+  , 9019,'BADMODE'
+  , 9020,'BADNAME'
+  , 9021,'BADALG'
+  , 9022,'BADTRUNC'
+  , 9023,'BADCOOKIE'
+  , 1460, 'TIMEOUT'
+  ];
+let ParsedDnsEvent_WindowsEvent =(disabled:bool=false) {
+    WindowsEvent | where not(disabled)
+    | project EventID, EventData, Computer, TimeGenerated, _ResourceId, _SubscriptionId,  Provider, Type , _ItemId 
+    | where Provider == "Microsoft-Windows-Sysmon" and EventID == 22
+    | project-away Provider, EventID      
+    | extend 
+        RuleName = tostring(EventData.RuleName),
+        EventEndTime = todatetime(EventData.UtcTime),
+        SrcProcessGuid = tostring(EventData.ProcessGuid),
+        // extract ('^{(.*)}$', 1, tostring(EventData.ProcessGuid), typeof(string)),
+        SrcProcessId = tostring(EventData.ProcessId),  
+        DnsQuery = tostring(EventData.QueryName),
+        DnsResponseCode = toint(EventData.QueryStatus),
+        DnsResponseName = tostring(EventData.QueryResults),
+        SrcProcessName = tostring(EventData.Image),
+        SrcUsername = tostring(EventData.User)
+    | project-away EventData
+    | parse SrcProcessGuid with '{' SrcProcessGuid '}'
+};
+ParsedDnsEvent_WindowsEvent(disabled)
+  | lookup RCodeTable on DnsResponseCode
+  | project-rename 
+      DvcHostname = Computer,
+      // EventUid = _ItemId, 
+      DvcScopeId = _SubscriptionId,
+      DvcId = _ResourceId
+  | extend
+      EventOriginalType = '22',
+      EventCount=int(1),
+      EventProduct = 'Sysmon',
+      EventVendor = 'Microsoft',
+      EventSchema = 'Dns',
+      EventSchemaVersion="0.1.6",
+      EventType = 'Query',
+      EventResult = iff (DnsResponseCode == 0,'Success','Failure'),
+      EventStartTime = EventEndTime,
+      EventSubType= 'response',
+      EventSeverity= iif (DnsResponseCode == 0, 'Informational', 'Low'),
+      SrcUsernameType = 'Windows',
+      RuleName = iff (RuleName == "-", "", RuleName),
+      DnsResponseName = iff (DnsResponseName == "-", "", DnsResponseName),
+      DnsResponseCodeName = iff (DnsResponseCodeName == "", "NA", DnsResponseCodeName),
+      DvcIdType = iff (DvcId != "", "AzureResourceId", ""),
+      EventUid = _ItemId
+  // -- Aliases
+  | extend 
+      EventResultDetails = DnsResponseCodeName,
+      Domain = DnsQuery,
+      Dvc = DvcHostname,
+      SrcHostname = DvcHostname,
+      Hostname=DvcHostname,
+      Src = DvcHostname,
+      DnsResponseCode = toint(iff (DnsResponseCode > 9000 and DnsResponseCode < 9100, DnsResponseCode-9000, DnsResponseCode)),
+      User = SrcUsername,
+      Process = SrcProcessName,
+      Rule = RuleName,
+      DvcAzureResourceId = DvcId
+      | project-away DvcAzureResourceId
+};
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimDnsNative
+// Description: This ASIM parser supports normalizing the native Microsoft Sentinel DNS table (ASimDnsActivityLogs) to the ASIM DNS activity normalized schema. While the native table is ASIM compliant, the parser is needed to add capabilities, such as aliases, available only at query time. 
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimDnsNative(    ['disabled']:bool=False)
+{
+let parser=(disabled:bool=false) 
+{
+  ASimDnsActivityLogs  | where not(disabled)
+    | project-rename
+        EventUid = _ItemId
+    | extend
+        EventEndTime = TimeGenerated,
+        EventStartTime = TimeGenerated,
+        Dvc = coalesce (Dvc, DvcFQDN, DvcHostname, DvcIpAddr, DvcId, _ResourceId, strcat (EventVendor,'/', EventProduct)),
+        Dst = coalesce (DstFQDN, DstHostname, DstIpAddr, DstDvcId),
+        Src = coalesce (SrcFQDN, SrcHostname, SrcIpAddr, SrcDvcId),
+        EventSchema = "Dns"
+    // -- Type fixes
+    | extend
+        ThreatConfidence = toint(ThreatConfidence),
+        ThreatFirstReportedTime = todatetime(ThreatFirstReportedTime),
+        ThreatIsActive = tobool(ThreatIsActive),
+        ThreatLastReportedTime = todatetime(ThreatLastReportedTime),
+        ThreatOriginalRiskLevel = tostring(ThreatOriginalRiskLevel),
+        ThreatRiskLevel = toint(ThreatRiskLevel)    
+    //  -- Aliases
+    | extend
+        DnsResponseCodeName=EventResultDetails,
+        Domain=DnsQuery,
+        IpAddr=SrcIpAddr,
+        Duration = DnsNetworkDuration,
+        Process = SrcProcessName,
+        SessionId = DnsSessionId,
+        User = SrcUsername,
+        Hostname = SrcHostname,
+        DvcScopeId = coalesce(DvcScopeId,_SubscriptionId)
+    | project-away
+        TenantId, SourceSystem, _ResourceId, _SubscriptionId
+};
+parser  (disabled=disabled)
+}
+
+
+

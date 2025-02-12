@@ -1,0 +1,2374 @@
+//
+// Function Name: vimWebSessionFortinetFortiGate
+// Description: This ASIM parser supports filtering and normalizing Fortinet FortiGate logs produced by the Microsoft Sentinel Fortinet connector to the ASIM Web Session normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimWebSessionFortinetFortiGate(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['ipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['url_has_any']:dynamic=dynamic([]),
+    ['httpuseragent_has_any']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=false)
+{
+let parser=(
+  starttime:datetime               = datetime(null), 
+  endtime:datetime                 = datetime(null),
+  srcipaddr_has_any_prefix:dynamic = dynamic([]),
+  ipaddr_has_any_prefix:dynamic    = dynamic([]), 
+  url_has_any:dynamic              = dynamic([]),
+  httpuseragent_has_any:dynamic    = dynamic([]),
+  eventresultdetails_in:dynamic    = dynamic([]),
+  eventresult:string               = '*',
+  disabled:bool                    = false
+){
+  let src_or_any                = set_union(
+    srcipaddr_has_any_prefix,
+    ipaddr_has_any_prefix
+  ); 
+  let remove_protocol_from_list = (list:dynamic)
+  {
+      print list
+      | mv-apply l = print_0 to typeof(string) on
+        ( extend l = substring(l,indexof(l,@'//')+2))
+      | project l
+  };
+  let EventLookup=datatable(DeviceAction:string,DvcAction:string,EventResult:string)
+  [
+      "passthrough","Allow","Success"
+      , "blocked","Deny","Failure"
+  ];
+  // -- See https://docs.fortinet.com/document/fortigate/7.2.4/fortios-log-message-reference/671442/cef-priority-levels
+  let SeverityLookup = datatable (EventOriginalSeverity:string, EventSeverity:string)
+  [
+    "1", "Informational", // Debug
+    "2", "Informational", // Information
+    "3", "Informational", // Notification
+    "4", "Low", // Warning
+    "5", "Low", // Error
+    "6", "High", // Critical
+    "7", "Medium", // Alert
+    "8", "High" // Emergency
+  ];     
+  CommonSecurityLog
+  | where not(disabled)
+  | where (isnull(starttime) or TimeGenerated>=starttime) and (isnull(endtime) or TimeGenerated<=endtime)
+  | where DeviceVendor == "Fortinet" 
+    and DeviceProduct  startswith "Fortigate"
+    and Activity has_all ('webfilter', 'utm')
+  | where (array_length(url_has_any) == 0 or RequestURL has_any (remove_protocol_from_list(url_has_any)))
+  | where (array_length(httpuseragent_has_any) == 0 or AdditionalExtensions has_any(httpuseragent_has_any))
+  | extend temp_SrcMatch = has_any_ipv4_prefix(SourceIP,src_or_any)
+  | extend temp_DstMatch = has_any_ipv4_prefix(DestinationIP,ipaddr_has_any_prefix)
+  | extend ASimMatchingIpAddr = case(
+      array_length(src_or_any) == 0, "-",
+      temp_DstMatch and temp_SrcMatch, "Both",
+      temp_SrcMatch , "SrcIpAddr",
+      temp_DstMatch, "DstIpAddr",
+      "No match") 
+  | where ASimMatchingIpAddr != "No match" 
+  | project-away temp_*
+  | extend 
+      EventResultDetails = "NA"
+  | where (array_length(eventresultdetails_in) == 0 or tostring(EventResultDetails) has_any(eventresultdetails_in)) 
+  | lookup EventLookup on DeviceAction 
+  | where (eventresult == '*' or EventResult =~ eventresult)
+  | project Activity,AdditionalExtensions,DestinationIP,DestinationPort,DeviceAction,DeviceInboundInterface,DeviceOutboundInterface,DeviceProduct,DeviceVersion,LogSeverity,Protocol,ReceivedBytes,SentBytes,SourceIP,SourcePort,TimeGenerated, DeviceExternalID, Type, _ItemId, Computer, EventResult, EventResultDetails, DvcAction, RequestURL, RequestContext, DestinationHostName, SourceHostName, SourceUserName, DestinationUserName, ASimMatchingIpAddr
+  | project-rename 
+    Url                     = RequestURL
+    , UrlCategory           = RequestContext
+    , DstBytes              = ReceivedBytes
+    , DstInterfaceName      = DeviceOutboundInterface
+    , DstIpAddr             = DestinationIP
+    , DstPortNumber         = DestinationPort
+    , DvcHostname           = Computer
+    , EventMessage          = Activity
+    , EventOriginalSeverity = LogSeverity
+    , EventProduct          = DeviceProduct
+    , EventProductVersion   = DeviceVersion
+    , SrcBytes              = SentBytes
+    , SrcInterfaceName      = DeviceInboundInterface
+    , SrcIpAddr             = SourceIP
+    , SrcPortNumber         = SourcePort
+    , DvcId                 = DeviceExternalID
+    , EventUid              = _ItemId
+    , DstHostname           = DestinationHostName
+    , SrcHostname           = SourceHostName
+    , SrcUsername           = SourceUserName
+    , DstUsername           = DestinationUserName
+  | invoke _ASIM_ResolveNetworkProtocol ('Protocol')
+  | extend 
+      DstUsernameType = _ASIM_GetUsernameType(DstUsername),
+      SrcUsernameType = _ASIM_GetUsernameType(SrcUsername)
+  | project-rename DvcOriginalAction = DeviceAction
+  | parse-kv AdditionalExtensions as (
+          FortinetFortiGatestart:datetime,
+          FortinetFortiGatesrcintfrole:string,
+          FortinetFortiGatedstintfrole:string,
+          FortinetFortiGateexternalID:string,
+          FortinetFortiGatepolicyid:int,
+          FortinetFortiGatedstcountry:string,
+          FortinetFortiGatesrccountry:string,
+          FortinetFortiGatecrscore:string,
+          FortinetFortiGateduration:int,
+          FortinetFortiGatesentpkt:long,
+          FortinetFortiGatercvdpkt:long,
+          ['ad.referralurl']:string,
+          ['ad.httpmethod']:string,
+          ['ad.agent']:string
+      ) with (pair_delimiter=';', kv_delimiter='=')
+  | parse AdditionalExtensions with * "x-forwarded-for=" HttpRequestXff:string ";" *
+  | project-rename
+      HttpReferrer            = ['ad.referralurl'],
+      HttpRequestMethod       = ['ad.httpmethod'],
+      HttpUserAgent           = ['ad.agent'],
+      EventStartTime          = FortinetFortiGatestart,
+      SrcZone                 = FortinetFortiGatesrcintfrole,
+      DstZone                 = FortinetFortiGatedstintfrole,
+      NetworkSessionId        = FortinetFortiGateexternalID,
+      RuleNumber              = FortinetFortiGatepolicyid,
+      NetworkDuration         = FortinetFortiGateduration,
+      DstGeoCountry           = FortinetFortiGatedstcountry,
+      SrcGeoCountry           = FortinetFortiGatesrccountry,
+      ThreatOriginalRiskLevel = FortinetFortiGatecrscore,
+      SrcPackets              = FortinetFortiGatesentpkt,
+      DstPackets              = FortinetFortiGatercvdpkt
+  | parse AdditionalExtensions with * "Method=" temp_HttpRequestMethod "|User-Agent=" temp_HttpUserAgent ";" *
+  | extend 
+      HttpRequestMethod = coalesce(temp_HttpRequestMethod,HttpRequestMethod),
+      HttpUserAgent = coalesce(temp_HttpUserAgent,HttpUserAgent)
+  | project-away temp_*
+  | where (array_length(httpuseragent_has_any) == 0 or HttpUserAgent has_any(httpuseragent_has_any))
+  | extend 
+      EventCount               = int(1)
+      , EventSchema            = "WebSession"
+      , EventSchemaVersion     = "0.2.6"
+      , EventType              = "HTTPsession"
+      , EventVendor            = "Fortinet"
+      , DvcIdType              = "Other"
+      , NetworkBytes           = DstBytes + SrcBytes
+      , EventEndTime           = TimeGenerated
+      , EventStartTime         = coalesce(EventStartTime, TimeGenerated)
+      , NetworkProtocolVersion = case(DstIpAddr contains ".", "IPv4"
+          , DstIpAddr contains ":", "IPv6"
+          , "")
+      , NetworkPackets         = DstPackets + SrcPackets
+      , UserAgent              = HttpUserAgent
+      , Dvc                    = DvcHostname
+      , User                   = SrcUsername
+      , Hostname               = DstHostname
+  | lookup SeverityLookup on EventOriginalSeverity
+  | extend 
+      Src       = SrcIpAddr,
+      Dst       = DstIpAddr,
+      SessionId = NetworkSessionId,
+      IpAddr    = SrcIpAddr,
+      Duration  = NetworkDuration,
+      Rule      = tostring(RuleNumber)
+  | project-away Protocol, AdditionalExtensions, NetworkProtocolNumber
+};
+parser (starttime=starttime, endtime=endtime, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, ipaddr_has_any_prefix=ipaddr_has_any_prefix, url_has_any=url_has_any, httpuseragent_has_any=httpuseragent_has_any, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled=disabled)
+}
+
+
+
+//
+// Function Name: vimWebSessionIIS
+// Description: This ASIM parser supports filtering and normalizing IIS logs produced to the ASIM Web Session normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimWebSessionIIS(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['ipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['url_has_any']:dynamic=dynamic([]),
+    ['httpuseragent_has_any']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=false)
+{
+let parser=(
+  starttime:datetime=datetime(null), 
+  endtime:datetime=datetime(null),
+  srcipaddr_has_any_prefix:dynamic=dynamic([]),
+  ipaddr_has_any_prefix:dynamic=dynamic([]), 
+  url_has_any:dynamic=dynamic([]),
+  httpuseragent_has_any:dynamic=dynamic([]),
+  eventresultdetails_in:dynamic=dynamic([]),
+  eventresult:string='*',
+  disabled:bool=false
+)
+{
+      let src_or_any=set_union(srcipaddr_has_any_prefix, ipaddr_has_any_prefix); 
+      W3CIISLog
+      | where not(disabled)
+      | where (isnull(starttime) or TimeGenerated >= starttime)
+          and (isnull(endtime) or TimeGenerated <= endtime)
+      | extend
+          EventResult = iff ( toint(scStatus) < 400, "Success", "Failure")
+      | where (eventresult == '*' or EventResult =~ eventresult)
+      | where (array_length(url_has_any) == 0 or csUriStem has_any (url_has_any) or csUriQuery has_any (url_has_any))
+      | where (array_length(httpuseragent_has_any) == 0 or csUserAgent has_any(httpuseragent_has_any))
+      | where (array_length(eventresultdetails_in) == 0 or scStatus has_any (eventresultdetails_in))
+      | extend temp_SrcMatch=has_any_ipv4_prefix(cIP,src_or_any)
+      | extend ASimMatchingIpAddr=case(
+          array_length(src_or_any) == 0 ,"-",
+          temp_SrcMatch, "Both",
+          temp_SrcMatch, "SrcIpAddr",
+          "No match"
+      )
+      | where ASimMatchingIpAddr != "No match" 
+      | project-away temp_*
+      | extend
+              EventResult = iff ( toint(scStatus) < 400, "Success", "Failure"),
+              EventResultDetails = tostring(scStatus), 
+              csUriQuery = iff(csUriQuery == "-", "", csUriQuery),
+              csUserName = iff(csUserName == "-", "", csUserName),
+              HttpVersion = iff((csVersion has "HTTP"), split(csVersion, "/")[1], ""), // there is a limited chance that something connects over non-HTTP
+              HttpHost = iff (sSiteName in ("Default Web Site", "-"), "", sSiteName)
+      | project-rename 
+              HttpRequestMethod = csMethod,
+              User = csUserName, //probably won't have this one often
+              Dvc = Computer,
+              Dst = sIP,
+              Src = cIP,
+              UserAgent = csUserAgent,
+              ThreatCategory = IndicatorThreatType,
+              SrcGeoCountry = RemoteIPCountry,
+              SrcGeoLatitude = RemoteIPLatitude,
+              SrcGeoLongitude = RemoteIPLongitude,
+              ThreatOriginalConfidence = Confidence,
+              ThreatIpAddr = MaliciousIP,
+              EventReportUrl = ReportReferenceLink,
+              EventUid = _ItemId,
+              DvcId = _ResourceId
+      | extend
+              EventOriginalSeverity = tostring(Severity),
+              ThreatIsActive = tobool(IsActive),
+              ThreatFirstReportedTime = todatetime(FirstReportedDateTime),
+              ThreatLastReportedTime = todatetime(LastReportedDateTime),
+              SrcUsername = iff ( User == "-", "", User),
+              HttpReferrer = iff ( csReferer == "-", "", csReferer),
+              DvcIdType = "AzureResourceId"
+      | project-away IsActive, FirstReportedDateTime, LastReportedDateTime, Severity, sSiteName
+      | extend 
+              SrcUsernameType = _ASIM_GetUsernameType (SrcUsername),
+              DstNatIpAddr = iff(csHost <> "", Dst, ""),
+              EventType = 'WebServerSession',            
+              EventVendor = 'Microsoft',
+              EventSchemaVersion = '0.2.6',
+              EventSchema = 'WebSession', 
+              EventProduct = 'IIS',
+              DvcOs = 'Windows',
+              EventCount = int(1),
+              SrcIpAddr = Src,
+              IpAddr = Src,
+              HttpUserAgent = UserAgent,
+              HttpStatusCode = tostring(EventResultDetails),
+              EventStartTime = ( (TimeGenerated) - (TimeTaken * 1ms)), // TimeTaken field is in Milliseconds 
+              EventEndTime =  TimeGenerated,
+              EventSeverity = iff(EventResult == "Success", "Low", "Informational"),
+              Url = iff(csUriQuery == "", csUriStem, strcat(csUriStem,"?",csUriQuery)),
+              sPort = tostring(sPort),
+              HttpHost = iff ( HttpHost == "-", "", HttpHost),
+              csHost = iff ( csHost == "-", "", csHost),  //remove empty values
+              EventOriginalResultDetails = iff(scSubStatus <> "0", strcat (scStatus, ".", scSubStatus), scStatus)
+      | extend 
+              ipv6_parts = extract_all (@'^\[(.+)\](?:\:(\d+))?$',csHost)[0],
+              ipv4_parts = extract_all (@'^(\d+\.\d+\.\d+\.\d+)(?:\:(\d+))?$',csHost)[0],
+              host_parts = extract_all (@'^([^\\\d:]+)(?:\:(\d+))?$',csHost)[0]
+      | extend         
+              DstIpAddr = tostring(coalesce(ipv4_parts[0], ipv6_parts[0])),
+              DstPortNumber = toint(coalesce(ipv4_parts[1], ipv6_parts[1], host_parts[1])),
+              HttpHost = tostring(coalesce(host_parts[0], HttpHost))
+      | project-away ipv4_parts, ipv6_parts, host_parts              
+      | extend
+          DstHostname = HttpHost,
+          Hostname = HttpHost
+      | extend 
+               ThreatField = case(
+                                  ThreatIpAddr <> "" and ThreatIpAddr == SrcIpAddr, "SrcIpAddr"
+                                 ,ThreatIpAddr <> "" and ThreatIpAddr == DstIpAddr, "DstIpAddr"
+                                 ,"")
+      | project-away 
+              AdditionalInformation,
+              AzureDeploymentID,
+              Date,
+              Description,
+              DvcOs,
+              FileOffset,
+              FileUri,
+              MG, 
+              ManagementGroupName,
+              Role*,
+              sComputerName,
+              SourceSystem,
+              TLPLevel,
+              TenantId,
+              TimeTaken,
+              Time,
+              cs*,
+              sPort,
+              sc*,
+              StorageAccount
+};
+parser (starttime=starttime, endtime=endtime, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, ipaddr_has_any_prefix=ipaddr_has_any_prefix, url_has_any=url_has_any, httpuseragent_has_any=httpuseragent_has_any, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled=disabled)
+}
+
+
+
+//
+// Function Name: vimWebSessionNative
+// Description: This ASIM parser supports filtering and normalizing the native Microsoft Sentinel Web Session table (ASimWebSessionLogs) to the ASIM WebSession normalized schema. While the native table is ASIM compliant, the parser is needed to add capabilities, such as aliases, available only at query time. 
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimWebSessionNative(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['ipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['url_has_any']:dynamic=dynamic([]),
+    ['httpuseragent_has_any']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=false)
+{
+let parser=(
+  starttime:datetime=datetime(null), 
+  endtime:datetime=datetime(null),
+  srcipaddr_has_any_prefix:dynamic=dynamic([]), 
+  ipaddr_has_any_prefix:dynamic=dynamic([]), 
+  url_has_any:dynamic=dynamic([]),
+  httpuseragent_has_any:dynamic=dynamic([]),
+  eventresultdetails_in:dynamic=dynamic([]),
+  eventresult:string='*',
+  disabled:bool=false
+)
+{
+  let src_or_any=set_union(srcipaddr_has_any_prefix, ipaddr_has_any_prefix); 
+  ASimWebSessionLogs
+    | where not(disabled)
+    | where (isnull(starttime) or TimeGenerated >= starttime)
+        and (isnull(endtime) or TimeGenerated <= endtime)
+    | where (array_length(url_has_any) == 0 or Url has_any (url_has_any))
+    | where (array_length(httpuseragent_has_any) == 0 or HttpUserAgent has_any(httpuseragent_has_any))
+    | where (array_length(eventresultdetails_in) == 0 or tostring(EventResultDetails) has_any(eventresultdetails_in))
+    | where (eventresult == '*' or EventResult =~ eventresult)
+    | extend temp_SrcMatch=has_any_ipv4_prefix(SrcIpAddr,src_or_any)
+          , temp_DstMatch=has_any_ipv4_prefix(DstIpAddr,ipaddr_has_any_prefix)
+    | extend ASimMatchingIpAddr=case(
+                                  array_length(src_or_any) == 0 ,"-",
+                                  temp_SrcMatch and temp_DstMatch, "Both",
+                                  temp_SrcMatch, "SrcIpAddr",
+                                  temp_DstMatch, "DstIpAddr",
+                                  "No match"
+                              )
+    | where ASimMatchingIpAddr != "No match" 
+    | project-away temp_*
+    // 
+    // -- Schema fixed
+    | extend
+        FileSize = tolong(FileSize)
+    //
+    // -- Log Analytics global fields renaming
+    | project-rename
+        EventUid          = _ItemId,
+        DvcScopeId        = _SubscriptionId
+    //
+    // -- ASIM Global fields
+    | extend          
+        EventSchema       = "WebSession"
+    | extend
+        //
+        // -- Default values
+        EventEndTime      = coalesce (EventEndTime, TimeGenerated),
+        EventStartTime    = coalesce (EventStartTime, TimeGenerated),
+        //
+        // -- Multi-source aliases
+        Dvc = iff (EventType == 'HTTPSession',
+          coalesce (DvcFQDN, DvcHostname, DvcIpAddr, DvcId, DstMacAddr, _ResourceId, strcat (EventVendor,'/', EventProduct)),
+          coalesce (DvcFQDN, DvcHostname, DstFQDN, DstHostname, DvcIpAddr, DstIpAddr, DvcId, DstDvcId, DstMacAddr, _ResourceId, strcat (EventVendor,'/', EventProduct))
+        ),
+        Dst               = coalesce (DstFQDN, DstHostname, DstIpAddr, DstDvcId),
+        Src               = coalesce (SrcFQDN, SrcHostname, SrcIpAddr, SrcDvcId),
+        Rule              = coalesce(RuleName, tostring(RuleNumber)),
+        //
+        // -- Aliases which depend on EventType
+        Hostname = iff  (EventType == "EndpointNetworkSession" and NetworkDirection == ("Inbound"), SrcHostname, DstHostname),
+        IpAddr = iff  (EventType == "EndpointNetworkSession" and NetworkDirection == ("Inbound"), DstIpAddr, SrcIpAddr),
+        //
+        // -- Simple aliases
+        Duration          = NetworkDuration,
+        SessionId         = NetworkSessionId,
+        User              = SrcUsername,
+        HttpStatusCode    = EventResultDetails,
+        UserAgent         = HttpUserAgent
+        // --
+        // -- Aliased fields not implemented in ASimWebSessionLogs yet 
+        //InnerVlanId     = SrcVlanId,
+        //OuterVlanId     = DstVlanId,
+        //DvcInterface    = coalesce(DvcInterface, DvcInboundInterface, DvcOutboundInterface), 
+    | project-away
+        TenantId, SourceSystem, _ResourceId
+};
+parser (starttime=starttime, endtime=endtime, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, ipaddr_has_any_prefix=ipaddr_has_any_prefix, url_has_any=url_has_any, httpuseragent_has_any=httpuseragent_has_any, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled=disabled)
+}
+
+
+
+//
+// Function Name: vimWebSessionPaloAltoCEF
+// Description: This ASIM parser supports filtering and normalizing Palo Alto PanOS threat event logs delivered using CEF to the ASIM WebSession normalized schema. The Palo Alto threat events are generated by the Palo Alto URL filtering module and collected using the Palo Alto Networks connectors, Common Event Format (CEF) via AMA connector, or the Common Event Format (CEF) via Legacy Agent connector to the CommonSecurityLog table.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimWebSessionPaloAltoCEF(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['ipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['url_has_any']:dynamic=dynamic([]),
+    ['httpuseragent_has_any']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=false)
+{
+let parser=(
+  starttime:datetime=datetime(null), 
+  endtime:datetime=datetime(null),
+  srcipaddr_has_any_prefix:dynamic=dynamic([]),
+  ipaddr_has_any_prefix:dynamic=dynamic([]), 
+  url_has_any:dynamic=dynamic([]),
+  httpuseragent_has_any:dynamic=dynamic([]),
+  eventresultdetails_in:dynamic=dynamic([]),
+  eventresult:string='*',
+  disabled:bool=false
+)
+{
+    let src_or_any                = set_union(
+      srcipaddr_has_any_prefix,
+      ipaddr_has_any_prefix
+    ); 
+    let EventLookup=datatable(DeviceAction:string, DvcAction:string,EventResult:string,HttpStatusCode:string)
+    [
+      "alert", "Allow", "Success","200",
+      "allow", "Allow", "Success", "200",
+      "continue", "Allow", "Success", "200",
+      "override", "Allow", "Success", "200",
+      "block-continue", "Allow", "Partial", "200",
+      "block-url", "Deny", "Failure", "503",
+      "block-override", "Deny", "Failure", "302",
+      "override-lockout", "Deny", "Failure","503",
+      "reset client", "Reset Source", "Failure", "503",
+      "reset server", "Reset Destination", "Failure", "503",
+      "reset both", "Reset", "Failure", "503",
+      "deny", "Deny", "Failure", "503",
+      "drop", "Drop", "Failure", "503",
+      "drop ICMP", "Drop ICMP", "Failure", "503"
+    ];
+    let SeverityLookup=datatable(LogSeverity:string,EventSeverity:string)
+    [   
+      1, "Informational", 
+      2, "Low",
+      3, "Medium",
+      4, "Medium", 
+      5, "High"
+    ];
+    let remove_protocol_from_list = (list:dynamic)
+    {
+      print list
+      | mv-apply l = print_0 to typeof(string) on
+      ( extend l = replace_regex (tostring(l), "^(?i:.*?)://", "") )
+      | project l
+    };
+    CommonSecurityLog
+    | where not(disabled)
+    | where (isnull(starttime) or TimeGenerated >= starttime)
+      and (isnull(endtime) or TimeGenerated <= endtime)
+    | where DeviceVendor == "Palo Alto Networks"
+      and DeviceProduct == "PAN-OS"
+      and Activity == "THREAT"
+      and DeviceEventClassID == "url"
+    | where (array_length(url_has_any) == 0 or RequestURL has_any (remove_protocol_from_list(url_has_any)))
+    | where (array_length(httpuseragent_has_any) == 0 or RequestClientApplication has_any (httpuseragent_has_any))
+    | extend temp_SrcMatch = has_any_ipv4_prefix(SourceIP,src_or_any)
+    | extend temp_DstMatch = has_any_ipv4_prefix(DestinationIP,ipaddr_has_any_prefix)
+    | extend ASimMatchingIpAddr = case(
+        array_length(src_or_any) == 0, "-",
+        temp_DstMatch and temp_SrcMatch, "Both",
+        temp_SrcMatch , "SrcIpAddr",
+        temp_DstMatch, "DstIpAddr",
+        "No match") 
+    | where ASimMatchingIpAddr != "No match" 
+    | project-away temp_*
+    | extend EventResultDetails     = "NA"
+    | where (array_length(eventresultdetails_in) == 0 or tostring(EventResultDetails) has_any(eventresultdetails_in))
+    | lookup EventLookup on DeviceAction
+    | where (eventresult == '*' or EventResult =~ eventresult)
+    | lookup SeverityLookup on LogSeverity
+    | parse-kv AdditionalExtensions as (
+        PanOSXForwarderfor:string,
+        PanXFFIP:string,
+        PanOSReferer:string,
+        PanOSRuleUUID:string,
+        PanSrcHostname:string,
+        PanSrcMac:string,
+        PanSrcDeviceCat:string,
+        PanSrcDAG:string,
+        PanOSSrcUUID:string,
+        PanSrcDeviceProf:string,
+        PanSrcDeviceModel:string,
+        PanSrcDeviceVendor:string,
+        PanSrcDeviceOS:string,
+        PanSrcDeviceOSv:string,
+        PanDstHostname:string,
+        PanDstMac:string,
+        PanDstDeviceCat:string,
+        PanDstDAG:string,
+        PanOSDstUUID:string,
+        PanDstDeviceProf:string,
+        PanDstDeviceModel:string,
+        PanDstDeviceVendor:string,
+        PanDstDeviceOS:string,
+        PanDstDeviceOSv:string
+      ) with (pair_delimiter=';', kv_delimiter='=')
+    | extend 
+      HttpRequestXff            = coalesce(PanOSXForwarderfor, PanXFFIP)
+    | project-rename 
+      DvcHostname               = Computer,
+      HttpReferrer              = PanOSReferer,
+      DstMacAddr                = PanDstMac,
+      SrcMacAddr                = PanSrcMac,
+      DstHostname               = PanDstHostname,
+      SrcHostname               = PanSrcHostname,
+      DvcId                     = DeviceExternalID,
+      SrcZone                   = DeviceCustomString4,
+      DstZone                   = DeviceCustomString5,
+      UrlCategory               = DeviceCustomString2,
+      DvcOriginalAction         = DeviceAction,
+      EventUid                  = _ItemId,
+      EventOriginalSeverity     = LogSeverity,
+      EventProductVersion       = DeviceVersion,
+      DvcInboundInterface       = DeviceInboundInterface,
+      DvcOutboundInterface      = DeviceOutboundInterface,
+      DstIpAddr                 = DestinationIP,
+      DstPortNumber             = DestinationPort,
+      SrcIpAddr                 = SourceIP,
+      SrcPortNumber             = SourcePort,
+      SrcUsername               = SourceUserName,
+      DstUsername               = DestinationUserName,
+      NetworkRuleName           = DeviceCustomString1,
+      ThreatOriginalConfidence  = ThreatConfidence,
+      DstNatIpAddr              = DestinationTranslatedAddress,
+      DstNatPortNumber          = DestinationTranslatedPort,
+      SrcNatIpAddr              = SourceTranslatedAddress,
+      SrcNatPortNumber          = SourceTranslatedPort,
+      HttpUserAgent             = RequestClientApplication
+    | extend
+      Dvc                       = DvcHostname,
+      DvcIdType                 = "Other",
+      EventType                 = "HTTPsession",
+      EventSchema               = "WebSession",
+      EventSchemaVersion        = "0.2.5",
+      EventVendor               = "Palo Alto",
+      EventProduct              = "PanOS",
+      EventStartTime            = TimeGenerated,
+      EventEndTime              = TimeGenerated,
+      HttpRequestMethod         = toupper(RequestMethod),
+      HttpContentFormat         = RequestContext,
+      DstDomainType             = "FQDN",
+      Src                       = SrcIpAddr,
+      SrcUsernameType           = case(isempty(SrcUsername), "", 
+        "Windows"),
+      DstUsernameType           = case(isempty(DstUsername), "", 
+        "Windows"),
+      NetworkProtocolVersion    = case(
+        DstIpAddr contains "."  , "IPv4",
+        DstIpAddr contains ":"  , "IPv6",
+        ""),
+      NetworkDirection          = case(
+        FlexString2 == "client-to-server", "Outbound",
+        FlexString2 == "server-to-client", "Inbound",
+        ""),
+      IpAddr                    = SrcIpAddr,
+      NetworkProtocol           = toupper(Protocol),
+      User                      = SrcUsername,
+      Rule                      = NetworkRuleName,
+      NetworkSessionId          = tostring(DeviceCustomNumber1),
+      DvcInterface              = DvcInboundInterface,
+      Hostname                  = DstHostname,
+      Url                       = trim('"', RequestURL),
+      UserAgent                 = HttpUserAgent
+    | extend
+      DstFQDN                   = iif(Url contains ":", split(Url, ":")[0], split(Url, "/")[0]),
+      SessionId                 = NetworkSessionId,
+      ThreatField               = case(
+        isnotempty(ThreatOriginalConfidence) and NetworkDirection == "Outbound", "SrcIpAddr",
+        isnotempty(ThreatOriginalConfidence) and NetworkDirection == "Inbound", "DstIpAddr",
+        "")
+    | extend 
+      ThreatIpAddr                = case(
+        ThreatField == "SrcIpAddr", SrcIpAddr,
+        ThreatField == "DstIpAddr", DstIpAddr,
+        ""),
+      Dst                       = DstFQDN
+    | project ASimMatchingIpAddr, DeviceVendor, Dst, DstDomainType, DstFQDN, DstHostname, DstIpAddr, DstMacAddr, DstNatIpAddr, DstNatPortNumber, DstPortNumber, DstUsername, DstUsernameType, DstZone, Dvc, DvcAction, DvcHostname, DvcId, DvcIdType, DvcInboundInterface, DvcInterface, DvcOriginalAction, DvcOutboundInterface, EventCount, EventEndTime, EventOriginalSeverity, EventProduct, EventProductVersion, EventResult, EventResultDetails, EventSchema, EventSchemaVersion, EventSeverity, EventStartTime, EventType, EventUid, EventVendor, Hostname, HttpContentFormat, HttpRequestMethod, HttpRequestXff, HttpStatusCode, IpAddr, NetworkDirection, NetworkProtocol, NetworkProtocolVersion, NetworkRuleName, NetworkSessionId, Protocol, RequestContext, Rule, SessionId, Src, SrcHostname, SrcIpAddr, SrcMacAddr, SrcNatIpAddr, SrcNatPortNumber, SrcPortNumber, SrcUsername, SrcUsernameType, SrcZone, ThreatField, ThreatIpAddr, ThreatOriginalConfidence, TimeGenerated, Type, Url, UrlCategory, User, HttpUserAgent, UserAgent
+};
+parser (starttime=starttime, endtime=endtime, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, ipaddr_has_any_prefix=ipaddr_has_any_prefix, url_has_any=url_has_any, httpuseragent_has_any=httpuseragent_has_any, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled=disabled)
+}
+
+
+
+//
+// Function Name: vimWebSessionPaloAltoCortexDataLake
+// Description: This ASIM parser supports normalizing Palo Alto Cortex Data Lake logs to the ASIM Web Session normalized schema. These events are captured through the Palo Alto Networks CDL data connector that ingests CDL logs into Microsoft Sentinel.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimWebSessionPaloAltoCortexDataLake(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['ipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['url_has_any']:dynamic=dynamic([]),
+    ['httpuseragent_has_any']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=false)
+{
+let EventSeverityLookup = datatable (LogSeverity: string, EventSeverity: string)
+[
+    "0", "Low",
+    "1", "Low",
+    "2", "Low",
+    "3", "Low",
+    "4", "Low",
+    "5", "Low",
+    "6", "Medium",
+    "7", "Medium",
+    "8", "Medium",
+    "9", "High",
+    "10", "High"
+];
+let EventLookup=datatable(
+    DeviceAction: string,
+    DvcAction: string,
+    EventResult: string
+)
+    [
+    "alert", "Allow", "Success",
+    "continue", "Allow", "Success",
+    "override", "Allow", "Success",
+    "block-continue", "Allow", "Partial",
+    "block-url", "Deny", "Failure",
+    "block-override", "Deny", "Failure",
+    "override-lockout", "Deny", "Failure",
+];
+let ThreatRiskLevelLookup = datatable(PanOSApplicationRisk: string, ThreatRiskLevel: int)
+    [
+    "1", 20,
+    "2", 40,
+    "3", 60,
+    "4", 80,
+    "5", 100
+];
+let parser = (
+    starttime: datetime=datetime(null),
+    endtime: datetime=datetime(null),
+    srcipaddr_has_any_prefix: dynamic=dynamic([]),
+    ipaddr_has_any_prefix: dynamic=dynamic([]),
+    url_has_any: dynamic=dynamic([]),
+    httpuseragent_has_any: dynamic=dynamic([]),
+    eventresultdetails_in: dynamic = dynamic([]),
+    eventresult: string='*',
+    disabled: bool=false
+    ) {
+    let src_or_any = set_union(srcipaddr_has_any_prefix, ipaddr_has_any_prefix);
+    CommonSecurityLog
+    | where not(disabled)
+        and (isnull(starttime) or TimeGenerated >= starttime)
+        and (isnull(endtime) or TimeGenerated <= endtime)
+        and DeviceVendor == "Palo Alto Networks" and DeviceProduct == "LF"
+        and DeviceEventClassID == "THREAT" and Activity == "url"
+        and (array_length(httpuseragent_has_any) == 0 or RequestClientApplication has_any (httpuseragent_has_any))
+        and array_length(eventresultdetails_in) == 0
+        and (array_length(url_has_any) == 0 or RequestURL has_any (url_has_any))
+    | parse-kv AdditionalExtensions as (PanOSDestinationUUID: string, PanOSDestinationLocation: string, PanOSDestinationDeviceMac: string, PanOSSourceUUID: string, PanOSSourceDeviceMac: string, PanOSReferer: string, PanOSIsClienttoServer: string, PanOSSourceDeviceHost: string, PanOSDestinationDeviceHost: string, start: string, PanOSApplicationCategory: string, PanOSApplicationSubcategory: string, PanOSApplicationTechnology: string, PanOSDestinationDeviceOS: string, PanOSDestinationDeviceOSFamily: string, PanOSDestinationDeviceOSVersion: string, PanOSHostID: string, PanOSHTTPHeaders: string, PanOSInlineMLVerdict: string, PanOSInboundInterfaceDetailsType: string, PanOSOutboundInterfaceDetailsType: string, PanOSParentSessionID: string, PanOSContainerName: string, PanOSContainerNameSpace: string, PanOSHTTPRefererFQDN: string, PanOSHTTPRefererPort: string, PanOSHTTPRefererProtocol: string, PanOSHTTPRefererURLPath: string, PanOSRuleUUID: string, PanOSURLCategoryList: string, PanOSURLDomain: string, PanOSURLCounter: string, PanOSUsers: string, PanOSVendorSeverity: string, ["PanOSX-Forwarded-For"]: string, ["PanOSX-Forwarded-ForIP"]: string, PanOSIsSaaSApplication: string, PanOSLogSource: string, PanOSSourceLocation: string, PanOSCortexDataLakeTenantID: string, PanOSApplicationRisk: string) with (pair_delimiter=";", kv_delimiter="=")
+    | lookup EventLookup on DeviceAction
+    | where (eventresult == '*' or EventResult =~ eventresult)
+    | extend
+        temp_SrcMatch = has_any_ipv4_prefix(coalesce(DeviceCustomIPv6Address2, SourceIP), src_or_any),
+        temp_DstMatch = has_any_ipv4_prefix(coalesce(DeviceCustomIPv6Address3, DestinationIP), ipaddr_has_any_prefix)
+    | extend ASimMatchingIpAddr = case(
+                                  array_length(src_or_any) == 0,
+                                  "-",
+                                  temp_SrcMatch and temp_DstMatch,
+                                  "Both",
+                                  temp_SrcMatch,
+                                  "SrcIpAddr",
+                                  temp_DstMatch,
+                                  "DstIpAddr",
+                                  "No match"
+                              )
+    | where ASimMatchingIpAddr != "No match"
+    | invoke _ASIM_ResolveDvcFQDN('DeviceName')
+    | invoke _ASIM_ResolveSrcFQDN('PanOSSourceDeviceHost')
+    | invoke _ASIM_ResolveDstFQDN('PanOSDestinationDeviceHost')
+    | lookup EventSeverityLookup on LogSeverity
+    | lookup ThreatRiskLevelLookup on PanOSApplicationRisk
+    | extend
+        EventStartTime = todatetime(coalesce(start, ReceiptTime)),
+        SrcIpAddr = coalesce(SourceIP, DeviceCustomIPv6Address2),
+        DstIpAddr = coalesce(DestinationIP, DeviceCustomIPv6Address3),
+        HttpRequestMethod = toupper(RequestMethod),
+        NetworkProtocol = toupper(Protocol),
+        NetworkSessionId = tostring(FieldDeviceCustomNumber1),
+        SrcDomain = coalesce(SourceNTDomain, SrcDomain),
+        DstDomain = coalesce(DestinationNTDomain, DstDomain),
+        AdditionalFields = bag_pack(
+                      "DirectionOfAttack",
+                      FlexString2,
+                      "VirtualLocation",
+                      DeviceCustomString3,
+                      "PanOSApplicationCategory",
+                      PanOSApplicationCategory,
+                      "PanOSApplicationSubcategory",
+                      PanOSApplicationSubcategory,
+                      "PanOSApplicationTechnology",
+                      PanOSApplicationTechnology,
+                      "PanOSDestinationDeviceOS",
+                      PanOSDestinationDeviceOS,
+                      "PanOSDestinationDeviceOSFamily",
+                      PanOSDestinationDeviceOSFamily,
+                      "PanOSDestinationDeviceOSVersion",
+                      PanOSDestinationDeviceOSVersion,
+                      "PanOSHostID",
+                      PanOSHostID,
+                      "PanOSHTTPHeaders",
+                      PanOSHTTPHeaders,
+                      "PanOSInlineMLVerdict",
+                      PanOSInlineMLVerdict,
+                      "PanOSInboundInterfaceDetailsType",
+                      PanOSInboundInterfaceDetailsType,
+                      "PanOSOutboundInterfaceDetailsType",
+                      PanOSOutboundInterfaceDetailsType,
+                      "PanOSParentSessionID",
+                      PanOSParentSessionID,
+                      "PanOSContainerName",
+                      PanOSContainerName,
+                      "PanOSContainerNameSpace",
+                      PanOSContainerNameSpace,
+                      "PanOSHTTPRefererFQDN",
+                      PanOSHTTPRefererFQDN,
+                      "PanOSHTTPRefererPort",
+                      PanOSHTTPRefererPort,
+                      "PanOSHTTPRefererProtocol",
+                      PanOSHTTPRefererProtocol,
+                      "PanOSHTTPRefererURLPath",
+                      PanOSHTTPRefererURLPath,
+                      "PanOSRuleUUID",
+                      PanOSRuleUUID,
+                      "PanOSDestinationDeviceOS",
+                      PanOSDestinationDeviceOS,
+                      "PanOSDestinationDeviceOSFamily",
+                      PanOSDestinationDeviceOSFamily,
+                      "PanOSDestinationDeviceOSVersion",
+                      PanOSDestinationDeviceOSVersion,
+                      "PanOSURLCategoryList",
+                      PanOSURLCategoryList,
+                      "PanOSURLDomain",
+                      PanOSURLDomain,
+                      "PanOSURLCounter",
+                      PanOSURLCounter,
+                      "PanOSUsers",
+                      PanOSUsers,
+                      "PanOSVendorSeverity",
+                      PanOSVendorSeverity,
+                      "PanOSX-Forwarded-For",
+                      ["PanOSX-Forwarded-For"],
+                      "PanOSX-Forwarded-ForIP",
+                      ["PanOSX-Forwarded-ForIP"],
+                      "PanOSLogSource",
+                      PanOSLogSource
+                  ),
+        HttpContentType = RequestContext
+    | project-rename
+        DvcIpAddr = Computer,
+        EventUid = _ItemId,
+        DstDvcId = PanOSDestinationUUID,
+        DstGeoCountry = PanOSDestinationLocation,
+        DstMacAddr = PanOSDestinationDeviceMac,
+        DstNatIpAddr = DestinationTranslatedAddress,
+        DstNatPortNumber = DestinationTranslatedPort,
+        DstPortNumber = DestinationPort,
+        DstUsername = DestinationUserName,
+        DstZone = DeviceCustomString5,
+        DvcId = DeviceExternalID,
+        DvcOriginalAction = DeviceAction,
+        EventOriginalSeverity = LogSeverity,
+        EventOriginalType = DeviceEventClassID,
+        EventOriginalUid = ExtID,
+        EventProductVersion = DeviceVersion,
+        HttpContentFormat = RequestContext,
+        HttpReferrer = PanOSReferer,
+        RuleName = DeviceCustomString1,
+        SrcDvcId = PanOSSourceUUID,
+        SrcMacAddr = PanOSSourceDeviceMac,
+        SrcNatIpAddr = SourceTranslatedAddress,
+        SrcNatPortNumber = SourceTranslatedPort,
+        SrcPortNumber = SourcePort,
+        SrcUsername = SourceUserName,
+        SrcZone = DeviceCustomString4,
+        Url = RequestURL,
+        UrlCategory = DeviceCustomString2,
+        EventOriginalSubType = Activity,
+        DvcOutboundInterface = DeviceOutboundInterface,
+        DvcInboundInterface = DeviceInboundInterface,
+        DstUserId = DestinationUserID,
+        SrcUserId = SourceUserID,
+        EventOwner = PanOSLogSource,
+        HttpUserAgent = RequestClientApplication,
+        SrcGeoCountry = PanOSSourceLocation,
+        DvcScopeId = PanOSCortexDataLakeTenantID,
+        SrcAppName = ApplicationProtocol,
+        ThreatOriginalRiskLevel = PanOSApplicationRisk
+    | extend
+        Dst = coalesce(DstFQDN, DstDvcId, DstHostname, DstIpAddr),
+        Dvc = coalesce(DvcFQDN, DvcId, DvcHostname, DvcIpAddr),
+        EventEndTime = EventStartTime,
+        Src = coalesce(SrcFQDN, SrcDvcId, SrcHostname, SrcIpAddr),
+        NetworkProtocolVersion = case(
+                            DstIpAddr contains ".",
+                            "IPv4",       
+                            DstIpAddr contains ":",
+                            "IPv6", 
+                            ""
+                        ),
+        NetworkDirection = iff(PanOSIsClienttoServer == "true", "Outbound", "Inbound"),
+        Rule = RuleName,
+        SrcUserType = _ASIM_GetUserType(SrcUsername, SrcUserId),
+        DstUserType = _ASIM_GetUserType(DstUsername, DstUserId),
+        User = SrcUsername,
+        Hostname = DstHostname,
+        IpAddr = SrcIpAddr,
+        SessionId = NetworkSessionId,
+        UserAgent = HttpUserAgent,
+        DvcIdType = iff(isnotempty(DvcId), "Other", ""),
+        SrcDvcIdType = iff(isnotempty(SrcDvcId), "Other", ""),
+        DstDvcIdType = iff(isnotempty(DstDvcId), "Other", ""),
+        SrcDomainType = iff(isnotempty(SourceNTDomain), "Windows", SrcDomainType),
+        DstDomainType = iff(isnotempty(DestinationNTDomain), "Windows", DstDomainType),
+        SrcUsernameType = _ASIM_GetUsernameType(SrcUsername),
+        DstUsernameType = _ASIM_GetUsernameType(DstUsername),
+        SrcUserIdType = iff(isnotempty(SrcUserId), "UID", ""),
+        DstUserIdType = iff(isnotempty(DstUserId), "UID", ""),
+        SrcAppType = case(
+                  isnotempty(SrcAppName) and PanOSIsSaaSApplication == "true",
+                  "SaaS Application",
+                  isnotempty(SrcAppName) and PanOSIsSaaSApplication == "false",
+                  "Other",
+                  ""
+              )
+    | extend
+        EventProduct = "Cortex Data Lake",
+        EventVendor = "Palo Alto",
+        EventSchema = "WebSession",
+        EventSchemaVersion = "0.2.6",
+        EventType = "HTTPsession"
+    | project-away
+        Source*,
+        Destination*,
+        Device*,
+        AdditionalExtensions,
+        CommunicationDirection,
+        EventOutcome,
+        PanOS*,
+        Protocol,
+        temp*,
+        ExternalID,
+        Message,
+        start,
+        EndTime,
+        FieldDevice*,
+        Flex*,
+        File*,
+        Old*,
+        MaliciousIP*,
+        OriginalLogSeverity,
+        Process*,
+        ReceivedBytes,
+        SentBytes,
+        Remote*,
+        Request*,
+        SimplifiedDeviceAction,
+        StartTime,
+        TenantId,
+        ReportReferenceLink,
+        ReceiptTime,
+        Reason,
+        Indicator*,
+        _ResourceId,
+        ThreatConfidence,
+        ThreatDescription,
+        ThreatSeverity
+};
+parser(
+    starttime=starttime, 
+    endtime=endtime,
+    srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,  
+    ipaddr_has_any_prefix=ipaddr_has_any_prefix, 
+    url_has_any=url_has_any,
+    httpuseragent_has_any=httpuseragent_has_any,
+    eventresultdetails_in=eventresultdetails_in,
+    eventresult=eventresult,
+    disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimWebSessionSonicWallFirewall
+// Description: This ASIM parser supports normalizing SonicWall SonicOS ArcSight-formatted syslog received via the SonicWall Firewall/Common Event Format data connectors and ingested to the CommonSecurityLog table by Microsoft Sentinel to the ASIM WebSession normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimWebSessionSonicWallFirewall(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['ipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['url_has_any']:dynamic=dynamic([]),
+    ['httpuseragent_has_any']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=false)
+{
+let parser=(
+  starttime:datetime=datetime(null),
+  endtime:datetime=datetime(null),
+  srcipaddr_has_any_prefix:dynamic=dynamic([]),
+  ipaddr_has_any_prefix:dynamic=dynamic([]), 
+  url_has_any:dynamic=dynamic([]),
+  httpuseragent_has_any:dynamic=dynamic([]),
+  eventresultdetails_in:dynamic=dynamic([]),
+  eventresult:string='*',
+  disabled:bool=false
+  )
+  {
+    let src_or_any=set_union(srcipaddr_has_any_prefix, ipaddr_has_any_prefix);
+    let Actions=datatable(fw_action:string, DvcAction:string, EventSeverity:string)
+      [ "\"forward\"", "Allow", "Informational"
+      , "\"mgmt\"", "Other", "Informational"
+      , "\"NA\"", "Other", "Informational"
+      , "\"drop\"", "Drop", "Low"
+    ];
+    CommonSecurityLog
+    | where not(disabled)
+        and DeviceVendor == "SonicWall"
+        and DeviceEventClassID in (14, 97)
+        and (isnull(starttime) or TimeGenerated >= starttime) and (isnull(endtime) or TimeGenerated <= endtime)
+        and (array_length(httpuseragent_has_any) == 0 or RequestClientApplication has_any (httpuseragent_has_any))
+        and Protocol has_any(dynamic(["udp/http", "tcp/http", "udp/https", "tcp/https"]))
+        and (array_length(url_has_any) == 0 or RequestURL has_any (url_has_any) or AdditionalExtensions has_any (url_has_any))
+        and (array_length(eventresultdetails_in) == 0)
+    | parse-kv AdditionalExtensions as (['gcat']:string, ['app']:string, ['arg']:string, ['dstV6']:string, ['srcV6']:string, ['snpt']:string, ['dnpt']:string, ['susr']:string,['appName']:string, ['appcat']:string, ['appid']:string, ['sid']:string, ['catid']:string, ['ipscat']:string, ['ipspri']:string, ['spycat']:string, ['spypri']:string, ['fw_action']:string, ['dpi']:string, ['bid']:string, ['af_action']:string, ['af_polid']:string, ['af_policy']:string, ['af_type']:string, ['af_service']:string, ['af_object']:string, ['contentObject']:string, ['fileid']:string, ['uuid']:string) with (pair_delimiter=";", kv_delimiter="=")
+    | extend
+        SrcIpAddr = coalesce(SourceIP, srcV6)
+      , DstIpAddr = coalesce(DestinationIP, dstV6)
+    | where (isnotempty(SrcIpAddr) or isnotempty(DstIpAddr))
+        and isnotempty(fw_action)
+    | extend temp_SrcMatch = has_any_ipv4_prefix(SrcIpAddr, src_or_any)
+      , temp_DstMatch = has_any_ipv4_prefix(DstIpAddr, ipaddr_has_any_prefix)
+    | extend ASimMatchingIpAddr = case(array_length(src_or_any) == 0, "-",
+                                      temp_SrcMatch and temp_DstMatch, "Both",
+                                      temp_SrcMatch, "SrcIpAddr",
+                                      temp_DstMatch, "DstIpAddr",
+                                      "No match")
+    | where ASimMatchingIpAddr != "No match"
+    | project-away temp_*
+    | extend RequestURL_ = extract(@"(?:[.*;]+?)(?P<url>[a-zA-Z0-9_*.,}{&%$~:;\-=\/?[:space:]]+)(?:;fw_action)", 1, AdditionalExtensions)
+    | extend RequestURL_ = iif(RequestURL_ startswith "snpt" or RequestURL_ startswith "dnpt" or RequestURL_ startswith "appid" or RequestURL_ startswith "appName", extract(@"(?:\d;|.{1}\w.{1};)(?P<url>[a-zA-Z0-9_*.,}{&%$~:;\-=\/?[:space:]]+)", 1, RequestURL_), RequestURL_)
+    | extend RequestURL_ = iif(RequestURL_ matches regex @"^(.{2,6}=.{1,6})", extract(@"(?:\d;|.{1}\w.{1};)(?P<url>[a-zA-Z0-9_*.,}{&%$~:;\-=\/?[:space:]]+)", 1, RequestURL_), iif(RequestURL_ matches regex @"^\w=\d$", "", RequestURL_))
+    | extend RequestURL_ = iif(RequestURL_ has_any(dynamic(["af_polid=", "ipscat=", "snpt=", "dnpt="])), "", RequestURL_)
+    | extend RequestURL = iif(isnotempty(RequestURL), RequestURL, iif(RequestURL_ contains "/" and RequestURL_ contains ".", RequestURL_, ""))
+    | where isnotempty(RequestURL)
+    | lookup Actions on fw_action
+    | extend EventResult = case(DvcAction == "Allow", "Success",
+          DvcAction == "Management", "NA",
+          DvcAction == "NA", "NA",
+          DvcAction == "Other", "NA",
+          "Failure"
+          )
+    | where (eventresult == "*" or EventResult =~ eventresult)
+    | extend sosLogMsgSeverity = case(LogSeverity == 10, "Emergency (0)",
+          LogSeverity == 9, "Alert (1)",
+          LogSeverity == 8, "Critical (2)",
+          LogSeverity == 7, "Error (3)",
+          LogSeverity == 6, "Warning (4)",
+          LogSeverity == 5, "Notice (5)",
+          LogSeverity == 4, "Info (6)/Debug (7)",
+          LogSeverity == 3, "Not Mapped (3)",
+          LogSeverity == 2, "Not Mapped (2)",
+          LogSeverity == 1, "Not Mapped (1)",
+          "Not Mapped"
+          )
+    | extend EventSeverity = case(tolong(LogSeverity) <= 4, "Informational"
+                                  , tolong(LogSeverity) <= 6, "Low"
+                                  , tolong(LogSeverity) <= 8, "Medium"
+                                  , tolong(LogSeverity) > 8, "High"
+                                  , ""
+                                  )
+    | extend HttpRequestMethod = case(tolong(RequestMethod) == 0, ""
+                                      , tolong(RequestMethod) == 1, "GET"
+                                      , tolong(RequestMethod) == 2, "POST"
+                                      , tolong(RequestMethod) == 3, "HEAD"
+                                      , tolong(RequestMethod) == 4, "PUT"
+                                      , tolong(RequestMethod) == 5, "CONNECT"
+                                      , tolong(RequestMethod) == 6, ""
+                                      , ""
+                                      )
+    | extend NetworkProtocolVersion = case(DestinationIP has ".", "IPv4"
+                                          , DestinationIP has ":", "IPv6"
+                                          , ""
+                                          )
+      , NetworkProtocol = toupper(iff(Protocol contains "-" and Protocol !contains "/", toupper(trim_start(@".*-", Protocol)), toupper(trim_end(@"/.*", Protocol))))
+      , NetworkApplicationProtocol = tostring(toupper(trim_start(@".*/", Protocol)))
+      , EventOriginalType = DeviceEventClassID
+    | project-rename
+        DstMacAddr = DestinationMACAddress
+        , SrcMacAddr = SourceMACAddress
+        , DstPortNumber = DestinationPort
+        , SrcPortNumber = SourcePort
+        , EventMessage = Activity
+        , sosEventMessageDetail = Message
+        , EventProductVersion = DeviceVersion
+        , Dvc = Computer
+        , DvcOutboundInterface = DeviceOutboundInterface
+        , DvcInboundInterface = DeviceInboundInterface
+        , sosApplicationID = ApplicationProtocol // Application ID number (when Flow Reporting is enabled).
+        , sosCFSFullString = Reason // CFS Block Category ID and Name
+        , RuleName = DeviceCustomString1 // Rule ID. Identify a policy or rule associated with an event.
+        , sosSourceVPNPolicyName = DeviceCustomString2 // Displays the source VPN policy name associated with the event.
+        , sosDestinationVPNPolicyName = DeviceCustomString3 // Displays the destination VPN policy name associated with the event.
+        , sosLogMsgNote = DeviceCustomString6 // "Note" field. Additional information that is application-dependent.
+        , SrcNatIpAddr = DeviceCustomString1Label // NAT'ed source IP4/IPv6 address.
+        , DstNatIpAddr = DeviceCustomString2Label // NAT'ed destination IPv4/IPv6 address.
+        , SrcZone = DeviceCustomString3Label // Source Zone on Gen7. Src Zone Type on Gen6.
+        , DstZone = DeviceCustomString4Label // Destination Zone on Gen7. Dest Zone Type (Trusted/Untrusted, etc.) on Gen6.
+        , sosUserSessionType = DeviceCustomString5Label // String indicating the user session type, determined by the auth mechanism.
+        , sosUserSessionDuration = DeviceCustomString6Label // User session duration in seconds.
+        , SrcUsername = SourceUserName
+        , ThreatOriginalConfidence = ThreatConfidence
+        , HttpUserAgent = RequestClientApplication
+        , Url = RequestURL
+| where (array_length(url_has_any) == 0 or Url has_any (url_has_any))
+| extend sosLogMsgCategory = case(gcat == 1, "System (1)",
+                                              gcat == 2, "Log (2)",
+                                              gcat == 3, "Security Services (3)",
+                                              gcat == 4, "Users (4)",
+                                              gcat == 5, "Firewall Settings (5)",
+                                              gcat == 6, "Network (6)",
+                                              gcat == 7, "VPN (7)",
+                                              gcat == 8, "High Availability (8)",
+                                              gcat == 9, "3G/4G, Modem, and Module (9)",
+                                              gcat == 10, "Firewall (10)",
+                                              gcat == 11, "Wireless (11)",
+                                              gcat == 12, "VoIP (12)",
+                                              gcat == 13, "SSL VPN (13)",
+                                              gcat == 14, "Anti-Spam (14)",
+                                              gcat == 15, "WAN Acceleration (15)",
+                                              gcat == 16, "Object (16)",
+                                              gcat == 17, "SD-WAN (17)",
+                                              gcat == 18, "Multi-Instance (18)",
+                                              gcat == 19, "Unified Policy Engine (19)",
+                                              "Log Category Not Mapped"
+                                              )
+| extend EventOriginalSubType = case(DeviceEventCategory == 0, "None (0)",
+                                            DeviceEventCategory == 1, "System Maintenance (1)",
+                                            DeviceEventCategory == 2, "System Errors (2)",
+                                            DeviceEventCategory == 4, "Blocked Web Sites (4)",
+                                            DeviceEventCategory == 8, "Blocked Java Etc. (8)",
+                                            DeviceEventCategory == 16, "User Activity (16)",
+                                            DeviceEventCategory == 32, "Attacks (32)",
+                                            DeviceEventCategory == 64, "Dropped TCP (64)",
+                                            DeviceEventCategory == 128, "Dropped UDP (128)",
+                                            DeviceEventCategory == 256, "Dropped ICMP (256)",
+                                            DeviceEventCategory == 512, "Network Debug (512)",
+                                            DeviceEventCategory == 1024, "Connection Closed (1024)",
+                                            DeviceEventCategory == 2048, "Dropped LAN TCP (2048)",
+                                            DeviceEventCategory == 4096, "Dropped LAN UDP (4096)",
+                                            DeviceEventCategory == 8192, "Dropped LAN ICMP (8192)",
+                                            DeviceEventCategory == 32768, "Modem Debug (32768)",
+                                            DeviceEventCategory == 65536, "VPN Tunnel Status (65536)",
+                                            DeviceEventCategory == 131072, "IEEE 802.11 Management (131072)",
+                                            DeviceEventCategory == 262144, "Connection Opened (262144)",
+                                            DeviceEventCategory == 524288, "System Environment (524288)",
+                                            DeviceEventCategory == 1048576, "Expanded - VoIP Activity (1048576)",
+                                            DeviceEventCategory == 2097152, "Expanded - WLAN IDS Activity (2097152)",
+                                            DeviceEventCategory == 4194304, "Expanded - SonicPoint Activity (4194304)",
+                                            DeviceEventCategory == 8388608, "Expanded - Unified Policy Engine (8388608)",
+                                            "Legacy Category Not Mapped"
+                                            )
+| extend sosIPSPriority = case(ipspri == 1, "High (1)",
+                                            ipspri == 2, "Medium (2)",
+                                            ipspri == 3, "Low (3)",
+                                            ""
+                                            )
+| extend sosAntiSpywarePriority = case(spypri == 1, "High (1)",
+                                      spypri == 2, "Medium (2)",
+                                      spypri == 3, "Low (3)",
+                                      ""
+                                      )
+| extend
+    EventVendor = "SonicWall"
+    , EventProduct = "Firewall"
+    , DvcOs = "SonicOS"
+    , DvcOsVersion = EventProductVersion
+    , DvcIdType = "Other"
+    , DvcDescription = DeviceProduct
+    , Rule = RuleName
+    , NetworkBytes = tolong(coalesce(toint(ReceivedBytes), 0) + coalesce(toint(SentBytes), 0))
+    , sosIPSFullString = ipscat
+    , ipscat = extract(@'^"?([a-zA-Z-\/]+)', 1, ipscat) // IPS Category/Signature
+    , sosIPSSignatureName = extract(@'[ ](.*)\S', 1, ipscat) // IPS Signature name
+    , FileSize = tolong(coalesce(FileSize, long(null)))
+    , sosAppControlFileName = extract(@'.*Filename: (.*)\"', 1, sosEventMessageDetail) // App Control Filename Logging
+    , HttpReferrer = extract(@'Referer: (.*)\"$', 1, coalesce(sosLogMsgNote, ""))
+    , sosHttpRequestMethod_ = extract(@'Command: (.\w+)', 1, coalesce(sosLogMsgNote, ""))
+    , sosCFSCategoryID = extract(@'(\d+)\s', 1, coalesce(sosCFSFullString, "")) // Application Name from App Control
+    , sosCFSCategoryName = extract(@'.*-("(.*))', 1, coalesce(sosCFSFullString, "")) // Application Name from App Control
+    , sosCFSPolicyName = extract(@'Policy: (.*), Info:', 1, coalesce(sosLogMsgNote, ""))
+    , sosCaptureATPVerdict = extract(@'Gateway Anti-Virus Status: (.*)\. ', 1, sosEventMessageDetail)
+    , sosGAVSignatureName = extract(@'Gateway Anti-Virus Alert: (.*) blocked\.', 1, sosEventMessageDetail)
+    , sosASWSignatureName = extract(@'Anti-Spyware Detection Alert: (.*)\. ', 1, sosEventMessageDetail)
+    , sosCountry = extract(@'Country Name:(.*)\"$', 1, sosEventMessageDetail)
+    , EventOriginalSeverity = LogSeverity
+    , Dst = DstIpAddr
+    , Src = SrcIpAddr
+    , IpAddr = SrcIpAddr
+    , EventStartTime = TimeGenerated
+    , EventEndTime = TimeGenerated
+    , EventType = "HTTPsession"
+    , EventSchemaVersion = "0.2.5"
+    , EventSchema = "WebSession"
+    , EventCount = toint(1)
+    , EventUid = _ItemId
+    , UserAgent = HttpUserAgent
+    , ThreatConfidence = coalesce(toint(ThreatOriginalConfidence), int(null))
+| extend
+    UrlCategory = sosCFSCategoryName
+    , HttpRequestMethod = coalesce(HttpRequestMethod, sosHttpRequestMethod_)
+    , EventResultDetails = ""
+    , HttpStatusCode = ""
+    , SrcUsername = coalesce(susr, SrcUsername)
+    , FileName = coalesce(FileName, sosAppControlFileName)
+    , NetworkDirection = case(SrcZone == "" and DstZone == "", "NA"
+                              , SrcZone == "WAN" and (DstZone == "WAN" and DstIpAddr !has ".255"), "Inbound"
+                              , SrcZone == "WAN" and DstZone == "WAN", "External"
+                              , SrcZone == "WAN" and DstZone != "WAN", "Inbound"
+                              , SrcZone == "VPN" and DstZone == "WAN", "Outbound"
+                              , SrcZone == "VPN" and DstZone != "WAN", "Inbound"
+                              , DstZone == "MULTICAST", "NA"
+                              , DstZone == "WAN", "Outbound"
+                              , "Local"
+                              )
+    , User = SrcUsername
+| extend
+    SrcUsernameType = case(SrcUsername has "=", "DN",
+                                  SrcUsername has "\\", "Windows",
+                                  SrcUsername has "@", "UPN",
+                                  SrcUsername == "Unknown (external IP)", "",
+                                  SrcUsername == "Unknown (SSO bypassed)", "",
+                                  isnotempty(SrcUsername), "Simple",
+                                  ""
+                                  )
+    , ThreatField = case(isnotempty(ThreatOriginalConfidence) and NetworkDirection == "Outbound", "SrcIpAddr"
+                        , isnotempty(ThreatOriginalConfidence) and NetworkDirection == "Inbound", "DstIpAddr"
+                        , ""
+                        )
+| extend
+    ThreatIpAddr = case(ThreatField == "SrcIpAddr", SrcIpAddr
+                        , ThreatField == "DstIpAddr", DstIpAddr
+                        , ""
+                        )
+| extend
+  SrcGeoCountry = iff(NetworkDirection == "Inbound", sosCountry, "")
+  , DstGeoCountry = iff(NetworkDirection == "Outbound", sosCountry, "")
+  , SrcAppName = iff(NetworkDirection in ("Inbound", "Local", "NA"), coalesce(appcat, appName), "")
+  , DstAppName = iff(NetworkDirection in ("Outbound", "Local", "NA"), coalesce(appcat, appName), "")
+  , SrcAppId = iff(NetworkDirection in ("Inbound", "Local", "NA"), sid, "")
+  , DstAppId = iff(NetworkDirection in ("Outbound", "Local", "NA"), sid, "")
+  , SrcBytes = case(NetworkDirection == "Outbound", tolong(SentBytes)
+                  , NetworkDirection == "Inbound", tolong(ReceivedBytes)
+                  , NetworkDirection == "Local" and SrcZone == "WAN", tolong(ReceivedBytes)
+                  , NetworkDirection == "Local" and SrcZone != "WAN", tolong(SentBytes)
+                  , tolong(long(null))
+                  )
+  , DstBytes = case(NetworkDirection == "Outbound", tolong(ReceivedBytes)
+                  , NetworkDirection == "Inbound", tolong(SentBytes)
+                  , NetworkDirection == "Local" and DstZone == "WAN", tolong(SentBytes)
+                  , NetworkDirection == "Local" and DstZone != "WAN", tolong(ReceivedBytes)
+                  , tolong(long(null))
+                  )
+| extend
+  SrcAppType = case(isempty(SrcAppName), ""
+                    , SrcAppName contains "\'General " or SrcAppName contains "\'Service ", "Service", "Other")
+  , DstAppType = case(isempty(DstAppName), ""
+                    , DstAppName contains "\'General " or DstAppName contains "\'Service ", "Service", "Other")
+| project-rename
+    sosReceivedPackets = DeviceCustomNumber1Label // DeviceCustomNumberXLabel (cnXLabel=)
+  , sosSentPackets = DeviceCustomNumber2Label // DeviceCustomNumberXLabel (cnXLabel=)
+| extend
+    DstPackets = case(NetworkDirection == "Outbound", tolong(sosReceivedPackets)
+                  , NetworkDirection == "Inbound", tolong(sosSentPackets)
+                  , tolong(long(null))
+                  )
+  , SrcPackets = case(NetworkDirection == "Outbound", tolong(sosSentPackets)
+                  , NetworkDirection == "Inbound", tolong(sosReceivedPackets)
+                  , tolong(long(null))
+                  )
+| project-rename
+    sosConnectionDuration = DeviceCustomNumber3Label // Applies to "Connection Closed"
+  , sosUser = susr // Logged-in username associated with the log event.
+  , sosAppRulePolicyId = af_polid // App Rule Policy ID.
+  , sosAppRulePolicyName = af_policy // App Rule Policy Name.
+  , sosAppRuleService = af_service // App Rule Service Name.
+  , sosAppRuleType = af_type // App Rule Policy Type.
+  , sosAppRuleObject = af_object // App Rule Object Name.
+  , sosAppRuleObjectContent = contentObject // App Rule Object Content.
+  , sosAppRuleAction = af_action // App Rule Action.
+  , sosSourceIPv6Address = srcV6 // Source IPv6 IP
+  , sosDestinationIPv6Address = dstV6 // Destination IPv6 IP
+  , sosAppFullString = appcat // The full "<CATEGORY> <APPNAME> -- <SIGNAME>" string.
+  , sosAppIDNumber = app // Numeric Application ID. Not the same as "ApplicationProtocol".
+  , sosAppID = appid // Application ID from App Control
+  , sosAppCategoryID = catid // Application Category ID
+  , sosAppSignatureID = sid // Application Signature ID
+  , sosIPSCategoryName = ipscat // IPS Category Name
+  , sosAntiSpywareCategory = spycat // Anti-Spyware Category
+  , sosURLPathName = arg // URL. Represents the URL path name.
+  , sosFileIdentifier = fileid // File hash or URL
+  , sosDPIInspectedFlow = dpi // Indicates a flow was inspected by DPI. Applies only to Connection Closed messages.
+  , DstNatPortNumber = dnpt
+  , SrcNatPortNumber = snpt
+  , sosBladeID = bid // Blade ID
+  , sosUUID = uuid
+  , sosFileName = FileName
+  , DvcOriginalAction = fw_action
+| extend
+  ThreatName = coalesce(sosASWSignatureName, sosGAVSignatureName, sosIPSSignatureName, "")
+  , ThreatId = coalesce(sosAppSignatureID, "")
+  , ThreatCategory = coalesce(sosIPSCategoryName, sosAntiSpywareCategory, "")
+  , DstNatPortNumber = toint(DstNatPortNumber)
+  , SrcNatPortNumber = toint(SrcNatPortNumber)
+| extend AdditionalFields = bag_pack(
+  "AppRulePolicyId", sosAppRulePolicyId
+  , "AppRulePolicyName", sosAppRulePolicyName
+  , "AppRuleService", sosAppRuleService
+  , "AppRuleType", sosAppRuleType
+  , "AppRuleObject", sosAppRuleObject
+  , "AppRuleObjectContent", sosAppRuleObjectContent
+  , "AppRuleAction", sosAppRuleAction
+  , "AppID", sosAppID
+  , "AppCategoryID", sosAppCategoryID
+  , "IPSCategoryName", sosIPSCategoryName
+  , "AntiSpywareCategory", sosAntiSpywareCategory
+  , "URLPathName", sosURLPathName
+  , "FileIdentifier", sosFileIdentifier
+  , "DPIInspectedFlow", sosDPIInspectedFlow
+  , "BladeID", sosBladeID
+  , "UUID", sosUUID
+  , "FileName", sosFileName
+  , "FileSize", FileSize
+  , "CaptureATPVerdict", sosCaptureATPVerdict
+  , "CFSCategoryID", sosCFSCategoryID
+  , "CFSCategoryName", sosCFSCategoryName
+  , "CFSPolicyName", sosCFSPolicyName
+  , "AppControlFileName", sosAppControlFileName
+  , "IPSFullString", sosIPSFullString
+  , "IPSSignatureName", sosIPSSignatureName
+  , "LogMsgCategory", sosLogMsgCategory
+  , "LogMsgNote", sosLogMsgNote
+  , "LogMsgSeverity", sosLogMsgSeverity
+  , "SourceVPNPolicyName", sosSourceVPNPolicyName
+  , "DestinationVPNPolicyName", sosDestinationVPNPolicyName
+  , "EventMessageDetail", sosEventMessageDetail
+  , "UserSessionType", sosUserSessionType
+  , "UserSessionDuration", sosUserSessionDuration
+  )
+| project-away
+    DeviceEventCategory
+  , gcat
+  , RequestMethod
+  , RequestURL_
+  , ipspri
+  , spypri
+  , sos*
+  , Protocol
+  , appName
+  , AdditionalExtensions
+  , Flex*
+  , Indicator*
+  , Malicious*
+  , Field*
+  , DeviceCustom*
+  , Old*
+  , File*
+  , Source*
+  , Destination*
+  , Device*
+  , SimplifiedDeviceAction
+  , ExternalID
+  , ExtID
+  , TenantId
+  , ProcessName
+  , ProcessID
+  , ExtID
+  , OriginalLogSeverity
+  , LogSeverity
+  , EventOutcome
+  , StartTime
+  , EndTime
+  , ReceiptTime
+  , Remote*
+  , ThreatDescription
+  , ThreatSeverity
+  , RequestContext
+  , RequestCookies
+  , CommunicationDirection
+  , ReportReferenceLink
+  , ReceivedBytes
+  , SentBytes
+  , _ResourceId
+  , _ItemId
+| project-reorder
+    TimeGenerated
+  , EventVendor
+  , EventProduct
+  , DvcDescription
+  , Dvc
+  , DvcOs
+  , DvcOsVersion
+};
+parser (starttime=starttime, endtime=endtime, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, ipaddr_has_any_prefix=ipaddr_has_any_prefix, url_has_any=url_has_any, httpuseragent_has_any=httpuseragent_has_any, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled=disabled)
+}
+
+
+
+//
+// Function Name: vimWebSessionSquidProxy
+// Description: This ASIM parser supports filtering and normalizing Squid Proxy logs produced by the Microsoft Sentinel Squid Connector to the ASIM Web Session normalized schema. The parser supports squid native log format.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimWebSessionSquidProxy(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['ipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['url_has_any']:dynamic=dynamic([]),
+    ['httpuseragent_has_any']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=false)
+{
+let parser = (
+  starttime:datetime=datetime(null), 
+  endtime:datetime=datetime(null),
+  srcipaddr_has_any_prefix:dynamic=dynamic([]), 
+  ipaddr_has_any_prefix:dynamic=dynamic([]), 
+  url_has_any:dynamic=dynamic([]),
+  httpuseragent_has_any:dynamic=dynamic([]),
+  eventresultdetails_in:dynamic=dynamic([]),
+  eventresult:string='*',
+  disabled:bool=false
+ ){
+SquidProxy_CL | where not(disabled)
+  // -- Pre filtering
+  | where  
+    (isnull(starttime) or TimeGenerated >= starttime) 
+    and (isnull(endtime) or TimeGenerated <= endtime) 
+    and (array_length(httpuseragent_has_any) == 0)
+    and ((array_length(url_has_any) == 0) or (RawData has_any (url_has_any)))
+    and ((array_length(srcipaddr_has_any_prefix) == 0) or has_any_ipv4_prefix(RawData, srcipaddr_has_any_prefix))
+    and ((array_length(ipaddr_has_any_prefix) == 0) or has_any_ipv4_prefix(RawData, ipaddr_has_any_prefix))
+    and ((array_length(eventresultdetails_in) == 0) or (RawData has_any (eventresultdetails_in)))
+  // -- Parse
+  | extend AccessRawLog = extract_all(@"^(\d+\.\d+)\s+(\d+)\s(\S+)\s([A-Z_]+)\/(\d+)\s(\d+)\s([A-Z]+)\s(\S+)\s(\S+)\s([A-Z_]+)\/(\S+)\s(\S+)",dynamic([1,2,3,4,5,6,7,8,9,10,11,12]),RawData)[0]
+  // -- Post filtering
+  | extend EventResultDetails = tostring(AccessRawLog[4])
+  | where array_length(eventresultdetails_in) == 0 or EventResultDetails in (eventresultdetails_in)
+  | extend EventOriginalResultDetails = strcat (tostring(AccessRawLog[3]), ";", PeerStatus = tostring(AccessRawLog[9]))
+  | extend EventResult = iff (EventOriginalResultDetails has_any ('DENIED', 'INVALID', 'FAIL', 'ABORTED','TIMEOUT') or toint(EventResultDetails) >= 400, "Failure", "Success")
+  | where eventresult == "*" or eventresult == EventResult
+  // -- Map
+  | project-rename
+    Dvc = Computer
+  | extend
+    EventEndTime = unixtime_milliseconds_todatetime(todouble(tostring(AccessRawLog[0]))*1000), 
+    NetworkDuration = toint(AccessRawLog[1]), 
+    SrcIpAddr = tostring(AccessRawLog[2]), 
+    DstBytes = tolong(AccessRawLog[5]), 
+    HttpRequestMethod = tostring(AccessRawLog[6]), 
+    // -- Squid URL might be shortened by including ellipsis (...) instead of a section in the middle. This may impact the hostname part as well.
+    Url = tostring(AccessRawLog[7]), 
+    SrcUsername = tostring(AccessRawLog[8]), 
+    DstIpAddr = tostring(AccessRawLog[10]), 
+    HttpContentType = tostring(AccessRawLog[11]) 
+  //
+  | extend 
+    ASimMatchingIpAddr = case( 
+      array_length(ipaddr_has_any_prefix) == 0             , "-",
+      has_any_ipv4_prefix(DstIpAddr, ipaddr_has_any_prefix), "DstIpAddr",
+      has_any_ipv4_prefix(SrcIpAddr, ipaddr_has_any_prefix), "SrcIpAddr"
+                                                           , "No match"
+          )
+  // Post Filter
+  | where 
+      (
+        (array_length(srcipaddr_has_any_prefix) == 0 or has_any_ipv4_prefix(SrcIpAddr, srcipaddr_has_any_prefix))
+        and (ASimMatchingIpAddr != "No match")
+      )
+  // -- Constant fields
+  | extend 
+    EventCount = int(1), 
+    EventProduct = 'Squid Proxy', 
+    EventVendor = 'Squid', 
+    EventSchema = 'WebSession', 
+    EventSchemaVersion = '0.2.3', 
+    EventType = 'HTTPsession' 
+  // -- Value normalization
+  | extend
+    SrcUsernameType = "Unknown",
+    SrcUsername = iff (SrcUsername == "-", "", SrcUsername), 
+    HttpContentType = iff (HttpContentType in (":", "-"), "", HttpContentType), 
+    DstIpAddrIsHost = DstIpAddr matches regex @"^[^\:]*[a-zA-Z]$"
+  | extend 
+    FQDN = iif (DstIpAddrIsHost, DstIpAddr, tostring(parse_url(Url)["Host"])),
+    DstIpAddr = iif (DstIpAddr == "-" or DstIpAddrIsHost, "", DstIpAddr)
+  | extend 
+    EventSeverity = iff(EventResult == "Success", "Informational", "Low")
+  | invoke _ASIM_ResolveDstFQDN ('FQDN')
+  // -- aliases
+  | extend 
+    EventStartTime = EventEndTime,
+    Duration = NetworkDuration,
+    HttpStatusCode = EventResultDetails,
+    User = SrcUsername,
+    IpAddr = SrcIpAddr,
+    Src = SrcIpAddr,
+    Dst = DstHostname,
+    Hostname = DstHostname
+  | project-away AccessRawLog, RawData, *_s, MG, ManagementGroupName, SourceSystem, TenantId, DstIpAddrIsHost
+};
+parser (starttime=starttime, endtime=endtime, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, ipaddr_has_any_prefix=ipaddr_has_any_prefix, url_has_any=url_has_any, httpuseragent_has_any=httpuseragent_has_any, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled=disabled)
+}
+
+
+
+//
+// Function Name: vimWebSessionVectraAI
+// Description: This ASIM parser supports filtering and normalizing Vectra AI Streams logs produced to the ASIM Web Session normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimWebSessionVectraAI(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['ipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['url_has_any']:dynamic=dynamic([]),
+    ['httpuseragent_has_any']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=false,
+    ['pack']:bool=false)
+{
+let parser = (starttime: datetime = datetime(null),
+              endtime: datetime = datetime(null),
+              srcipaddr_has_any_prefix: dynamic = dynamic([]),
+              ipaddr_has_any_prefix: dynamic = dynamic([]),
+              url_has_any: dynamic = dynamic([]),
+              httpuseragent_has_any: dynamic = dynamic([]),
+              eventresultdetails_in: dynamic = dynamic([]),
+              eventresult: string = '*',
+              disabled: bool = false,
+              pack:bool = false)
+{
+  let NetworkDirectionLookup = datatable(local_orig_b:bool, local_resp_b:bool, NetworkDirection:string)
+  [
+      false, true, 'Inbound',
+      true, false, 'Outbound',
+      true, true, 'Local',
+      false, false, 'Local'
+  ];
+  let NetworkProtocolVersionLookup = datatable(id_ip_ver_s:string, NetworkApplicationProtocol:string)
+  [
+      'ipv4', 'IPv4',
+      'ipv6', 'IPv6'
+  ];
+  let HostnameRegex = @'^[a-zA-Z0-9-]{1,61}$';
+  let remove_protocol_from_urls =  
+      materialize (
+          print url_has_any 
+          | mv-apply l = print_0 to typeof(string) on ( 
+            extend l = extract(@'^(?i:.*?://)?(.*)$', 1, l)
+          ) 
+          | project l
+      );
+  let src_or_any=set_union(srcipaddr_has_any_prefix, ipaddr_has_any_prefix); 
+  VectraStream_CL
+  | where not(disabled)
+  | where (isnull(starttime) or TimeGenerated >= starttime)
+      and (isnull(endtime) or TimeGenerated <= endtime)
+  | where metadata_type_s == 'metadata_httpsessioninfo'
+  | where 
+      (array_length(url_has_any) == 0 
+      or host_s has_any(remove_protocol_from_urls) 
+      or uri_s has_any (remove_protocol_from_urls) 
+      or strcat(host_s, uri_s) has_any (remove_protocol_from_urls))
+  | where (array_length(httpuseragent_has_any) == 0 or user_agent_s has_any(httpuseragent_has_any))
+  | where (array_length(eventresultdetails_in) == 0 or tostring(status_code_d) has_any(eventresultdetails_in))
+  | extend temp_SrcMatch=has_any_ipv4_prefix(id_orig_h_s,src_or_any)
+         , temp_DstMatch=has_any_ipv4_prefix(id_resp_h_s,ipaddr_has_any_prefix)
+  | extend ASimMatchingIpAddr=case(
+                                array_length(src_or_any) == 0 ,"-",
+                                temp_SrcMatch and temp_DstMatch, "Both",
+                                temp_SrcMatch, "SrcIpAddr",
+                                temp_DstMatch, "DstIpAddr",
+                                "No match"
+                            )
+  | where ASimMatchingIpAddr != "No match" 
+  | project-away temp_*
+  | extend EventResult = iff(tolong(status_code_d) >= 400, "Failure", "Success")
+  | where (eventresult == '*' or EventResult =~ eventresult)
+  | project-rename
+      DvcDescription = hostname_s,
+      DstDescription = resp_hostname_s,
+      SrcDescription = orig_hostname_s,
+      DstIpAddr = id_resp_h_s,
+      EventOriginalUid = uid_s,
+      HttpContentType = resp_mime_types_s,
+      HttpReferrer = referrer_s,
+      HttpRequestMethod = method_s,
+      HttpUserAgent = user_agent_s,
+      DvcId = sensor_uid_s,
+      // -- community id is just a hash of addresses and ports, and not unique for the session
+      // NetworkSessionId = community_id_s,
+      SrcIpAddr = id_orig_h_s,
+      SrcSessionId = orig_sluid_s,
+      DstSessionId = resp_sluid_s,
+      HttpResponseCacheControl = response_cache_control_s,
+      HttpRequestCacheControl = request_cache_control_s,
+      HttpCookie = cookie_s,
+      HttpResponseExpires = response_expires_s,
+      HttpIsProxied = is_proxied_b,
+      EventOriginalStatusDetails = status_msg_s
+  | extend
+      DstHostname = iff (DstDescription startswith "IP-" or not(DstDescription matches regex HostnameRegex), "", DstDescription),
+      SrcHostname = iff (SrcDescription startswith "IP-" or not(SrcDescription matches regex HostnameRegex), "", SrcDescription),
+      DvcHostname = iff (DvcDescription startswith "IP-" or not(DvcDescription matches regex HostnameRegex), "", DvcDescription),
+      DstBytes = tolong(resp_ip_bytes_d),
+      DstPackets = tolong(resp_pkts_d),
+      DstPortNumber = toint(id_resp_p_d),
+      EventCount = toint(1),
+      EventStartTime = unixtime_milliseconds_todatetime(ts_d),
+      EventOriginalSubType = tostring(split(metadata_type_s, '_')[1]),
+      EventProduct = 'Vectra Stream',
+      EventResultDetails = tostring(toint(status_code_d)),
+      HttpRequestBodyBytes = tolong(request_body_len_d),
+      HttpResponseBodyBytes = tolong(response_body_len_d),
+      HttpRequestHeaderCount = toint(request_header_count_d),
+      HttpResponseHeaderCount = toint(response_header_count_d),
+      EventSchema = 'WebSession',
+      EventSchemaVersion='0.2.3',
+      DvcIdType = 'VectraId',
+      EventSeverity = iff (EventResult == 'Success', 'Informational', 'Low'),
+      EventType = 'HTTPsession',
+      EventVendor = 'Vectra AI',
+      SrcBytes = tolong(orig_ip_bytes_d),
+      SrcPackets = tolong(orig_pkts_d),
+      SrcPortNumber = toint(id_orig_p_d),
+      Url = strcat('http://', host_s, uri_s)
+  | lookup NetworkDirectionLookup on local_orig_b, local_resp_b
+  | lookup NetworkProtocolVersionLookup on id_ip_ver_s
+  // -- preserving non-normalized important fields
+  | extend AdditionalFields = iff (
+      pack, 
+      bag_pack (
+        "first_orig_resp_data_pkt", first_orig_resp_data_pkt_s,
+        "first_resp_orig_data_pkt", first_resp_orig_data_pkt_s,
+        "orig_huid", orig_huid_s,
+        "resp_huid", resp_huid_s,
+        "community_id", community_id_s,
+        "resp_multihome", resp_multihomed_b,
+        "host_multihomed", host_multihomed_b,
+        "first_orig_resp_data_pkt_time", unixtime_milliseconds_todatetime(first_orig_resp_data_pkt_time_d),
+        "first_orig_resp_pkt_time", unixtime_milliseconds_todatetime(first_orig_resp_pkt_time_d),
+        "first_resp_orig_data_pkt_time", unixtime_milliseconds_todatetime(first_resp_orig_data_pkt_time_d),
+        "first_resp_orig_pkt_time", unixtime_milliseconds_todatetime(first_resp_orig_pkt_time_d)
+      ),
+      dynamic([])
+    )
+  | project-away
+      *_d, *_s, *_b, *_g, Computer, MG, ManagementGroupName, RawData, SourceSystem, TenantId
+  | extend
+      Dst = DstIpAddr,
+      Dvc = DvcId,
+      EventEndTime = EventStartTime,
+      Hostname = DstHostname,
+      HttpStatusCode = EventResultDetails,
+      IpAddr = SrcIpAddr,
+      NetworkBytes = SrcBytes + DstBytes,
+      NetworkPackets = SrcPackets + DstPackets,
+      //SessionId = NetworkSessionId,
+      Src = SrcIpAddr,
+      UserAgent = HttpUserAgent 
+};
+parser (starttime=starttime, endtime=endtime, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, ipaddr_has_any_prefix=ipaddr_has_any_prefix, url_has_any=url_has_any, httpuseragent_has_any=httpuseragent_has_any, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled=disabled, pack=pack)
+}
+
+
+
+//
+// Function Name: vimWebSessionZscalerZIA
+// Description: This ASIM parser supports filtering and normalizing Zscaler ZIA proxy logs produced by the Microsoft Sentinel Zscaler connector to the ASIM Web Session normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimWebSessionZscalerZIA(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['ipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['url_has_any']:dynamic=dynamic([]),
+    ['httpuseragent_has_any']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=false)
+{
+let DvcActionLookup = datatable (DeviceAction:string, DvcAction: string) 
+[
+  'Allowed', 'Allow',
+  'Blocked', 'Deny'
+]; 
+let remove_protocol_from_list = (list:dynamic) 
+{
+    print list 
+    | mv-apply l = print_0 to typeof(string) on
+    ( extend l = replace_regex (tostring(l), "^(?i:.*?)://", "") ) 
+    | project l
+};
+let parser = (
+starttime:datetime=datetime(null), 
+endtime:datetime=datetime(null),
+srcipaddr_has_any_prefix:dynamic=dynamic([]), 
+ipaddr_has_any_prefix:dynamic=dynamic([]), 
+url_has_any:dynamic=dynamic([]),
+httpuseragent_has_any:dynamic=dynamic([]),
+eventresultdetails_in:dynamic=dynamic([]),
+eventresult:string='*',
+disabled:bool=false
+){
+CommonSecurityLog | where not(disabled)
+| where DeviceVendor == "Zscaler"
+| where DeviceProduct == "NSSWeblog"
+// -- Pre filtering
+| where  
+  (isnull(starttime) or TimeGenerated >= starttime) 
+  and (isnull(endtime) or TimeGenerated <= endtime) 
+  and ((array_length(httpuseragent_has_any) == 0) or (RequestClientApplication has_any (httpuseragent_has_any)))
+  and ((array_length(srcipaddr_has_any_prefix) == 0) or has_any_ipv4_prefix(SourceIP, srcipaddr_has_any_prefix))
+| extend 
+    ASimMatchingIpAddr = case( 
+      array_length(ipaddr_has_any_prefix) == 0 , "-",
+      has_any_ipv4_prefix(DestinationIP, ipaddr_has_any_prefix), "DstIpAddr",
+      has_any_ipv4_prefix(SourceIP,  ipaddr_has_any_prefix), "SrcIpAddr"
+                                                           , "No match"
+          )
+| where
+  (ASimMatchingIpAddr != "No match")
+  and ((array_length(eventresultdetails_in) == 0) or (AdditionalExtensions has_any (eventresultdetails_in)))
+  and ((array_length(url_has_any) == 0) or (RequestURL has_any (remove_protocol_from_list(url_has_any))))
+// -- Parse
+| parse AdditionalExtensions with 
+    * "rulelabel=" RuleName:string ";"
+    "ruletype=" ruletype:string ";"
+    "urlclass=" urlclass:string ";"
+    "devicemodel=" * 
+ // -- Post filtering
+| extend
+  // -- Adjustment to support both old and new CSL fields.
+  EventResultDetails = coalesce(
+    column_ifexists("EventOutcome", ""),
+    extract(@'outcome=(.*?)(?:;|$)',1, AdditionalExtensions, typeof(string))
+  )
+| where
+  ((array_length(eventresultdetails_in) == 0) or (EventResultDetails in (eventresultdetails_in)))
+| extend
+  EventResult = iff (EventResultDetails == "NA" or toint(EventResultDetails) >= 400, "Failure", "Success")
+| where eventresult == "*" or eventresult == EventResult
+// -- Event fields
+| lookup DvcActionLookup on DeviceAction
+| extend 
+  // -- Adjustment to support both old and new CSL fields.
+  EventOriginalResultDetails = coalesce(
+    column_ifexists("Reason", ""),
+    extract(@'reason=(.*?)(?:;|$)',1, AdditionalExtensions, typeof(string))
+  ),
+  ThreatRiskLevel = coalesce(
+    toint(column_ifexists("FieldDeviceCustomNumber1", int(null))),
+    toint(column_ifexists("DeviceCustomNumber1",int(null)))
+  ),
+  EventCount=int(1), 
+  EventStartTime=TimeGenerated,  
+  EventVendor = "Zscaler", 
+  EventProduct = "ZIA Proxy", 
+  EventSchema = "WebSession", 
+  EventSchemaVersion="0.2.3", 
+  EventType = 'HTTPsession',
+  EventEndTime=TimeGenerated
+// -- Field mapping
+| project-rename
+  EventProductVersion = DeviceVersion,
+  NetworkApplicationProtocol = ApplicationProtocol,
+  HttpContentType = FileType,
+  HttpUserAgent = RequestClientApplication,
+  HttpRequestMethod = RequestMethod,
+  DstAppName = DestinationServiceName,
+  DstIpAddr = DestinationIP,
+  DstFQDN = DestinationHostName,
+  SrcIpAddr = SourceIP,
+  SrcUsername = SourceUserName,
+  SrcNatIpAddr= SourceTranslatedAddress,
+  SrcUserDepartment = SourceUserPrivileges, // Not part of the standard schema
+  UrlCategory = DeviceCustomString2,
+  ThreatName = DeviceCustomString5,
+  FileMD5 = DeviceCustomString6,
+  EventOriginalSeverity = LogSeverity,
+  EventMessage = Message
+// -- Calculated fields
+| extend
+  Url = iff (RequestURL == "", "", strcat (tolower(NetworkApplicationProtocol), "://", url_decode(RequestURL))),
+  UrlCategory = strcat (urlclass, "/", UrlCategory),
+  ThreatCategory = iff(DeviceCustomString4 == "None", "", strcat (DeviceCustomString3, "/", DeviceCustomString4)),
+  RuleName = iff (RuleName == "None", "", strcat (ruletype, "/", RuleName)),
+  FileMD5 = iff (FileMD5 == "None", "", FileMD5),
+  HttpReferrer = iff (RequestContext == "None", "", url_decode(RequestContext)),
+  DstAppName = iff (DstAppName == "General Browsing", "", DstAppName),
+  DstFQDNparts = split (DstFQDN, "."),
+  DstHostnameNotAddr = DstIpAddr != DstFQDN,
+  DstBytes = tolong(ReceivedBytes),
+  SrcBytes = tolong(SentBytes),
+  DvcHostname = tostring(Computer)
+| extend
+  DstHostname = iff (DstHostnameNotAddr, tostring(DstFQDNparts[0]), DstFQDN),
+  DstDomain = iff (DstHostnameNotAddr, strcat_array(array_slice(DstFQDNparts,1,-1),"."), ""),
+  DstFQDN = iff (DstHostnameNotAddr, DstFQDN, "") 
+// -- Enrichment
+| extend
+  EventSeverity = case (ThreatRiskLevel > 90, "High", ThreatRiskLevel > 60, "Medium", ThreatRiskLevel > 10, "Low",  "Informational"),
+  DstAppType = "SaaS application",
+  DstDomainType = iff (DstHostnameNotAddr, "FQDN", ""),
+  SrcUsernameType = "UPN"
+// -- Aliases
+| extend
+  Dvc = DvcHostname,
+  Hostname = DstHostname,
+  UserAgent = HttpUserAgent,
+  User = SrcUsername,
+  HttpStatusCode = EventResultDetails,
+  IpAddr = SrcNatIpAddr,
+  Src = SrcNatIpAddr,
+  Dst = DstFQDN,
+  Hash = FileMD5,
+  FileHashType = iff(FileMD5 == "", "", "MD5")
+| project-away DstFQDNparts
+| project-away AdditionalExtensions, CommunicationDirection, Computer, Device*, Destination*, EndTime, ExternalID, File*, Flex*, IndicatorThreatType, Malicious*, Old*, OriginalLogSeverity, Process*, Protocol, ReceiptTime, ReceivedBytes, Remote*, Request*, Sent*, SimplifiedDeviceAction, Source*, StartTime, TenantId, ThreatConfidence, ThreatDescription, ThreatSeverity, Activity, EventOutcome, FieldDevice*, ExtID, Reason, ReportReferenceLink, urlclass, ruletype, DstHostnameNotAddr
+};
+parser (starttime, endtime
+   , srcipaddr_has_any_prefix, ipaddr_has_any_prefix
+   , url_has_any, httpuseragent_has_any
+   , eventresultdetails_in, eventresult, disabled)
+}
+
+
+
+
+.create-or-alter function with (skipvalidation=true) _GetWatchlist(
+    ['watchlistAlias']:string,
+    ['keys']:dynamic=dynamic([])
+)
+{
+    let function = (watchlists:string, keys:dynamic = dynamic([])) {
+        Watchlist
+        | where TimeGenerated < now()
+        | where _DTItemType == 'watchlist-item'
+        | where WatchlistAlias in (watchlists)
+        | where array_length(keys) == 0 or SearchKey in (keys)
+        | summarize hint.shufflekey=_DTItemId arg_max(_DTTimestamp, _DTItemStatus, LastUpdatedTimeUTC, SearchKey, WatchlistItem) by _DTItemId
+        | where _DTItemStatus != 'Delete'
+        | project-away _DTTimestamp, _DTItemStatus
+    };
+    function(watchlistAlias, keys)
+}
+
+
+//
+// Function Name: _ASIM_Enrich_IdentityInfo
+// Description: This ASIM tabular function enabled enriching your result set with user information from the [UEBA IdentityInfo table](https://learn.microsoft.com/azure/sentinel/ueba-reference#identityinfo-table). For more information on how to use this enrichment function refer to [ASIM functions](https://learn.microsoft.com/azure/sentinel/normalization-functions).
+  
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) _ASIM_Enrich_IdentityInfo(    ['T']:(*),
+    ['AadIdField']:string='',
+    ['TenantIdField']:string='',
+    ['SidField']:string='',
+    ['UpnField']:string='',
+    ['EmailField']:string='')
+{
+let AADinfo = 
+    IdentityInfo
+    | where TimeGenerated > ago(14d)
+    | where AccountObjectId != ""
+    | project-away AccountName, AccountDomain, GivenName, Surname, Type, TenantId, OnPremisesExtensionAttributes, UserState, UserStateChangedOn, SourceSystem
+    | project-away InvestigationPriority, InvestigationPriorityPercentile, ExtensionProperty, AccountCloudSID, Applications, ServicePrincipals
+    | summarize arg_max(TimeGenerated, *) by UserScopeId = AccountTenantId, UserId = AccountObjectId
+    | project-away TimeGenerated
+    | project-rename
+        Username = AccountUPN,
+        UserDisplayName = AccountDisplayName,
+        UserSid = AccountSID,
+        UserDN = OnPremisesDistinguishedName,
+        UserTags = Tags,
+        UserRiskLevel = RiskLevel,
+        UserRiskLevelDetails = RiskLevelDetails,
+        UserRiskState = RiskState, 
+        UserBlastRadius = BlastRadius,
+        UserGroupMembership = GroupMembership,
+        UserAssignedRoles = AssignedRoles,
+        UserDepartment = Department,
+        UserEmployeeId = EmployeeId,
+        UserJobTitle = JobTitle,
+        UserMailAddress = MailAddress,
+        UserAdditionalMailAddresses = AdditionalMailAddresses,
+        UserManager = Manager,
+        UserStreetAddress = StreetAddress,
+        UserCity = City,
+        UserCountry = Country,
+        UserRegion = State,
+        UserPhone = Phone,
+        UserAccountEnabled = IsAccountEnabled,
+        UserAccountCreationTime = AccountCreationTime,
+        RelatedUsers = RelatedAccounts,
+        UserDeleted = DeletedDateTime,
+        UserLastSeen = LastSeenDate,
+        UserUACFlags = UACFlags,
+        UserIsMFARegistered = IsMFARegistered,
+        UserRiskScore = EntityRiskScore
+    | extend 
+        UsernameType = "UPN",
+        UserIdType = "AadId",
+        UserType = iff(UserType == "Guest", UserType, ""),
+        UserUpn = Username
+;
+T 
+| extend
+    jkUserId = column_ifexists(AadIdField,''),
+    jkUserScopeId = column_ifexists(TenantIdField,''), 
+    jkUserSid = column_ifexists(SidField,''), 
+    jkUsername = column_ifexists(UpnField,''), 
+    jkUserMailAddress = column_ifexists(EmailField,'')
+| extend 
+    jkUserAadFullId = iff (isnotempty(jkUserScopeId), strcat(jkUserScopeId, '/', jkUserId), jkUserId)
+| extend
+    join_key = coalesce (jkUserAadFullId, jkUserSid, jkUsername, jkUserMailAddress)
+| lookup ( 
+    AADinfo 
+    | extend join_key = case ( 
+        isnotempty(TenantIdField), strcat(UserScopeId, '/', UserId), 
+        isnotempty(AadIdField), UserId,
+        isnotempty(SidField), UserSid,
+        isnotempty(UpnField), UserUpn,            
+        isnotempty(EmailField), UserMailAddress,
+        ''
+    )
+) on join_key
+| project-away jkUserId, jkUserAadFullId, jkUserMailAddress, jkUsername, jkUserScopeId, jkUserSid, join_key
+}
+
+
+
+//
+// Function Name: ASIM_Enrich_IdentityInfo
+// Description: This ASIM tabular function enabled enriching your result set with user information from the [UEBA IdentityInfo table](https://learn.microsoft.com/azure/sentinel/ueba-reference#identityinfo-table). For more information on how to use this enrichment function refer to [ASIM functions](https://learn.microsoft.com/azure/sentinel/normalization-functions).
+  
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASIM_Enrich_IdentityInfo(    ['T']:(*),
+    ['AadIdField']:string='',
+    ['TenantIdField']:string='',
+    ['SidField']:string='',
+    ['UpnField']:string='',
+    ['EmailField']:string='')
+{
+let AADinfo = 
+    IdentityInfo
+    | where TimeGenerated > ago(14d)
+    | where AccountObjectId != ""
+    | project-away AccountName, AccountDomain, GivenName, Surname, Type, TenantId, OnPremisesExtensionAttributes, UserState, UserStateChangedOn, SourceSystem
+    | project-away InvestigationPriority, InvestigationPriorityPercentile, ExtensionProperty, AccountCloudSID, Applications, ServicePrincipals
+    | summarize arg_max(TimeGenerated, *) by UserScopeId = AccountTenantId, UserId = AccountObjectId
+    | project-away TimeGenerated
+    | project-rename
+        Username = AccountUPN,
+        UserDisplayName = AccountDisplayName,
+        UserSid = AccountSID,
+        UserDN = OnPremisesDistinguishedName,
+        UserTags = Tags,
+        UserRiskLevel = RiskLevel,
+        UserRiskLevelDetails = RiskLevelDetails,
+        UserRiskState = RiskState, 
+        UserBlastRadius = BlastRadius,
+        UserGroupMembership = GroupMembership,
+        UserAssignedRoles = AssignedRoles,
+        UserDepartment = Department,
+        UserEmployeeId = EmployeeId,
+        UserJobTitle = JobTitle,
+        UserMailAddress = MailAddress,
+        UserAdditionalMailAddresses = AdditionalMailAddresses,
+        UserManager = Manager,
+        UserStreetAddress = StreetAddress,
+        UserCity = City,
+        UserCountry = Country,
+        UserRegion = State,
+        UserPhone = Phone,
+        UserAccountEnabled = IsAccountEnabled,
+        UserAccountCreationTime = AccountCreationTime,
+        RelatedUsers = RelatedAccounts,
+        UserDeleted = DeletedDateTime,
+        UserLastSeen = LastSeenDate,
+        UserUACFlags = UACFlags,
+        UserIsMFARegistered = IsMFARegistered,
+        UserRiskScore = EntityRiskScore
+    | extend 
+        UsernameType = "UPN",
+        UserIdType = "AadId",
+        UserType = iff(UserType == "Guest", UserType, ""),
+        UserUpn = Username
+;
+T 
+| extend
+    jkUserId = column_ifexists(AadIdField,''),
+    jkUserScopeId = column_ifexists(TenantIdField,''), 
+    jkUserSid = column_ifexists(SidField,''), 
+    jkUsername = column_ifexists(UpnField,''), 
+    jkUserMailAddress = column_ifexists(EmailField,'')
+| extend 
+    jkUserAadFullId = iff (isnotempty(jkUserScopeId), strcat(jkUserScopeId, '/', jkUserId), jkUserId)
+| extend
+    join_key = coalesce (jkUserAadFullId, jkUserSid, jkUsername, jkUserMailAddress)
+| lookup ( 
+    AADinfo 
+    | extend join_key = case ( 
+        isnotempty(TenantIdField), strcat(UserScopeId, '/', UserId), 
+        isnotempty(AadIdField), UserId,
+        isnotempty(SidField), UserSid,
+        isnotempty(UpnField), UserUpn,            
+        isnotempty(EmailField), UserMailAddress,
+        ''
+    )
+) on join_key
+| project-away jkUserId, jkUserAadFullId, jkUserMailAddress, jkUsername, jkUserScopeId, jkUserSid, join_key
+}
+
+
+
+//
+// Function Name: _ASIM_GetDisabledParsers
+// Description: This ASIM function reads the ASimDisabledParsers watchlist and determined based on it if the the parser provided as parameter is disabled.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) _ASIM_GetDisabledParsers(    ['CallerContext']:string)
+{
+let function = (CallerContext:string) {
+  ASIM_GetWatchlistRaw ('ASimDisabledParsers', pack_array('Any',CallerContext))
+  | extend SourceSpecificParser = tostring(WatchlistItem.SourceSpecificParser)
+  | where isnotempty(SourceSpecificParser)
+  | distinct SourceSpecificParser 
+};
+function (CallerContext)
+}
+
+
+
+//
+// Function Name: ASIM_GetDisabledParsers
+// Description: This ASIM function reads the ASimDisabledParsers watchlist and determined based on it if the the parser provided as parameter is disabled.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASIM_GetDisabledParsers(    ['CallerContext']:string)
+{
+let function = (CallerContext:string) {
+  ASIM_GetWatchlistRaw ('ASimDisabledParsers', pack_array('Any',CallerContext))
+  | extend SourceSpecificParser = tostring(WatchlistItem.SourceSpecificParser)
+  | where isnotempty(SourceSpecificParser)
+  | distinct SourceSpecificParser 
+};
+function (CallerContext)
+}
+
+
+
+//
+// Function Name: _ASIM_GetSourceBySourceType
+// Description: This ASIM function reads the ASimSourceType watchlist. It is more performant than using the general _GetWatchlist function.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) _ASIM_GetSourceBySourceType(    ['SourceType']:string)
+{
+let function = (SourceType:string) {
+  let Sources_by_SourceType=(SourceType:string) {
+    ASIM_GetWatchlistsRaw (dynamic(['ASimSourceType','Sources_by_SourceType']), SourceType)
+    | extend Source = tostring(WatchlistItem.Source) 
+    | where isnotempty(Source)
+    | summarize make_set(Source)
+  };
+  toscalar (Sources_by_SourceType(SourceType))
+};
+function (SourceType)
+}
+
+
+
+//
+// Function Name: ASIM_GetSourceBySourceType
+// Description: This ASIM function reads the ASimSourceType watchlist. It is more performant than using the general _GetWatchlist function.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASIM_GetSourceBySourceType(    ['SourceType']:string)
+{
+let function = (SourceType:string) {
+  let Sources_by_SourceType=(SourceType:string) {
+    ASIM_GetWatchlistsRaw (dynamic(['ASimSourceType','Sources_by_SourceType']), SourceType)
+    | extend Source = tostring(WatchlistItem.Source) 
+    | where isnotempty(Source)
+    | summarize make_set(Source)
+  };
+  toscalar (Sources_by_SourceType(SourceType))
+};
+function (SourceType)
+}
+
+
+
+//
+// Function Name: _ASIM_GetUsernameType
+// Description: This ASIM tabular function is intended for use in ASIM parsers and sets the UserType based on the username
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) _ASIM_GetUsernameType(    ['username']:string)
+{
+let ASIM_GetUsernameType = (username:string) { 
+    case ( 
+        username contains "@" , "UPN"
+        , username contains "\\", "Windows"
+        , (username has "CN=" or username has "OU=" or username has "DC="), "DN"
+        , isempty(username), ""
+        , "Simple"
+    )
+};
+ASIM_GetUsernameType (username)
+}
+
+
+
+//
+// Function Name: ASIM_GetUsernameType
+// Description: This ASIM tabular function is intended for use in ASIM parsers and sets the UserType based on the username
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASIM_GetUsernameType(    ['username']:string)
+{
+let ASIM_GetUsernameType = (username:string) { 
+    case ( 
+        username contains "@" , "UPN"
+        , username contains "\\", "Windows"
+        , (username has "CN=" or username has "OU=" or username has "DC="), "DN"
+        , isempty(username), ""
+        , "Simple"
+    )
+};
+ASIM_GetUsernameType (username)
+}
+
+
+
+//
+// Function Name: _ASIM_GetUserType
+// Description: Deprecated function, please use _ASIM_GetWindowsUserType instead. This ASIM tabular function is intended for use in ASIM parsers and sets the UserType in Windows systems based on the username and sid
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) _ASIM_GetUserType(    ['username']:string,
+    ['sid']:string)
+{
+let ASIM_GetUserType = (username:string, sid:string) { 
+    case ( 
+        sid startswith "S-1-5-80", "Service",
+        sid startswith "S-1-5-21", case (
+              sid endswith "-500", "Admin",
+              sid endswith "-501", "Guest",
+              sid endswith "-502", "Service", // A user account that's used by the Key Distribution Center (KDC) service. The account exists only on domain controllers.
+              username contains "admin", "Admin",
+              username endswith "$", "Machine",
+              "Regular"),
+        username endswith "$", "Machine",
+        sid == "S-1-5-113", "Other", // Local account
+        sid == "S-1-5-7", "Anonymous", 
+        sid == "S-1-5-17", "Service", // An account that's used by the default Internet Information Services (IIS) user
+        sid == "S-1-5-18", "System", 
+        sid == "S-1-5-19", "Service", 
+        sid == "S-1-5-20", "Service" ,
+        isempty(username), "",
+        "Other"
+    )
+};
+ASIM_GetUserType(username,sid)
+}
+
+
+
+//
+// Function Name: ASIM_GetUserType
+// Description: Deprecated function, please use _ASIM_GetWindowsUserType instead. This ASIM tabular function is intended for use in ASIM parsers and sets the UserType in Windows systems based on the username and sid
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASIM_GetUserType(    ['username']:string,
+    ['sid']:string)
+{
+let ASIM_GetUserType = (username:string, sid:string) { 
+    case ( 
+        sid startswith "S-1-5-80", "Service",
+        sid startswith "S-1-5-21", case (
+              sid endswith "-500", "Admin",
+              sid endswith "-501", "Guest",
+              sid endswith "-502", "Service", // A user account that's used by the Key Distribution Center (KDC) service. The account exists only on domain controllers.
+              username contains "admin", "Admin",
+              username endswith "$", "Machine",
+              "Regular"),
+        username endswith "$", "Machine",
+        sid == "S-1-5-113", "Other", // Local account
+        sid == "S-1-5-7", "Anonymous", 
+        sid == "S-1-5-17", "Service", // An account that's used by the default Internet Information Services (IIS) user
+        sid == "S-1-5-18", "System", 
+        sid == "S-1-5-19", "Service", 
+        sid == "S-1-5-20", "Service" ,
+        isempty(username), "",
+        "Other"
+    )
+};
+ASIM_GetUserType(username,sid)
+}
+
+
+
+//
+// Function Name: _ASIM_GetWatchlistRaw
+// Description: This ASIM function reads the ASimDisabledParsers watchlist. It is more performant than using the general _GetWatchlist function.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) _ASIM_GetWatchlistRaw(    ['watchlist']:string,
+    ['keys']:dynamic=dynamic([]))
+{
+let function = (watchlist:string, keys:dynamic = dynamic([])) {
+  Watchlist
+  | where TimeGenerated < now() 
+  | where _DTItemType == 'watchlist-item' 
+  | where WatchlistAlias == watchlist
+  | where array_length(keys) == 0 or SearchKey in (keys)
+  | summarize hint.shufflekey=_DTItemId arg_max(_DTTimestamp, _DTItemStatus, LastUpdatedTimeUTC, SearchKey, WatchlistItem) by _DTItemId 
+  | where _DTItemStatus != 'Delete' 
+  | project-away _DTTimestamp, _DTItemStatus
+};
+function (watchlist,keys)
+}
+
+
+
+//
+// Function Name: ASIM_GetWatchlistRaw
+// Description: This ASIM function reads the ASimDisabledParsers watchlist. It is more performant than using the general _GetWatchlist function.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASIM_GetWatchlistRaw(    ['watchlist']:string,
+    ['keys']:dynamic=dynamic([]))
+{
+let function = (watchlist:string, keys:dynamic = dynamic([])) {
+  Watchlist
+  | where TimeGenerated < now() 
+  | where _DTItemType == 'watchlist-item' 
+  | where WatchlistAlias == watchlist
+  | where array_length(keys) == 0 or SearchKey in (keys)
+  | summarize hint.shufflekey=_DTItemId arg_max(_DTTimestamp, _DTItemStatus, LastUpdatedTimeUTC, SearchKey, WatchlistItem) by _DTItemId 
+  | where _DTItemStatus != 'Delete' 
+  | project-away _DTTimestamp, _DTItemStatus
+};
+function (watchlist,keys)
+}
+
+
+
+//
+// Function Name: _ASIM_GetWatchlistsRaw
+// Description: This ASIM function reads multiple watchlists in raw format. The primary use case is giving an option for using multiple watchlist names for the same watchlist. It is more performant than using the general _GetWatchlist function.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) _ASIM_GetWatchlistsRaw(    ['watchlists']:dynamic,
+    ['keys']:dynamic=dynamic([]))
+{
+let function = (watchlists:dynamic, keys:dynamic = dynamic([])) {
+  Watchlist
+  | where TimeGenerated < now() 
+  | where _DTItemType == 'watchlist-item' 
+  | where WatchlistAlias in (watchlists)
+  | where array_length(keys) == 0 or SearchKey in (keys)
+  | summarize hint.shufflekey=_DTItemId arg_max(_DTTimestamp, _DTItemStatus, LastUpdatedTimeUTC, SearchKey, WatchlistItem) by _DTItemId 
+  | where _DTItemStatus != 'Delete' 
+  | project-away _DTTimestamp, _DTItemStatus
+};
+function (watchlists,keys)
+}
+
+
+
+//
+// Function Name: ASIM_GetWatchlistsRaw
+// Description: This ASIM function reads multiple watchlists in raw format. The primary use case is giving an option for using multiple watchlist names for the same watchlist. It is more performant than using the general _GetWatchlist function.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASIM_GetWatchlistsRaw(    ['watchlists']:dynamic,
+    ['keys']:dynamic=dynamic([]))
+{
+let function = (watchlists:dynamic, keys:dynamic = dynamic([])) {
+  Watchlist
+  | where TimeGenerated < now() 
+  | where _DTItemType == 'watchlist-item' 
+  | where WatchlistAlias in (watchlists)
+  | where array_length(keys) == 0 or SearchKey in (keys)
+  | summarize hint.shufflekey=_DTItemId arg_max(_DTTimestamp, _DTItemStatus, LastUpdatedTimeUTC, SearchKey, WatchlistItem) by _DTItemId 
+  | where _DTItemStatus != 'Delete' 
+  | project-away _DTTimestamp, _DTItemStatus
+};
+function (watchlists,keys)
+}
+
+
+
+//
+// Function Name: _ASIM_GetWindowsUserType
+// Description: This ASIM tabular function is intended for use in ASIM parsers and sets the UserType in Windows systems based on the username and sid
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) _ASIM_GetWindowsUserType(    ['username']:string,
+    ['sid']:string)
+{
+let ASIM_GetWindowsUserType = (username:string, sid:string) { 
+    case ( 
+        sid startswith "S-1-5-80", "Service",
+        sid startswith "S-1-5-21", case (
+              sid endswith "-500", "Admin",
+              sid endswith "-501", "Guest",
+              sid endswith "-502", "Service", // A user account that's used by the Key Distribution Center (KDC) service. The account exists only on domain controllers.
+              username contains "admin", "Admin",
+              username endswith "$", "Machine",
+              "Regular"),
+        username endswith "$", "Machine",
+        sid == "S-1-5-113", "Other", // Local account
+        sid == "S-1-5-7", "Anonymous", 
+        sid == "S-1-5-17", "Service", // An account that's used by the default Internet Information Services (IIS) user
+        sid == "S-1-5-18", "System", 
+        sid == "S-1-5-19", "Service", 
+        sid == "S-1-5-20", "Service" ,
+        isempty(username), "",
+        "Other"
+    )
+};
+ASIM_GetWindowsUserType(username,sid)
+}
+
+
+
+//
+// Function Name: ASIM_GetWindowsUserType
+// Description: This ASIM tabular function is intended for use in ASIM parsers and sets the UserType in Windows systems based on the username and sid
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASIM_GetWindowsUserType(    ['username']:string,
+    ['sid']:string)
+{
+let ASIM_GetWindowsUserType = (username:string, sid:string) { 
+    case ( 
+        sid startswith "S-1-5-80", "Service",
+        sid startswith "S-1-5-21", case (
+              sid endswith "-500", "Admin",
+              sid endswith "-501", "Guest",
+              sid endswith "-502", "Service", // A user account that's used by the Key Distribution Center (KDC) service. The account exists only on domain controllers.
+              username contains "admin", "Admin",
+              username endswith "$", "Machine",
+              "Regular"),
+        username endswith "$", "Machine",
+        sid == "S-1-5-113", "Other", // Local account
+        sid == "S-1-5-7", "Anonymous", 
+        sid == "S-1-5-17", "Service", // An account that's used by the default Internet Information Services (IIS) user
+        sid == "S-1-5-18", "System", 
+        sid == "S-1-5-19", "Service", 
+        sid == "S-1-5-20", "Service" ,
+        isempty(username), "",
+        "Other"
+    )
+};
+ASIM_GetWindowsUserType(username,sid)
+}
+
+
+

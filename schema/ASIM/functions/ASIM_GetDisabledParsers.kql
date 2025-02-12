@@ -1,0 +1,17 @@
+﻿//
+// Function Name: ASIM_GetDisabledParsers
+// Description: This ASIM function reads the ASimDisabledParsers watchlist and determined based on it if the the parser provided as parameter is disabled.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASIM_GetDisabledParsers(    ['CallerContext']:string)
+{
+let function = (CallerContext:string) {
+  ASIM_GetWatchlistRaw ('ASimDisabledParsers', pack_array('Any',CallerContext))
+  | extend SourceSpecificParser = tostring(WatchlistItem.SourceSpecificParser)
+  | where isnotempty(SourceSpecificParser)
+  | distinct SourceSpecificParser 
+};
+function (CallerContext)
+}

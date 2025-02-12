@@ -1,0 +1,2101 @@
+//
+// Function Name: ASimAuthenticationSalesforceSC
+// Description: This ASIM parser supports normalizing Salesforce sign in logs, stored in the  SalesforceServiceCloud_CL table, to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuthenticationSalesforceSC(    ['disabled']:bool=False)
+{
+let parser = (
+disabled: bool=false
+) {
+let SalesforceSchema = datatable(
+api_version_s: string,
+browser_type_s: string,
+cipher_suite_s: string,
+client_ip_s: string,
+delegated_user_id_s: string,
+delegated_user_name_s: string,
+event_type_s: string,
+login_key_s: string,
+login_status_s: string,
+login_type_s: string,
+login_sub_type_s: string,
+organization_id_s: string,
+platform_type_s: string,
+request_id_s: string,
+request_status_s: string,
+session_key_s: string,
+source_ip_s: string,
+timestamp_s: string,
+tls_protocol_s: string,
+uri_s: string,
+user_id_s: string,
+user_name_s: string,
+user_type_s: string,
+wave_session_id_g: string
+)[];
+    let EventResultLookup = datatable (
+    login_status_s: string,
+    DvcAction: string,
+    EventResultDetails: string,
+    EventResult: string,
+    EventSeverity: string
+)[
+    "LOGIN_CHALLENGE_ISSUED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_CHALLENGE_PENDING", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_DATA_DOWNLOAD_ONLY", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_END_SESSION_TXN_SECURITY_POLICY", "Blocked", "Logon violates policy", "Failure", "Informational",
+    "LOGIN_ERROR_API_TOO_OLD", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_ASYNC_USER_CREATE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_AVANTGO_DISABLED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_AVANTGO_TRIAL_EXP", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_CLIENT_NO_ACCESS", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_CLIENT_REQ_UPDATE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_CSS_FROZEN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_CSS_PW_LOCKOUT", "Blocked", "User locked", "Failure", "Informational",
+    "LOGIN_ERROR_DUPLICATE_USERNAME", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_EXPORT_RESTRICTED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_GLOBAL_BLOCK_DOMAIN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_HT_DOWN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_HTP_METHD_INVALID", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_INSECURE_LOGIN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_INVALID_GATEWAY", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_INVALID_ID_FIELD", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_INVALID_PASSWORD", "Blocked", "Incorrect password", "Failure", "Informational",
+    "LOGIN_ERROR_LOGINS_EXCEEDED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_MUST_USE_API_TOKEN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_MUTUAL_AUTHENTICATION", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_NETWORK_INACTIVE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_NO_HT_ACCESS", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_NO_NETWORK_ACCESS", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_NO_NETWORK_INFO", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_NO_SET_COOKIES", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_OFFLINE_DISABLED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_OFFLINE_TRIAL_EXP", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_ORG_CLOSED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_ORG_DOMAIN_ONLY", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_ORG_IN_MAINTENANCE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_ORG_INACTIVE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_ORG_IS_DOT_ORG", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_ORG_LOCKOUT", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_ORG_SIGNING_UP", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_ORG_SUSPENDED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_OUTLOOK_DISABLED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_PAGE_REQUIRES_LOGIN", "Blocked", "Session expired", "Failure", "Informational",
+    "LOGIN_ERROR_PASSWORD_EMPTY", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_PASSWORD_LOCKOUT", "Blocked", "User locked", "Failure", "Informational",
+    "LOGIN_ERROR_PORTAL_INACTIVE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_RATE_EXCEEDED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_RESTRICTED_DOMAIN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_RESTRICTED_TIME", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_SESSION_TIMEOUT", "Blocked", "Session expired", "Failure", "Informational",
+    "LOGIN_ERROR_SSO_PWD_INVALID", "Blocked", "Incorrect password", "Failure", "Informational",
+    "LOGIN_ERROR_SSO_SVC_DOWN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_SSO_URL_INVALID", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_STORE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_STORE_DOWN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_SWITCH_SFDC_INSTANCE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_SWITCH_SFDC_LOGIN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_SYNCOFFLINE_DISBLD", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_SYSTEM_DOWN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_USER_API_ONLY", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_USER_FROZEN", "Blocked", "User locked", "Failure", "Informational",
+    "LOGIN_ERROR_USER_INACTIVE", "Blocked", "User disabled", "Failure", "Informational",
+    "LOGIN_ERROR_USER_NON_MOBILE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_USER_STORE_ACCESS", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_USERNAME_EMPTY", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_WIRELESS_DISABLED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ERROR_WIRELESS_TRIAL_EXP", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_LIGHTNING_LOGIN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_NO_ERROR", "Allowed", "", "Success", "Informational",
+    "LOGIN_OAUTH_API_DISABLED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_CONSUMER_DELETED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_DS_NOT_EXPECTED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_EXCEED_GET_AT_LMT", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_CODE_CHALLENGE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_CODE_VERIFIER", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_DEVICE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_DS", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_DSIG", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_IP", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_NONCE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_SIG_METHOD", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_TIMESTAMP", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_TOKEN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_VERIFIER", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_INVALID_VERSION", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_MISSING_DS", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_NO_CALLBACK_URL", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_NO_CONSUMER", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_NO_TOKEN", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_NONCE_REPLAY", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_PACKAGE_MISSING", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_PACKAGE_OLD", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_OAUTH_UNEXPECTED_PARAM", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_ORG_TRIAL_EXP", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_READONLY_CANNOT_VALIDATE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_AUDIENCE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_CONFIG", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_FORMAT", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_IN_RES_TO", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_ISSUER", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_ORG_ID", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_PORTAL_ID", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_RECIPIENT", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_SESSION_LEVEL", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_SIGNATURE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_SITE_URL", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_STATUS", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_SUB_CONFIRM", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_TIMESTAMP", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_USERNAME", "Blocked", "No such user", "Failure", "Informational",
+    "LOGIN_SAML_INVALID_VERSION", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_MISMATCH_CERT", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_MISSING_ORG_ID", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_MISSING_PORTAL_ID", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_PROVISION_ERROR", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_REPLAY_ATTEMPTED", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_SAML_SITE_INACTIVE", "Blocked", "Other", "Failure", "Informational",
+    "LOGIN_TWOFACTOR_REQ", "Blocked", "Logon violates policy", "Failure", "Informational"
+];
+    let SalesforceEventType = dynamic(['Login', 'LoginAs', 'Logout']);
+    let EventTypeLookup = datatable(event_type_s: string, EventType: string)[
+    "Login", "Logon",
+    "LoginAs", "Logon",
+    "Logout", "Logoff"
+];
+    let DvcOsLookup = datatable(
+    platform_type_s: string,
+    DvcOs: string,
+    DvcOsVersion: string
+)[
+    "1000", "Windows", "",
+    "1008", "Windows", "2003",
+    "1013", "Windows", "8.1",
+    "1015", "Windows", "10",
+    "2003", "Macintosh/Apple", "OSX",
+    "4000", "Linux", "",
+    "5005", "Android", "",
+    "5006", "iPhone", "",
+    "5007", "iPad", "",
+    "5200", "Android", "10.0"
+];
+    let LogonMethodLookup = datatable(
+    LoginType_s: string,
+    LogonMethodOriginal: string,
+    LogonMethod: string
+)[
+    "7", "AppExchange", "Other",
+    "A", "Application", "Other",
+    "s", "Certificate-based login", "PKI",
+    "k", "Chatter Communities External User", "Other",
+    "n", "Chatter Communities External User Third Party SSO", "Other",
+    "r", "Employee Login to Community", "Other",
+    "z", "Lightning Login", "Username & Password",
+    "l", "Networks Portal API Only", "Other",
+    "6", "Remote Access Client", "Other",
+    "i", "Remote Access 2.0", "Other",
+    "I", "Other Apex API", "Other",
+    "R", "Partner Product", "Other",
+    "w", "Passwordless Login", "Passwordless",
+    "3", "Customer Service Portal", "Other",
+    "q", "Partner Portal Third-Party SSO", "Other",
+    "9", "Partner Portal", "Other",
+    "5", "SAML Idp Initiated SSO", "Other",
+    "m", "SAML Chatter Communities External User SSO", "Other",
+    "b", "SAML Customer Service Portal SSO", "Other",
+    "c", "SAML Partner Portal SSO", "Other",
+    "h", "SAML Site SSO", "Other",
+    "8", "SAML Sfdc Initiated SSO", "Other",
+    "E", "SelfService", "Other",
+    "j", "Third Party SSO", "Other"
+];
+    let LogonProtocolLookup = datatable(
+    LoginSubType_s: string,
+    LogonProtocolOriginal: string,
+    LogonProtocol: string
+)[
+    "uiup", "UI Username-Password", "Basic Auth",
+    "oauthpassword", "OAuth Username-Password", "OAuth",
+    "oauthtoken", "OAuth User-Agent", "OAuth",
+    "oauthhybridtoken", "OAuth User-Agent for Hybrid Apps", "OAuth",
+    "oauthtokenidtoken", "OAuth User-Agent with ID Token", "OAuth",
+    "oauthclientcredential", "OAuth Client Credential", "OAuth",
+    "oauthcode", "OAuth Web Server", "OAuth",
+    "oauthhybridauthcode", "OAuth Web Server for Hybrid Apps", "OAuth",
+];
+    let TempEventResultLookup = datatable(request_status_s: string, TempEventResult: string)[
+    "S", "Success",
+    "F", "Failure",
+    "A", "Failure",
+    "R", "Success",
+    "N", "Failure",
+    "U", "NA"
+];
+    let UserTypeLookup = datatable(user_type_s: string, TargetUserType: string)[
+    "CsnOnly", "Other",
+    "CspLitePortal", "Other",
+    "CustomerSuccess", "Other",
+    "Guest", "Anonymous",
+    "PowerCustomerSuccess", "Other",
+    "PowerPartner", "Other",
+    "SelfService", "Other",
+    "Standard", "Regular",
+    "A", "Application",
+    "b", "Other",
+    "C", "Other",
+    "D", "Other",
+    "F", "Other",
+    "G", "Anonymous",
+    "L", "Other",
+    "N", "Service",
+    "n", "Other",
+    "O", "Other",
+    "o", "Other",
+    "P", "Other",
+    "p", "Other",
+    "S", "Regular",
+    "X", "Admin"
+];
+    union isfuzzy=true
+        SalesforceSchema,
+        SalesforceServiceCloud_CL 
+    | where not(disabled)
+    | where event_type_s in~ (SalesforceEventType)
+    | extend TimeGenerated = todatetime(tostring(split(timestamp_s, '.', 0)[0]))
+    | extend LoginType_s = login_type_s, LoginSubType_s = login_sub_type_s
+    | lookup EventResultLookup on login_status_s
+    | lookup EventTypeLookup on event_type_s
+    | lookup LogonMethodLookup on LoginType_s
+    | lookup LogonProtocolLookup on LoginSubType_s
+    | lookup TempEventResultLookup on request_status_s
+    | lookup DvcOsLookup on platform_type_s
+    | lookup UserTypeLookup on user_type_s
+    | project-rename
+        EventProductVersion = api_version_s,
+        EventOriginalResultDetails = login_status_s,
+        TargetUserId = user_id_s,
+        SrcIpAddr = source_ip_s,
+        EventOriginalUid = request_id_s,
+        TlsCipher = cipher_suite_s,
+        TlsVersion = tls_protocol_s,
+        HttpUserAgent= browser_type_s,
+        TargetUserScopeId = organization_id_s,
+        TargetUrl = uri_s,
+        TargetOriginalUserType = user_type_s,
+        ActorUsername = delegated_user_name_s,
+        ActorUserId = delegated_user_id_s,
+        TargetUsername = user_name_s
+    | extend
+        EventVendor = 'Salesforce',
+        EventProduct='Service Cloud',
+        EventCount = int(1),
+        EventSchema = 'Authentication',
+        EventSchemaVersion = '0.1.3',
+        TargetAppName = "Salesforce Dot Com(SFDC)",
+        TargetAppType = "SaaS application",
+        EventUid = _ItemId,
+        EventOriginalType=event_type_s,
+        SrcIpAddr = coalesce(SrcIpAddr, client_ip_s)
+    | extend
+        TargetSessionId = coalesce(session_key_s, login_key_s),
+        TargetUserScope = "Salesforce Organization",
+        TargetUserIdType = iff(isnotempty(TargetUserId), "SaleforceId", ""),
+        ActorUserIdType = iff(isnotempty(ActorUserId), "SaleforceId", ""),
+        TargetUsernameType = iff(isnotempty(TargetUsername), "UPN", ""),
+        ActorUsernameType = iff(isnotempty(ActorUsername), "UPN", ""),
+        User = coalesce(TargetUsername, TargetUserId),
+        Src = SrcIpAddr,
+        IpAddr = SrcIpAddr,
+        Dvc = EventProduct,
+        EventResult = coalesce(EventResult, TempEventResult),
+        Application = TargetAppName,
+        EventStartTime = TimeGenerated,
+        EventEndTime = TimeGenerated
+    | project-away
+        *_s,
+        *_t,
+        *_g,
+        TenantId,
+        SourceSystem,
+        Computer,
+        MG,
+        ManagementGroupName,
+        Message,
+        RawData,
+        TempEventResult,
+        _ItemId
+};
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimAuthenticationSentinelOne
+// Description: This ASIM parser supports normalizing SentinelOne logs to the ASIM Authentication normalized schema. SentinelOne events are captured through SentinelOne data connector which ingests SentinelOne server objects such as Threats, Agents, Applications, Activities, Policies, Groups, and more events into Microsoft Sentinel through the REST API.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuthenticationSentinelOne(    ['disabled']:bool=False)
+{
+let EventResultDetailsLookup = datatable (comments_s: string, EventResultDetails: string)
+  [
+      "invalid 2FA code", "Incorrect password",
+      "IP/User mismatch", "No such user or password",
+      "invalid password", "Incorrect password",
+      "user temporarily locked 2FA attempt", "User locked",
+      "no active site", "Other"
+  ];
+  let EventFieldsLookup = datatable (
+      activityType_d: real,
+      EventType: string,
+      EventResult: string,
+      EventOriginalResultDetails: string
+  )
+  [
+      27, "Logon", "Success", "User Logged In",
+      33, "Logoff", "Success", "User Logged Out",
+      133, "Logon", "Failure", "Existing User Login Failure",
+      134, "Logon", "Failure", "Unknown User Login",
+      139, "Logon", "Failure", "User Failed to Start an Unrestricted Session",
+      3629, "Logon", "Success", "Login Using Saved 2FA Recovery Code"
+  ];
+  let EventTypeLookup = datatable (alertInfo_eventType_s: string, EventType: string)
+  [
+      "WINLOGONATTEMPT", "Logon",
+      "WINLOGOFFATTEMPT", "Logoff"
+  ];
+  let EventSubTypeLookup = datatable (alertInfo_loginType_s: string, EventSubType: string)
+  [
+      "BATCH", "System",
+      "CACHED_INTERACTIVE", "Interactive",
+      "CACHED_REMOTE_INTERACTIVE", "RemoteInteractive",
+      "CACHED_UNLOCK", "System",
+      "INTERACTIVE", "Interactive",
+      "NETWORK_CLEAR_TEXT", "Remote",
+      "NETWORK_CREDENTIALS", "Remote",
+      "NETWORK", "Remote",
+      "REMOTE_INTERACTIVE", "RemoteInteractive",
+      "SERVICE", "Service",
+      "SYSTEM", "System",
+      "UNLOCK", "System"
+  ];
+  let DeviceTypeLookup = datatable (
+      agentDetectionInfo_machineType_s: string,
+      SrcDeviceType: string
+  )
+  [
+      "desktop", "Computer",
+      "server", "Computer",
+      "laptop", "Computer",
+      "kubernetes node", "Other",
+      "unknown", "Other"
+  ];
+  let ThreatConfidenceLookup_undefined = datatable(
+      alertInfo_analystVerdict_s: string,
+      ThreatConfidence_undefined: int
+  )
+  [
+      "FALSE_POSITIVE", 5,
+      "Undefined", 15,
+      "SUSPICIOUS", 25,
+      "TRUE_POSITIVE", 33 
+  ];
+  let ThreatConfidenceLookup_suspicious = datatable(
+      alertInfo_analystVerdict_s: string,
+      ThreatConfidence_suspicious: int
+  )
+  [
+      "FALSE_POSITIVE", 40,
+      "Undefined", 50,
+      "SUSPICIOUS", 60,
+      "TRUE_POSITIVE", 67 
+  ];
+  let ThreatConfidenceLookup_malicious = datatable(
+      alertInfo_analystVerdict_s: string,
+      ThreatConfidence_malicious: int
+  )
+  [
+      "FALSE_POSITIVE", 75,
+      "Undefined", 80,
+      "SUSPICIOUS", 90,
+      "TRUE_POSITIVE", 100 
+  ];
+  let TargetUserTypesList = dynamic(["Regular", "Machine", "Admin", "System", "Application", "Service Principal", "Service", "Anonymous"]);
+  let parser = (disabled: bool=false) {
+      let alldata = SentinelOne_CL
+          | where not(disabled);
+      let activitydata = alldata
+          | where event_name_s == "Activities."
+              and activityType_d in (27, 33, 133, 134, 139, 3629)
+          | parse-kv DataFields_s as (ipAddress: string, username: string, userScope: string, accountName: string, fullScopeDetails: string, fullScopeDetailsPath: string, role: string, scopeLevel: string, source: string, sourceType: string) with (pair_delimiter=",", kv_delimiter=":", quote='"')
+          | lookup EventFieldsLookup on activityType_d
+          | lookup EventResultDetailsLookup on comments_s
+          | extend 
+              SrcIpAddr = iff(ipAddress == "null", "", ipAddress),
+              EventOriginalType = tostring(toint(activityType_d)),
+              TargetUsername = username,
+              TargetUserScope = userScope,
+              AdditionalFields = bag_pack(
+                    "accountName", accountName,
+                    "fullScopeDetails", fullScopeDetails,
+                    "fullScopeDetailsPath", fullScopeDetailsPath,
+                    "scopeLevel", scopeLevel,
+                    "source", source,
+                    "sourceType", sourceType
+                ),
+              TargetOriginalUserType = role,
+              TargetUserType = case(
+                              role in (TargetUserTypesList), role,
+                              role == "null", "",
+                              "Other"
+                          )
+          | project-rename
+              EventStartTime = createdAt_t,
+              TargetUserId = userId_s,
+              EventOriginalUid = activityUuid_g,
+              EventMessage = primaryDescription_s
+          | extend TargetUserIdType = iff(isnotempty(TargetUserId), "Other", "");
+      let alertdata = alldata
+          | where event_name_s == "Alerts."
+              and alertInfo_eventType_s in ("WINLOGONATTEMPT", "WINLOGOFFATTEMPT")
+          | lookup EventTypeLookup on alertInfo_eventType_s
+          | lookup EventSubTypeLookup on alertInfo_loginType_s
+          | lookup DeviceTypeLookup on agentDetectionInfo_machineType_s;
+      let undefineddata = alertdata
+          | where ruleInfo_treatAsThreat_s == "UNDEFINED"
+          | lookup ThreatConfidenceLookup_undefined on alertInfo_analystVerdict_s;
+      let suspiciousdata = alertdata
+          | where ruleInfo_treatAsThreat_s == "Suspicious"
+          | lookup ThreatConfidenceLookup_suspicious on alertInfo_analystVerdict_s;
+      let maliciousdata = alertdata
+          | where ruleInfo_treatAsThreat_s == "Malicious"
+          | lookup ThreatConfidenceLookup_malicious on alertInfo_analystVerdict_s;
+      let alertdatawiththreatfield = union undefineddata, suspiciousdata, maliciousdata
+          | invoke _ASIM_ResolveDvcFQDN('agentDetectionInfo_name_s')
+          | invoke _ASIM_ResolveSrcFQDN('alertInfo_loginAccountDomain_s')
+          | extend
+              EventResult = iff(alertInfo_loginIsSuccessful_s == "true", "Success", "Failure"),
+              EventSeverity = iff(ruleInfo_severity_s == "Critical", "High", ruleInfo_severity_s),
+              ThreatConfidence = coalesce(ThreatConfidence_undefined, ThreatConfidence_suspicious, ThreatConfidence_malicious)
+          | project-rename
+              EventStartTime = alertInfo_createdAt_t,
+              SrcIpAddr = alertInfo_srcMachineIp_s,
+              ActingAppName = sourceProcessInfo_name_s,
+              DvcId = agentDetectionInfo_uuid_g,
+              DvcOs = agentDetectionInfo_osName_s,
+              DvcOsVersion = agentDetectionInfo_osRevision_s,
+              EventOriginalSeverity = ruleInfo_severity_s,
+              EventOriginalType = alertInfo_eventType_s,
+              EventOriginalSubType = alertInfo_loginType_s,
+              RuleName = ruleInfo_name_s,
+              TargetUserId = alertInfo_loginAccountSid_s,
+              TargetUsername = alertInfo_loginsUserName_s,
+              ThreatOriginalConfidence = ruleInfo_treatAsThreat_s
+          | extend
+              Rule = RuleName,
+              ActingAppType = iff(isnotempty(ActingAppName), "Process", ""),
+              DvcIdType = iff(isnotempty(DvcId), "Other", ""),
+              TargetUserType = _ASIM_GetUserType(TargetUsername, TargetUserId),
+              TargetUserIdType = iff(isnotempty(TargetUserId), "SID", "");
+      union activitydata, alertdatawiththreatfield
+      | extend
+          EventCount = int(1),
+          EventProduct = "SentinelOne",
+          EventSchemaVersion = "0.1.3",
+          EventVendor = "SentinelOne",
+          EventSchema = "Authentication"
+      | extend
+          Dvc = coalesce(DvcHostname, EventProduct),
+          EventEndTime = EventStartTime,
+          EventUid = _ItemId,
+          User = TargetUsername
+      | extend
+          IpAddr = SrcIpAddr,
+          Src = SrcIpAddr
+      | project-away
+          *_b,
+          *_d,
+          *_g,
+          *_s,
+          *_t,
+          ipAddress,
+          username,
+          accountName,
+          fullScopeDetails,
+          fullScopeDetailsPath,
+          role,
+          scopeLevel,
+          source,
+          sourceType,
+          userScope,
+          Computer,
+          MG,
+          ManagementGroupName,
+          RawData,
+          SourceSystem,
+          TenantId,
+          _ItemId,
+          _ResourceId,
+          ThreatConfidence_*
+  };
+  parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimAuthenticationSshd
+// Description: This ASIM parser supports normalizing OpenSSH server (sshd) sign in logs, collected using Syslog to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuthenticationSshd(    ['disabled']:bool=False)
+{
+let parser = (disabled:bool=false) {
+  let SyslogProjects = Syslog | project TimeGenerated, Computer, SyslogMessage, ProcessName, ProcessID, HostIP, Type, _ItemId, _ResourceId, _SubscriptionId;
+  //
+  // -- Successful login
+  let SSHDAccepted=(disabled:bool=false) { 
+      // -- Parse events with the format "Accepted password for <User> from <IP address> port <port> ssh2"
+      SyslogProjects 
+      | where not(disabled)
+      | where ProcessName == "sshd" and SyslogMessage startswith 'Accepted'
+      | parse SyslogMessage with "Accepted password for " TargetUsername:string " from " SrcIpAddr:string " port" SrcPortNumber:int *
+      | extend
+          EventCount    = int(1),
+          EventResult   = 'Success',
+          EventSeverity = 'Informational',
+          EventType     = 'Logon'
+      | project-away SyslogMessage, ProcessName
+  };
+  //
+  // -- Failed login - incorrect password
+  let SSHDFailed=(disabled:bool=false) {
+      // -- Parse events with the format "Failed (password|none|publickey) for <User> from <IP address> port <port> ssh2[: RSA <cipher>:<key>]"
+      // -- Or a number of such events message repeated <n> times: [ <message> ]
+      SyslogProjects 
+      | where not(disabled)
+      | where ProcessName == "sshd" and (
+          SyslogMessage startswith 'Failed' 
+          or (SyslogMessage startswith 'message repeated' and SyslogMessage has 'Failed')
+      )
+      | parse SyslogMessage with * "Failed " * " for " TargetUsername:string " from " SrcIpAddr:string " port" SrcPortNumber:int *
+      | parse SyslogMessage with "message repeated" EventCount:int " times:" * 
+      | extend
+          EventCount         = toint(coalesce(EventCount,1)),
+          EventResult        = 'Failure',
+          EventResultDetails = iff (SyslogMessage has 'publickey', 'Incorrect key', 'Incorrect password'),
+          EventSeverity      = 'Low' ,
+          EventType          = 'Logon',
+          LogonMethod        = iff (SyslogMessage has 'publickey', 'PKI', 'Username & password')
+      | project-away SyslogMessage, ProcessName
+  };
+  //
+  // -- Logoff - Timeout
+  let SSHDTimeout=(disabled:bool=false) {
+      // -- Parse events with the format "Timeout, client not responding from user yanivsh 131.107.174.198 port 7623"
+      SyslogProjects 
+      | where not(disabled)
+      | where ProcessName == "sshd" and SyslogMessage startswith 'Timeout'
+      | parse-where SyslogMessage with * "user " TargetUsername:string " " SrcIpAddr:string " port " SrcPortNumber:int
+      | extend
+          EventCount     = int(1),
+          EventResult    = 'Success',
+          EventSeverity  = 'Informational',
+          EventType      = 'Logoff'
+      | project-away SyslogMessage, ProcessName
+  };
+  //
+  // -- Failed login - invalid user
+  let SSHDInvalidUser=(disabled:bool=false) {
+      // -- Parse events with the format "Invalid user [<User>] from <IP address> port <port>"
+      SyslogProjects 
+      | where not(disabled)
+      | where ProcessName == "sshd" and SyslogMessage startswith 'Invalid user'
+      | parse SyslogMessage with "Invalid user " TargetUsername:string " from " SrcIpAddr:string " port " SrcPortNumber:int
+      | parse SyslogMessage with "Invalid user  from " SrcIpAddrNoUser:string " port " SrcPortNumberNoUser:int
+      | extend
+          EventCount            = int(1),
+          EventResult           = 'Failure',
+          EventResultDetails    = 'No such user',
+          EventSeverity         = 'Low',
+          EventType             = 'Logon',
+          SrcIpAddr             = coalesce(SrcIpAddr, SrcIpAddrNoUser),
+          SrcPortNumber         = coalesce(SrcPortNumber, SrcPortNumberNoUser)
+      | project-away SyslogMessage, ProcessName, SrcIpAddrNoUser, SrcPortNumberNoUser
+  };
+  //
+  // -- Blocked intrusion attempts
+  let SSHDABreakInAttemptMappingFailed=(disabled:bool=false) {
+      // -- Parse events with the format "reverse mapping checking getaddrinfo for <host> [<Ip address>] failed - POSSIBLE BREAK-IN ATTEMPT!"
+  SyslogProjects 
+      | where not(disabled)
+      | where ProcessName == "sshd" and SyslogMessage startswith "reverse mapping checking getaddrinfo for"
+      | parse SyslogMessage with * " for " Src " [" SrcIpAddr "]" *
+      | invoke _ASIM_ResolveSrcFQDN ('Src')
+      | extend
+          DvcAction             = 'Block',
+          EventCount            = int(1),
+          EventResult           = 'Failure',
+          EventResultDetails    = 'Logon violates policy',
+          EventSeverity         = 'Medium',
+          EventType             = 'Logon',
+          RuleName              = "Reverse mapping failed",    
+          TargetUsername        = ''
+      | extend
+          Rule = RuleName
+      | project-away SyslogMessage, ProcessName, Src
+  };
+  let SSHDABreakInAttemptMappingMismatch=(disabled:bool=false) {
+      // -- Parse events with the format "Address 61.70.128.48 maps to host-61-70-128-48.static.kbtelecom.net, but this does not map back to the address - POSSIBLE BREAK-IN ATTEMPT!"
+  SyslogProjects 
+      | where not(disabled)
+      | where ProcessName == "sshd" and SyslogMessage has "but this does not map back to the address"
+      | parse SyslogMessage with "Address " SrcIpAddr:string " maps to " Src:string ", but this" *
+      | invoke _ASIM_ResolveSrcFQDN ('Src')
+      | extend
+          DvcAction          = 'Block',
+          EventCount         = int(1),
+          EventResult        = 'Failure',
+          EventResultDetails = 'Logon violates policy',
+          EventSeverity      = 'Medium',
+          EventType          = 'Logon',
+          RuleName           = "Address to host to address mapping does not map back to address",
+          TargetUsername     = ''
+      | extend
+          Rule = RuleName
+      | project-away SyslogMessage, ProcessName, Src
+  };
+  let SSHDABreakInAttemptNastyPtr=(disabled:bool=false) {
+      // -- Parse events with the format "Nasty PTR record "<RR>" is set up for <IP Address>, ignoring"
+  SyslogProjects | where not(disabled)
+      | where ProcessName == "sshd" and SyslogMessage startswith "Nasty PTR record"
+      | parse SyslogMessage with * "set up for " SrcIpAddr:string ", ignoring"
+      | extend
+          DvcAction          = 'Block',
+          EventCount         = int(1),
+          EventResult        = 'Failure',
+          EventResultDetails = 'Logon violates policy',
+          EventSeverity      = 'Medium',
+          EventType          = 'Logon',
+          RuleName           = "Nasty PTR record set for IP Address",
+          TargetUsername     = ''
+      | extend
+          Rule = RuleName
+      | project-away SyslogMessage, ProcessName
+  };
+  union isfuzzy=false 
+      SSHDAccepted (disabled=disabled),
+      SSHDFailed (disabled=disabled),
+      SSHDInvalidUser (disabled=disabled),
+      SSHDTimeout (disabled=disabled),
+      SSHDABreakInAttemptMappingFailed (disabled=disabled),
+      SSHDABreakInAttemptMappingMismatch (disabled=disabled),
+      SSHDABreakInAttemptNastyPtr (disabled=disabled)
+  | invoke _ASIM_ResolveDvcFQDN ('Computer')
+  | extend 
+      DvcIdType             = iff (isnotempty(_ResourceId), "AzureResourceId", ""),
+      DvcOs                 = 'Linux',
+      EventEndTime          = TimeGenerated,
+      EventProduct          = 'OpenSSH',
+      EventSchema           = 'Authentication',
+      EventSchemaVersion    = '0.1.2',
+      EventStartTime        = TimeGenerated,
+      EventSubType          = 'Remote',
+      EventVendor           = 'OpenBSD',
+      LogonProtocol         = 'ssh',
+      TargetAppId           = tostring(ProcessID),
+      TargetAppName         = 'sshd',
+      TargetAppType         = 'Service',
+      TargetDvcOs           = 'Linux',
+      TargetUsernameType    = 'Simple'
+  | project-away Computer, ProcessID
+  | project-rename 
+      DvcId                 = _ResourceId,
+      DvcIpAddr             = HostIP,
+      DvcScopeId            = _SubscriptionId,
+      EventUid              = _ItemId
+  //
+  // -- Aliases
+  | extend
+      Dst                   = coalesce (DvcFQDN, DvcHostname, DvcIpAddr),
+      Dvc                   = DvcHostname,
+      IpAddr                = DvcIpAddr,
+      TargetDomain          = DvcDomain,
+      TargetDomainType      = DvcDomainType,
+      TargetDvcId           = DvcId,
+      TargetDvcIdType       = DvcDomainType,
+      TargetDvcScopeId      = DvcScopeId,
+      TargetFQDN            = DvcFQDN,
+      TargetHostname        = DvcHostname,
+      TargetIpAddr          = DvcIpAddr,
+      User                  = TargetUsername
+  };
+  parser (
+      disabled=disabled
+  )
+}
+
+
+
+//
+// Function Name: ASimAuthenticationSu
+// Description: This ASIM parser supports normalizing Linux su elevation commands collected using Syslog to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuthenticationSu(    ['disabled']:bool=False)
+{
+let parser = (disabled: bool=false)
+{
+    let SyslogProjects = Syslog
+        | project
+            TimeGenerated,
+            Computer,
+            SyslogMessage,
+            ProcessName,
+            ProcessID,
+            HostIP,
+            Type,
+            _ItemId,
+            _ResourceId,
+            _SubscriptionId;
+    //
+    // -- Successful SU
+    // Parses the event "Successful su for <user> by <user>"
+    let SuSignInAuthorized=(disabled: bool=false)
+{
+    SyslogProjects 
+        | where not(disabled)
+        | where ProcessName == "su" and SyslogMessage startswith "Successful su for"
+        | parse SyslogMessage with * "for " TargetUsername: string " by " ActorUsername: string
+        | extend
+            EventType = 'Elevation'
+        | project-away SyslogMessage, ProcessName
+};
+    // 
+    // -- SU end
+    // Parsers the event "pam_unix(su[-l]:session): session closed for user <user>"
+    let SuDisconnect=(disabled: bool=false)
+{
+    SyslogProjects 
+        | where not(disabled)
+        | where ProcessName == "su" and SyslogMessage has_all ('pam_unix(su', 'session): session closed for user')
+        | parse SyslogMessage with * "for user " TargetUsername: string
+        | extend
+            EventType = 'Logoff'
+        | project-away SyslogMessage, ProcessName
+};
+    union isfuzzy=false 
+        SuDisconnect(disabled = disabled),
+        SuSignInAuthorized (disabled = disabled)
+    | invoke _ASIM_ResolveDvcFQDN ('Computer')
+    | extend
+        ActingAppId           = tostring(ProcessID),
+        ActingAppType         = 'Process',
+        ActorUsernameType     = 'Simple',
+        DvcIdType             = iff (isnotempty(_ResourceId), "AzureResourceId", ""),
+        DvcOs                 = 'Linux',
+        EventCount            = int(1),
+        EventEndTime          = TimeGenerated,
+        EventProduct          = 'su',
+        EventResult           = 'Success',
+        EventSchema           = 'Authentication',
+        EventSchemaVersion    = '0.1.2',
+        EventSeverity         = 'Informational',
+        EventStartTime        = TimeGenerated,
+        EventVendor           = 'Linux',
+        TargetDvcOs           = 'Linux',
+        TargetUsernameType    = 'Simple'
+    | project-away Computer, ProcessID
+    | project-rename 
+        DvcId                 = _ResourceId,
+        DvcIpAddr             = HostIP,
+        DvcScopeId            = _SubscriptionId,
+        EventUid              = _ItemId
+    //
+    // -- Aliases
+    | extend
+        Dst                   = coalesce (DvcFQDN, DvcHostname, DvcIpAddr),
+        Dvc                   = DvcHostname,
+        IpAddr                = DvcIpAddr,
+        TargetDomain          = DvcDomain,
+        TargetDomainType      = DvcDomainType,
+        TargetDvcId           = DvcId,
+        TargetDvcIdType       = DvcDomainType,
+        TargetDvcScopeId      = DvcScopeId,
+        TargetFQDN            = DvcFQDN,
+        TargetHostname        = DvcHostname,
+        TargetIpAddr          = DvcIpAddr,
+        User                  = TargetUsername
+};
+parser
+(
+    disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: ASimAuthenticationSudo
+// Description: This ASIM parser supports normalizing Syslog sudo sign in logs to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuthenticationSudo(    ['disabled']:bool=False)
+{
+let SudoSignInAuthorized=(disabled:bool=false){
+Syslog 
+  | where not(disabled)
+  | where ProcessName == "sudo" and 
+      SyslogMessage has 'TTY=' and 
+      SyslogMessage has 'USER=' and
+      SyslogMessage has 'COMMAND='
+  | parse-kv SyslogMessage as (TTY: string, PWD: string, USER: string, COMMAND: string) with (pair_delimiter=' ', kv_delimiter='=')
+  | project-rename TargetUsername = USER
+  | extend
+      EventVendor                 = 'sudo',
+      EventProduct                = 'sudo',
+      EventCount                  = int(1),
+      EventSchema                 = 'Authentication',
+      EventSchemaVersion          = '0.1.1',
+      EventResult                 = 'Success',
+      EventStartTime              = TimeGenerated,
+      EventEndTime                = TimeGenerated,
+      EventType                   = 'Logon',
+      DvcHostname                 = Computer,
+      ActorUsernameType           = 'Simple',
+      ActorUsername               = extract(@'^(.*?):', 1, SyslogMessage),
+      TargetUsernameType          = 'Simple',
+      EventResultDetails          = 'Other',
+      EventOriginalRestultDetails = 'Connection authorized'
+// ************************
+//      <Aliases>
+// ************************
+  | extend
+      User  = TargetUsername,
+      Dvc   = Computer
+// ************************
+//      </Aliases>
+// ************************
+  | project-away Computer, MG, SourceSystem, TenantId
+  };
+let SudoAuthFailure1=(disabled:bool=false){
+Syslog | where not(disabled)
+  | where ProcessName == "sudo" and (SyslogMessage has 'user NOT in sudoers' or SyslogMessage has 'incorrect password attempts')
+  | parse-kv SyslogMessage as (TTY: string, PWD: string, USER: string, COMMAND: string) with  (pair_delimiter=' ', kv_delimiter='=')
+  | project-rename 
+      EventUid       = _ItemId,
+      TargetUsername = USER
+  | extend
+      ActorUsername               = extract(@'^(.*?):', 1, SyslogMessage),
+      ActorUsernameType           = 'Simple',
+      DvcHostname                 = Computer,
+      EventCount                  = int(1),
+      EventEndTime                = TimeGenerated,
+      EventOriginalRestultDetails = 'User authentication failed',
+      EventProduct                = 'sudo',
+      EventResult                 = 'Failure',
+      EventResultDetails          = 'No such user or password',
+      EventSchema                 = 'Authentication',
+      EventSchemaVersion          = '0.1.1',
+      EventStartTime              = TimeGenerated,
+      EventType                   = 'Logon',
+      EventVendor                 = 'sudo',
+      TargetUsernameType          = 'Simple'
+  | project-away Computer, MG, SourceSystem, TenantId
+  };
+let SudoDisconnect=(disabled:bool=false){
+  Syslog 
+  | where not(disabled)
+  | where ProcessName == "sudo" and 
+      SyslogMessage   has 'session closed for user '
+  | parse SyslogMessage with * "for user " TargetUsername:string
+  | extend
+      DvcHostname                 = Computer,
+      EventCount                  = int(1),
+      EventEndTime                = TimeGenerated,
+      EventOriginalRestultDetails = 'User session closed',
+      EventProduct                = 'sudo',
+      EventResult                 = 'Success',
+      EventResultDetails          = 'Other',
+      EventSchema                 = 'Authentication',
+      EventSchemaVersion          = '0.1.1',
+      EventStartTime              = TimeGenerated,
+      EventType                   = 'Logoff',
+      EventVendor                 = 'sudo',
+      TargetUsernameType          = 'Simple'
+// ************************
+//      <Aliases>
+// ************************
+| extend
+    Dvc   = Computer,
+    User  = TargetUsername
+// ************************
+//      </Aliases>
+// ************************
+  | project-away Computer, MG, SourceSystem, TenantId
+  };
+union isfuzzy=false 
+  SudoSignInAuthorized(disabled = disabled), 
+  SudoAuthFailure1(disabled = disabled), 
+  SudoDisconnect(disabled = disabled)
+}
+
+
+
+//
+// Function Name: ASimAuthenticationVectraXDRAudit
+// Description: This ASIM parser supports normalizing Vectra XDR Audit Logs Event in the Audits_Data_CL table to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuthenticationVectraXDRAudit(    ['disabled']:bool=False)
+{
+let parser = (disabled:bool = false)
+{
+  Audits_Data_CL
+  | where not(disabled) and event_action_s in ("login","logout")
+  | extend
+        EventCount = int(1),
+        EventEndTime = event_timestamp_t,
+        EventProduct = 'Vectra XDR',
+        EventResult = case(result_status_s=="success", "Success", result_status_s=="failure", "Failure","NA"),
+        EventSchema = "Authentication",
+        EventSchemaVersion = "0.1.3",
+        EventStartTime = event_timestamp_t,
+        EventType = case(event_action_s=="login", "Logon", event_action_s=="logout", "Logoff",""),
+        EventVendor = 'Vectra',
+        ActorUserId = tostring(toint(user_id_d)),
+        ActorUserIdType = "VectraUserId",
+        ActorUsernameType = "UPN",
+        EventUid = tostring(toint(id_d))
+  | project-rename
+        DvcIpAddr = source_ip_s,
+        ActorOriginalUserType = user_type_s,
+        ActorUsername = username_s,
+        EventMessage = Message,
+        EventProductVersion = version_s
+  | extend
+        User = ActorUsername,
+        Dvc = DvcIpAddr
+  | project-away
+        *_d, *_s, event_timestamp_t, api_client_id_g, TenantId, _ResourceId, RawData, SourceSystem, Computer, MG, ManagementGroupName
+};
+parser (disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimAuthenticationVMwareCarbonBlackCloud
+// Description: This ASIM parser supports normalizing VMware Carbon Black Cloud logs to the ASIM Authentication normalized schema. VMware Carbon Black Cloud events are captured through VMware Carbon Black Cloud data connector which ingests Carbon Black Audit, Notification and Event data into Microsoft Sentinel through the REST API.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuthenticationVMwareCarbonBlackCloud(    ['disabled']:bool=False)
+{
+let parser = (disabled: bool=false) {
+    CarbonBlackAuditLogs_CL
+    | where not(disabled)
+    | where description_s has_any ("logged in", "login","second factor authentication") and description_s !has "connector"
+    | extend
+        EventStartTime = unixtime_milliseconds_todatetime(eventTime_d),
+        EventResult = iff(description_s has "successfully", "Success", "Failure"),
+        AdditionalFields = bag_pack("flagged", flagged_b),
+        EventSeverity = iff(flagged_b == true, "Low", "Informational")
+    | extend
+        EventCount = int(1),
+        EventProduct = "Carbon Black Cloud",
+        EventSchema = "Authentication",
+        EventSchemaVersion = "0.1.3",
+        EventVendor = "VMware",
+        EventType = "Logon",
+        EventResultDetails = case(
+                       EventResult == "Failure" and description_s has ("locked"),
+                       "User locked",
+                       EventResult == "Failure" and description_s has_any ("logged in", "login"),
+                       "Incorrect password",
+                       EventResult == "Failure" and description_s has ("second factor authentication"),
+                       "MFA not satisfied",
+                       ""
+                   ),
+        EventOriginalResultDetails = iff(EventResult == "Failure", tostring(split(description_s, ';')[1]), "")
+    | project-rename
+        EventMessage = description_s,
+        EventOriginalUid = eventId_g,
+        TargetUsername = loginName_s,
+        SrcIpAddr = clientIp_s,
+        EventUid=_ItemId,
+        EventOwner = orgName_s
+    | extend
+        IpAddr = SrcIpAddr,
+        TargetUsernameType = _ASIM_GetUsernameType(TargetUsername),
+        TargetUserType = _ASIM_GetUserType(TargetUsername, ""),
+        Dvc = EventProduct,
+        EventEndTime = EventStartTime,
+        User = TargetUsername,
+        Src = SrcIpAddr
+    | project-away
+        *_s,
+        *_d,
+        *_b,
+        _ResourceId,
+        Computer,
+        MG,
+        ManagementGroupName,
+        RawData,
+        SourceSystem,
+        TenantId 
+};
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: imAuthentication
+// Description: This ASIM parser supports filtering and normalizing Authentication logs from all supported sources to the ASIM Authentication normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) imAuthentication(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['username_has_any']:dynamic=dynamic([]),
+    ['targetappname_has_any']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['pack']:bool=False)
+{
+let Generic=(starttime: datetime=datetime(null), endtime: datetime=datetime(null), username_has_any: dynamic = dynamic([]), targetappname_has_any: dynamic = dynamic([]), srcipaddr_has_any_prefix: dynamic = dynamic([]), srchostname_has_any: dynamic = dynamic([]), eventtype_in: dynamic = dynamic([]), eventresultdetails_in: dynamic = dynamic([]), eventresult: string = '*', pack: bool=false) {
+  let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludeimAuthentication') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser);
+  let imAuthenticationBuiltInDisabled=toscalar('ExcludeimAuthenticationBuiltIn' in (DisabledParsers) or 'Any' in (DisabledParsers)); 
+  union isfuzzy=true
+    vimAuthenticationEmpty
+    , vimAuthenticationAADManagedIdentitySignInLogs   (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationAADManagedIdentitySignInLogs'      in (DisabledParsers) )))
+    , vimAuthenticationAADNonInteractiveUserSignInLogs(starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationAADNonInteractiveUserSignInLogs'   in (DisabledParsers) )))
+    , vimAuthenticationAADServicePrincipalSignInLogs  (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationAADServicePrincipalSignInLogs'     in (DisabledParsers) )))
+    , vimAuthenticationSigninLogs                     (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationSigninLogs'                        in (DisabledParsers) )))
+    , vimAuthenticationAWSCloudTrail                  (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled = (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationAWSCloudTrail'                     in (DisabledParsers) )))
+    , vimAuthenticationOktaSSO                        (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationOktaSSO'                           in (DisabledParsers) )))
+    , vimAuthenticationOktaV2                        (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationOktaV2'                           in (DisabledParsers) )))
+    , vimAuthenticationM365Defender                   (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationM365Defender'                      in (DisabledParsers) )))
+    , vimAuthenticationMicrosoftWindowsEvent          (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationMicrosoftWindowsEvent'             in (DisabledParsers) )))
+    , vimAuthenticationMD4IoT                         (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationMD4IoT'                            in (DisabledParsers) )))
+    , vimAuthenticationPostgreSQL                     (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationPostgreSQL'                        in (DisabledParsers) )))
+    , vimAuthenticationSshd                           (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationSshd' in (DisabledParsers) )))
+    , vimAuthenticationSu                             (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationSu' in (DisabledParsers) )))
+    , vimAuthenticationSudo                           (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationSudo' in (DisabledParsers) )))
+    , vimAuthenticationCiscoASA                       (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationCiscoASA' in (DisabledParsers) )))
+    , vimAuthenticationCiscoMeraki                    (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationCiscoMeraki' in (DisabledParsers) )))
+    , vimAuthenticationCiscoMerakiSyslog                    (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationCiscoMerakiSyslog' in (DisabledParsers) )))
+    , vimAuthenticationCiscoISE                       (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationCiscoISE' in (DisabledParsers) )))
+    , vimAuthenticationBarracudaWAF                   (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationBarracudaWAF' in (DisabledParsers) )))
+    , vimAuthenticationVectraXDRAudit                 (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationVectraXDRAudit' in (DisabledParsers) )))
+    , vimAuthenticationGoogleWorkspace                (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationGoogleWorkspace' in (DisabledParsers) )))
+    , vimAuthenticationSalesforceSC                   (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationSalesforceSC' in (DisabledParsers) )))
+    , vimAuthenticationPaloAltoCortexDataLake         (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationPaloAltoCortexDataLake' in (DisabledParsers) )))
+    , vimAuthenticationSentinelOne                    (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationSentinelOne' in (DisabledParsers) )))
+    , vimAuthenticationCrowdStrikeFalconHost          (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationCrowdStrikeFalconHost' in (DisabledParsers) )))
+    , vimAuthenticationVMwareCarbonBlackCloud         (starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled= (imAuthenticationBuiltInDisabled or('ExcludevimAuthenticationVMwareCarbonBlackCloud' in (DisabledParsers) )))
+};
+Generic(starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, pack=pack)
+}
+
+
+
+//
+// Function Name: vimAuthenticationAADManagedIdentitySignInLogs
+// Description: This ASIM parser supports filtering and normalizing Microsoft Entra ID Managed Identity sign in logs, stored in the  AADManagedIdentitySignInLogs table, to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimAuthenticationAADManagedIdentitySignInLogs(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['username_has_any']:dynamic=dynamic([]),
+    ['targetappname_has_any']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False)
+{
+let AADResultTypes = (T: (ResultType: string))
+{
+    let AADResultTypesLookup = datatable
+(
+    ResultType: string,
+    EventResultDetails: string,
+    EventType: string,
+    EventResult: string,
+    EventOriginalResultDetails: string,
+    EventSeverity: string
+)
+[
+    "0", "", "Logon", "Success", "", "Informational",
+    "53003", "Logon violates policy", "Logon", "Failure", "53003 - BlockedByConditionalAccess", "Low",
+    "50034", "No such user", "Logon", "Failure", "50034 - UserAccountNotFound", "Low",
+    "50059", "No such user", "Logon", "Failure", "50059 - MissingTenantRealmAndNoUserInformationProvided", "Low",
+    "50053", "User locked", "Logon", "Failure", "50053 - IdsLocked or IP address with malicious activity", "Low",
+    "50055", "Password expired", "Logon", "Failure", "50055 - InvalidPasswordExpiredPassword", "Low",
+    "50056", "Incorrect password", "Logon", "Failure", "50056 - Invalid or null password", "Low",
+    "50057", "User disabled", "Logon", "Failure", "50057 - UserDisabled", "Low",
+    "50058", "Logon violates policy", "Logon", "Failure", "50058 - UserInformationNotProvided", "Low",
+    "50011", "Logon violates policy", "Logon", "Failure", "50011 - The redirect URI specified in the request does not match", "Low",
+    "50064", "No such user or password", "Logon", "Failure", "50064 - CredentialAuthenticationError", "Low",
+    "50076", "Logon violates policy", "Logon", "Failure", "50076 - UserStrongAuthClientAuthNRequired", "Low",
+    "50079", "Logon violates policy", "Logon", "Failure", "50079 - UserStrongAuthEnrollmentRequired", "Low",
+    "50105", "Logon violates policy", "Logon", "Failure", "50105 - EntitlementGrantsNotFound", "Low",
+    "50126", "No such user or password", "Logon", "Failure", "50126 - InvalidUserNameOrPassword", "Low",
+    "50132", "Password expired", "Logon", "Failure", "50132 - SsoArtifactInvalidOrExpired", "Low",
+    "50133", "Password expired", "Logon", "Failure", "50133 - SsoArtifactRevoked", "Low",
+    "50144", "Password expired", "Logon", "Failure", "50144 - InvalidPasswordExpiredOnPremPassword", "Low",
+    "50173", "Session expired", "Logon", "Failure", "50173 -FreshTokenNeeded", "Low",
+    "80012", "Logon violates policy", "Logon", "Failure", "80012 - OnPremisePasswordValidationAccountLogonInvalidHours", "Low",
+    "51004", "No such user", "Logon", "Failure", "51004 - UserAccountNotInDirectory", "Low",
+    "50072", "Logon violates policy", "Logon", "Failure", "50072 - UserStrongAuthEnrollmentRequiredInterrupt", "Low",
+    "50005", "Logon violates policy", "Logon", "Failure", "50005 - DevicePolicyError", "Low",
+    "50020", "Logon violates policy", "Logon", "Failure", "50020 - UserUnauthorized", "Low",
+    "50074", "Logon violates policy", "Logon", "Failure", "50074 - UserStrongAuthClientAuthNRequiredInterrupt", "Low",
+    "70008", "Session expired", "Logon", "Failure", "70008 - ExpiredOrRevokedGrant", "Low",
+    "700016", "No such user", "Logon", "Failure", "700016 - UnauthorizedClient_DoesNotMatchRequest", "Low",
+    "500011", "No such user", "Logon", "Failure", "500011 - InvalidResourceServicePrincipalNotFound", "Low",
+    "700027", "Incorrect key", "Logon", "Failure", "700027 - The certificate with identifier used to sign the client assertion is not registered on application", "Low",
+    "100003", "Other", "Logon", "Failure", "100003", "Low",
+    "700082", "Session expired", "Logon", "Failure", "700082 - ExpiredOrRevokedGrantInactiveToken", "Low",
+    "530034", "Logon violates policy", "Logon", "Failure", "530034 - DelegatedAdminBlockedDueToSuspiciousActivity", "Low",
+    "530032", "Logon violates policy", "Logon", "Failure", "530032 - BlockedByConditionalAccessOnSecurityPolicy", "Low",
+    "50061", "", "Logoff", "Failure", "50061 - SignoutInvalidRequest", "Low",
+    "50068", "", "Logoff", "Failure", "50068 - SignoutInitiatorNotParticipant", "Low",
+    "50078", "Logon violates policy", "Logon", "Failure", "50078 - UserStrongAuthExpired", "Low"
+];
+    T 
+    | lookup AADResultTypesLookup on ResultType
+    | extend
+        EventType                   = iff(isempty(EventType), "Logon", EventType)
+        ,
+        EventResult                 = iff(isempty(EventResult), "Failure", EventResult)
+        ,
+        EventOriginalResultDetails  = iff(isempty(EventOriginalResultDetails), EventType, EventOriginalResultDetails)
+        ,
+        EventSeverity               = iff(isempty(EventSeverity), "Low", EventSeverity)
+};
+let parser = (
+    starttime: datetime=datetime(null), 
+    endtime: datetime=datetime(null), 
+    username_has_any: dynamic = dynamic([]),
+    targetappname_has_any: dynamic = dynamic([]),
+    srcipaddr_has_any_prefix: dynamic = dynamic([]),
+    srchostname_has_any: dynamic = dynamic([]),
+    eventtype_in: dynamic = dynamic([]),
+    eventresultdetails_in: dynamic = dynamic([]),
+    eventresult: string = '*',
+    disabled: bool=false
+    )
+{
+    AADManagedIdentitySignInLogs
+    | where not(disabled)
+        and (isnull(starttime) or TimeGenerated >= starttime) 
+        and (isnull(endtime) or TimeGenerated <= endtime)
+        and ((array_length(username_has_any) == 0) or ServicePrincipalName has_any (username_has_any))
+        and ((array_length(targetappname_has_any) == 0) or ResourceDisplayName has_any (targetappname_has_any))
+        and ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(IPAddress, srcipaddr_has_any_prefix)))
+        and (array_length(srchostname_has_any) == 0) // SrcHostname not available in source
+    | invoke AADResultTypes()
+    | where ((array_length(eventtype_in) == 0) or EventType in~ (eventtype_in))
+        and (array_length(eventresultdetails_in) == 0 or EventResultDetails in~ (eventresultdetails_in))
+        and (eventresult == "*" or (EventResult == eventresult))
+    | project-rename
+        ActingAppId               = AppId
+        ,
+        TargetAppId               = ResourceIdentity 
+        ,
+        TargetAppName             = ResourceDisplayName
+        ,
+        TargetUsername            = ServicePrincipalName
+        ,
+        TargetUserId              = ServicePrincipalId
+        ,
+        EventOriginalUid          = Id
+        ,
+        TargetSessionId           = CorrelationId
+        ,
+        SrcIpAddr                 = IPAddress
+        ,
+        EventUid                  = _ItemId
+        ,
+        EventProductVersion       = OperationVersion
+    // mapping ASimMatchingUsername
+    | extend temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+    // ActorUsername not coming from source. Hence, not mapped.
+    | extend ASimMatchingUsername = case
+                                (
+                                    array_length(username_has_any) == 0,
+                                    "-",
+                                    temp_isMatchTargetUsername,
+                                    "TargetUsername",
+                                    "No match"
+                                )
+    | extend 
+        EventVendor                = 'Microsoft'
+        ,
+        EventProduct               = 'Entra ID'
+        ,
+        EventSchema                = 'Authentication'
+        ,
+        EventSchemaVersion         = '0.1.3'
+        ,
+        Dvc                        = 'Microsft/Entra ID'
+        ,
+        LogonMethod                = "Managed Identity"
+        ,
+        TargetAppType              = "Resource"
+        ,
+        EventCount                 = int(1)
+        ,
+        TargetUserType             = 'Application'
+        ,
+        TargetUsernameType         = 'Simple'
+        ,
+        TargetUserIdType           = 'EntraID'
+    | project-away
+        OperationName,
+        Category,
+        Result*,
+        ServicePrincipal*,
+        SourceSystem,
+        DurationMs,
+        Resource*,
+        Location*,
+        UniqueTokenIdentifier,
+        FederatedCredentialId,
+        Conditional*,
+        Authentication*,
+        Identity,
+        Level,
+        TenantId,
+        temp*
+    // 
+    // -- Aliases
+    | extend 
+        User                         = TargetUsername
+        ,
+        LogonTarget                = TargetAppName
+        ,
+        EventStartTime             = TimeGenerated
+        ,
+        EventEndTime               = TimeGenerated
+        ,
+        Application                = TargetAppName
+        ,
+        Dst                        = TargetAppName
+        ,
+        Src                        = SrcIpAddr
+        ,
+        IpAddr                     = SrcIpAddr
+        ,
+        TargetSimpleUsername       = TargetUsername
+        ,
+        TargetUserAadId            = TargetUserId
+};
+parser (
+  starttime=starttime,
+  endtime=endtime,
+  username_has_any=username_has_any,
+  targetappname_has_any=targetappname_has_any,
+  srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+  srchostname_has_any=srchostname_has_any,
+  eventtype_in=eventtype_in,
+  eventresultdetails_in=eventresultdetails_in,
+  eventresult=eventresult,
+  disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimAuthenticationAADNonInteractiveUserSignInLogs
+// Description: This ASIM parser supports filtering and normalizing Microsoft Entra ID Non Interactive sign in logs, stored in the AADNonInteractiveUserSignInLogs table, to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimAuthenticationAADNonInteractiveUserSignInLogs(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['username_has_any']:dynamic=dynamic([]),
+    ['targetappname_has_any']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False)
+{
+let FailedReason=datatable(ResultType: string, EventResultDetails: string)[
+  '0', 'Success',
+  '53003', 'Logon violates policy',
+  '50034', 'No such user or password',
+  '50059', 'No such user or password',
+  '50053', 'User locked',
+  '50055', 'Password expired',
+  '50056', 'Incorrect password',
+  '50057', 'User disabled',
+  '50058', 'Logon violates policy',
+  '50011', 'Logon violates policy', 
+  '50064', 'No such user or password',
+  '50076', 'Logon violates policy',
+  '50079', 'Logon violates policy',
+  '50105', 'Logon violates policy',
+  '50126', 'No such user or password',
+  '50132', 'Password expired',
+  '50133', 'Password expired',
+  '50144', 'Password expired',
+  '50173', 'Password expired',
+  '80012', 'Logon violates policy',
+  '51004', 'No such user or password',
+  '50072', 'Logon violates policy',
+  '50005', 'Logon violates policy',
+  '50020', 'Logon violates policy',
+  '50074', 'Logon violates policy', 
+  '70008', 'Password expired',
+  '700016', 'No such user or password', 
+  '500011', 'No such user or password' 
+];
+let AADNIAuthentication=(starttime: datetime=datetime(null), 
+    endtime: datetime=datetime(null), 
+    username_has_any: dynamic = dynamic([]),
+    targetappname_has_any: dynamic = dynamic([]),
+    srcipaddr_has_any_prefix: dynamic = dynamic([]),
+    srchostname_has_any: dynamic = dynamic([]),
+    eventtype_in: dynamic = dynamic([]),
+    eventresultdetails_in: dynamic = dynamic([]),
+    eventresult: string = '*',
+    disabled: bool=false) {
+    AADNonInteractiveUserSignInLogs
+    | where not(disabled)
+    // ************************************************************************* 
+    //       <Prefilterring>
+    // *************************************************************************
+    | where 
+        (isnull(starttime) or TimeGenerated >= starttime) 
+        and (isnull(endtime) or TimeGenerated <= endtime)
+        and ((array_length(username_has_any) == 0) or UserPrincipalName has_any (username_has_any))
+        and ((array_length(targetappname_has_any) == 0) or ResourceDisplayName has_any (targetappname_has_any))
+        and ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(IPAddress, srcipaddr_has_any_prefix)))
+        and (array_length(srchostname_has_any) == 0 or tostring(todynamic(DeviceDetail).displayName) has_any (srchostname_has_any))
+        and ((array_length(eventtype_in) == 0) or "Logon" in~ (eventtype_in))
+    // eventresultdetails_in filtering done later in the parser
+    // eventresult filtering done later in the parser
+    // ************************************************************************* 
+    //       </Prefilterring>
+    // ************************************************************************* 
+    | extend
+        EventVendor = 'Microsoft'
+        ,
+        EventProduct = 'Entra ID'
+        ,
+        EventSchemaVersion='0.1.0'
+        ,
+        EventCount=int(1)
+        ,
+        EventResult = iff (ResultType == 0, 'Success', 'Failure')
+        ,
+        EventOriginalResultDetails = coalesce(ResultDescription, ResultType)
+        ,
+        EventStartTime = TimeGenerated
+        ,
+        EventEndTime= TimeGenerated
+        ,
+        EventType= 'Logon'
+        ,
+        SrcDvcId=tostring(todynamic(DeviceDetail).deviceId)
+        ,
+        SrcHostname =tostring(todynamic(DeviceDetail).displayName)
+        ,
+        SrcDvcOs=tostring(todynamic(DeviceDetail).operatingSystem)
+        ,
+        Location = todynamic(LocationDetails)
+        ,
+        TargetAppId = ResourceIdentity 
+        ,
+        EventSubType = 'NonInteractive'
+        ,
+        TargetUsernameType='UPN'
+        ,
+        TargetUserIdType='EntraID'
+        ,
+        TargetAppName=ResourceDisplayName
+    // Filtering on 'eventresult'
+    | where (eventresult == "*" or (EventResult == eventresult))
+    | extend
+        SrcGeoCity=tostring(Location.city)
+        ,
+        SrcGeoCountry=tostring(Location.countryOrRegion)
+        ,
+        SrcGeoLatitude=toreal(Location.geoCoordinates.latitude)
+        ,
+        SrcGeoLongitude=toreal(Location.geoCoordinates.longitude)
+    | project-rename
+        EventOriginalUid =Id
+        ,
+        LogonMethod = AuthenticationRequirement
+        ,
+        HttpUserAgent=UserAgent
+        ,
+        TargetSessionId=CorrelationId
+        ,
+        TargetUserId = UserId
+        ,
+        TargetUsername=UserPrincipalName
+        ,
+        SrcIpAddr = IPAddress
+    // mapping ASimMatchingUsername
+    | extend temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+    // ActorUsername not coming from source. Hence, not mapped.
+    | extend ASimMatchingUsername = case(
+                                    array_length(username_has_any) == 0,
+                                    "-",
+                                    temp_isMatchTargetUsername,
+                                    "TargetUsername",
+                                    "No match"
+                                )
+    | lookup FailedReason on ResultType
+    // filtering on 'eventresultdetails_in'
+    | where (array_length(eventresultdetails_in) == 0 or EventResultDetails in~ (eventresultdetails_in))
+    | extend
+        User=TargetUsername
+        ,
+        LogonTarget=ResourceIdentity
+        ,
+        Dvc=EventVendor
+        // -- Entity identifier explicit aliases
+        ,
+        TargetUserUpn = TargetUsername
+        ,
+        TargetUserAadId = TargetUserId
+};
+AADNIAuthentication(starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled=disabled)
+}
+
+
+
+//
+// Function Name: vimAuthenticationAADServicePrincipalSignInLogs
+// Description: This ASIM parser supports filtering and normalizing Azure Active Directory Service Principal sign in logs, stored in the AADServicePrincipalSignInLogs table, to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimAuthenticationAADServicePrincipalSignInLogs(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['username_has_any']:dynamic=dynamic([]),
+    ['targetappname_has_any']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False)
+{
+let AADResultTypes = (T: (ResultType: string))
+{
+    let AADResultTypesLookup = datatable
+(
+    ResultType: string,
+    EventResultDetails: string,
+    EventType: string,
+    EventResult: string,
+    EventOriginalResultDetails: string,
+    EventSeverity: string
+)
+[
+    "0", "", "Logon", "Success", "", "Informational",
+    "53003", "Logon violates policy", "Logon", "Failure", "53003 - BlockedByConditionalAccess", "Low",
+    "50034", "No such user", "Logon", "Failure", "50034 - UserAccountNotFound", "Low",
+    "50059", "No such user", "Logon", "Failure", "50059 - MissingTenantRealmAndNoUserInformationProvided", "Low",
+    "50053", "User locked", "Logon", "Failure", "50053 - IdsLocked or IP address with malicious activity", "Low",
+    "50055", "Password expired", "Logon", "Failure", "50055 - InvalidPasswordExpiredPassword", "Low",
+    "50056", "Incorrect password", "Logon", "Failure", "50056 - Invalid or null password", "Low",
+    "50057", "User disabled", "Logon", "Failure", "50057 - UserDisabled", "Low",
+    "50058", "Logon violates policy", "Logon", "Failure", "50058 - UserInformationNotProvided", "Low",
+    "50011", "Logon violates policy", "Logon", "Failure", "50011 - The redirect URI specified in the request does not match", "Low",
+    "50064", "No such user or password", "Logon", "Failure", "50064 - CredentialAuthenticationError", "Low",
+    "50076", "Logon violates policy", "Logon", "Failure", "50076 - UserStrongAuthClientAuthNRequired", "Low",
+    "50079", "Logon violates policy", "Logon", "Failure", "50079 - UserStrongAuthEnrollmentRequired", "Low",
+    "50105", "Logon violates policy", "Logon", "Failure", "50105 - EntitlementGrantsNotFound", "Low",
+    "50126", "No such user or password", "Logon", "Failure", "50126 - InvalidUserNameOrPassword", "Low",
+    "50132", "Password expired", "Logon", "Failure", "50132 - SsoArtifactInvalidOrExpired", "Low",
+    "50133", "Password expired", "Logon", "Failure", "50133 - SsoArtifactRevoked", "Low",
+    "50144", "Password expired", "Logon", "Failure", "50144 - InvalidPasswordExpiredOnPremPassword", "Low",
+    "50173", "Session expired", "Logon", "Failure", "50173 -FreshTokenNeeded", "Low",
+    "80012", "Logon violates policy", "Logon", "Failure", "80012 - OnPremisePasswordValidationAccountLogonInvalidHours", "Low",
+    "51004", "No such user", "Logon", "Failure", "51004 - UserAccountNotInDirectory", "Low",
+    "50072", "Logon violates policy", "Logon", "Failure", "50072 - UserStrongAuthEnrollmentRequiredInterrupt", "Low",
+    "50005", "Logon violates policy", "Logon", "Failure", "50005 - DevicePolicyError", "Low",
+    "50020", "Logon violates policy", "Logon", "Failure", "50020 - UserUnauthorized", "Low",
+    "50074", "Logon violates policy", "Logon", "Failure", "50074 - UserStrongAuthClientAuthNRequiredInterrupt", "Low",
+    "70008", "Session expired", "Logon", "Failure", "70008 - ExpiredOrRevokedGrant", "Low",
+    "700016", "No such user", "Logon", "Failure", "700016 - UnauthorizedClient_DoesNotMatchRequest", "Low",
+    "500011", "No such user", "Logon", "Failure", "500011 - InvalidResourceServicePrincipalNotFound", "Low",
+    "700027", "Incorrect key", "Logon", "Failure", "700027 - The certificate with identifier used to sign the client assertion is not registered on application", "Low",
+    "100003", "Other", "Logon", "Failure", "100003", "Low",
+    "700082", "Session expired", "Logon", "Failure", "700082 - ExpiredOrRevokedGrantInactiveToken", "Low",
+    "530034", "Logon violates policy", "Logon", "Failure", "530034 - DelegatedAdminBlockedDueToSuspiciousActivity", "Low",
+    "530032", "Logon violates policy", "Logon", "Failure", "530032 - BlockedByConditionalAccessOnSecurityPolicy", "Low",
+    "50061", "", "Logoff", "Failure", "50061 - SignoutInvalidRequest", "Low",
+    "50068", "", "Logoff", "Failure", "50068 - SignoutInitiatorNotParticipant", "Low",
+    "50078", "Logon violates policy", "Logon", "Failure", "50078 - UserStrongAuthExpired", "Low",
+    "7000222", "Session expired", "Logon", "Failure", "7000222 - The provided client secret keys are expired", "Low",
+    "70021", "No such user", "Logon", "Failure", "70021 - No matching federated identity record found for presented assertion", "Low",
+    "500341", "User disabled", "Logon", "Failure", "500341 - The user account has been deleted from the directory", "Low",
+    "1002016", "Logon violates policy", "Logon", "Failure", "1002016 - You are using TLS version 1.0, 1.1 and/or 3DES cipher", "Low",
+    "7000215", "Incorrect password", "Logon", "Failure", "7000215 - Invalid client secret is provided", "Low",
+    "90033", "Transient error", "Logon", "Failure", "90033 - A transient error has occurred", "Informational",
+    "90024", "Transient error", "Logon", "Failure", "90024 - RequestBudgetExceededError - A transient error has occurred", "Informational"
+];
+    T 
+    | lookup AADResultTypesLookup on ResultType
+    | extend
+        EventType                   = iff(isempty(EventType), "Logon", EventType)
+        ,
+        EventResult                 = iff(isempty(EventResult), "Failure", EventResult)
+        ,
+        EventOriginalResultDetails  = iff(isempty(EventOriginalResultDetails), EventType, EventOriginalResultDetails)
+        ,
+        EventSeverity               = iff(isempty(EventSeverity), "Low", EventSeverity)
+};
+let parser = (
+    starttime: datetime=datetime(null), 
+    endtime: datetime=datetime(null), 
+    username_has_any: dynamic = dynamic([]),
+    targetappname_has_any: dynamic = dynamic([]),
+    srcipaddr_has_any_prefix: dynamic = dynamic([]),
+    srchostname_has_any: dynamic = dynamic([]),
+    eventtype_in: dynamic = dynamic([]),
+    eventresultdetails_in: dynamic = dynamic([]),
+    eventresult: string = '*',
+    disabled: bool=false
+    )
+{
+    AADServicePrincipalSignInLogs
+    | where not(disabled)
+        and (isnull(starttime) or TimeGenerated >= starttime) 
+        and (isnull(endtime) or TimeGenerated <= endtime)
+        and ((array_length(username_has_any) == 0) or ServicePrincipalName has_any (username_has_any))
+        and ((array_length(targetappname_has_any) == 0) or ResourceDisplayName has_any (targetappname_has_any))
+        and ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(IPAddress, srcipaddr_has_any_prefix)))
+        and (array_length(srchostname_has_any) == 0) // SrcHostname not available in source
+    | invoke AADResultTypes()
+    | where ((array_length(eventtype_in) == 0) or EventType in~ (eventtype_in))
+        and (array_length(eventresultdetails_in) == 0 or EventResultDetails in~ (eventresultdetails_in))
+        and (eventresult == "*" or (EventResult == eventresult))
+    | project-rename
+        ActingAppId               = AppId
+        ,
+        TargetAppId               = ResourceIdentity 
+        ,
+        TargetAppName             = ResourceDisplayName
+        ,
+        TargetUsername            = ServicePrincipalName
+        ,
+        TargetUserId              = ServicePrincipalId
+        ,
+        EventOriginalUid          = Id
+        ,
+        TargetSessionId           = CorrelationId
+        ,
+        SrcIpAddr                 = IPAddress
+        ,
+        EventUid                  = _ItemId
+        ,
+        EventProductVersion       = OperationVersion
+    // mapping ASimMatchingUsername
+    | extend temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+    // ActorUsername not coming from source. Hence, not mapped.
+    | extend ASimMatchingUsername = case
+                                (
+                                    array_length(username_has_any) == 0,
+                                    "-",
+                                    temp_isMatchTargetUsername,
+                                    "TargetUsername",
+                                    "No match"
+                                )
+    | extend 
+        EventVendor                = 'Microsoft'
+        ,
+        EventProduct               = 'Entra ID'
+        ,
+        EventSchema                = 'Authentication'
+        ,
+        EventSchemaVersion         = '0.1.3'
+        ,
+        Dvc                        = 'Microsft/Entra ID'
+        ,
+        LogonMethod                = "Service Principal"
+        ,
+        TargetAppType              = "Resource"
+        ,
+        EventCount                 = int(1)
+        ,
+        TargetUserType             = 'Service'
+        ,
+        TargetUsernameType         = 'Simple'
+        ,
+        TargetUserIdType           = 'EntraID'
+    | extend
+        LocationDetails = todynamic(LocationDetails)
+    | extend
+        SrcGeoCity                   = tostring(LocationDetails.city)
+        ,
+        SrcGeoCountry              = Location
+        ,
+        SrcGeoLatitude             = toreal(LocationDetails.geoCoordinates.latitude)
+        ,
+        SrcGeoLongitude            = toreal(LocationDetails.geoCoordinates.longitude)
+        ,
+        SrcGeoRegion               = tostring(LocationDetails.state)
+    | project-away
+        OperationName,
+        Category,
+        Result*,
+        ServicePrincipal*,
+        SourceSystem,
+        DurationMs,
+        Resource*,
+        Location*,
+        UniqueTokenIdentifier,
+        FederatedCredentialId,
+        Conditional*,
+        Authentication*,
+        Identity,
+        Level,
+        TenantId,
+        temp*
+    // 
+    // -- Aliases
+    | extend 
+        User                         = TargetUsername
+        ,
+        LogonTarget                = TargetAppName
+        ,
+        EventStartTime             = TimeGenerated
+        ,
+        EventEndTime               = TimeGenerated
+        ,
+        Application                = TargetAppName
+        ,
+        Dst                        = TargetAppName
+        ,
+        Src                        = SrcIpAddr
+        ,
+        IpAddr                     = SrcIpAddr
+        ,
+        TargetSimpleUsername       = TargetUsername
+        ,
+        TargetUserAadId            = TargetUserId
+};
+parser  
+(
+  starttime=starttime,
+  endtime=endtime,
+  username_has_any=username_has_any,
+  targetappname_has_any=targetappname_has_any,
+  srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+  srchostname_has_any=srchostname_has_any,
+  eventtype_in=eventtype_in,
+  eventresultdetails_in=eventresultdetails_in,
+  eventresult=eventresult,
+  disabled=disabled
+)
+}
+
+
+
+//
+// Function Name: vimAuthenticationSigninLogs
+// Description: This ASIM parser supports filtering and normalizing Microsoft Entra ID Interactive sign in logs, stored in the  SigninLogs table, to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimAuthenticationSigninLogs(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['username_has_any']:dynamic=dynamic([]),
+    ['targetappname_has_any']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False)
+{
+let FailedReason=datatable(ResultType: string, EventResultDetails: string)[
+  '0', 'Success',
+  '53003', 'Logon violates policy',
+  '50034', 'No such user or password',
+  '50059', 'No such user or password',
+  '50053', 'User locked',
+  '50055', 'Password expired',
+  '50056', 'Incorrect password',
+  '50057', 'User disabled',
+  '50058', 'Logon violates policy',
+  '50011', 'Logon violates policy', 
+  '50064', 'No such user or password',
+  '50076', 'Logon violates policy',
+  '50079', 'Logon violates policy',
+  '50105', 'Logon violates policy',
+  '50126', 'No such user or password',
+  '50132', 'Password expired',
+  '50133', 'Password expired',
+  '50144', 'Password expired',
+  '50173', 'Password expired',
+  '80012', 'Logon violates policy',
+  '51004', 'No such user or password',
+  '50072', 'Logon violates policy',
+  '50005', 'Logon violates policy',
+  '50020', 'Logon violates policy',
+  '50074', 'Logon violates policy', 
+  '70008', 'Password expired',
+  '700016', 'No such user or password', 
+  '500011', 'No such user or password' 
+];
+let UserTypeLookup = datatable (UserType: string, TargetUserType: string) [
+    'Member', 'Regular',
+    'Guest', 'Guest', 
+    '', ''
+];
+let AADSigninLogs=(starttime: datetime=datetime(null), 
+    endtime: datetime=datetime(null), 
+    username_has_any: dynamic = dynamic([]),
+    targetappname_has_any: dynamic = dynamic([]),
+    srcipaddr_has_any_prefix: dynamic = dynamic([]),
+    srchostname_has_any: dynamic = dynamic([]),
+    eventtype_in: dynamic = dynamic([]),
+    eventresultdetails_in: dynamic = dynamic([]),
+    eventresult: string = '*',
+    disabled: bool=false) {
+    SigninLogs
+    | where not(disabled)
+    // ************************************************************************* 
+    //       <Prefilterring>
+    // *************************************************************************
+    | where 
+        (isnull(starttime) or TimeGenerated >= starttime) 
+        and (isnull(endtime) or TimeGenerated <= endtime) 
+        and ((array_length(username_has_any) == 0) or UserPrincipalName has_any (username_has_any))
+        and ((array_length(targetappname_has_any) == 0) or ResourceDisplayName has_any (targetappname_has_any))
+        and ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(IPAddress, srcipaddr_has_any_prefix)))
+        and (array_length(srchostname_has_any) == 0 or tostring(DeviceDetail.displayName) has_any (srchostname_has_any))
+        and ((array_length(eventtype_in) == 0) or "Logon" in~ (eventtype_in))
+    // eventresultdetails_in filtering done later in the parser
+    // eventresult filtering done later in the parser
+    // ************************************************************************* 
+    //       </Prefilterring>
+    // ************************************************************************* 
+    | extend
+        EventVendor = 'Microsoft'
+        ,
+        EventProduct = 'Entra ID'
+        ,
+        EventCount=int(1)
+        ,
+        EventSchemaVersion='0.1.0'
+        ,
+        EventResult = iff (ResultType == 0, 'Success', 'Failure')
+        ,
+        EventOriginalResultDetails = coalesce(ResultDescription, ResultType)
+        ,
+        EventStartTime = TimeGenerated
+        ,
+        EventEndTime= TimeGenerated
+        ,
+        EventType= 'Logon'
+        ,
+        SrcDvcId=tostring(DeviceDetail.deviceId)
+        ,
+        SrcDvcHostname = tostring(DeviceDetail.displayName) // Backword Compatibility. Will be removed by July 2024
+        ,
+        SrcHostname = tostring(DeviceDetail.displayName)
+        ,
+        SrcDvcOs=tostring(DeviceDetail.operatingSystem)
+        // , SrcBrowser= tostring(DeviceDetail.browser)
+        ,
+        Location = todynamic(LocationDetails)
+        ,
+        TargetUsernameType='Upn'
+        ,
+        TargetUserIdType='EntraID'
+        ,
+        SrcIpAddr = IPAddress
+    // Filtering on 'eventresult'
+    | where (eventresult == "*" or (EventResult == eventresult))
+    | extend
+        SrcGeoCity=tostring(Location.city)
+        ,
+        SrcGeoCountry=tostring(Location.countryOrRegion)
+        ,
+        SrcGeoLatitude=toreal(Location.geoCoordinates.latitude)
+        ,
+        SrcGeoLongitude=toreal(Location.geoCoordinates.longitude)
+    | lookup FailedReason on ResultType
+    // filtering on 'eventresultdetails_in'
+    | where (array_length(eventresultdetails_in) == 0 or EventResultDetails in~ (eventresultdetails_in))
+    | project-rename
+        EventOriginalUid =Id
+        ,
+        LogonMethod  = AuthenticationRequirement
+        ,
+        HttpUserAgent=UserAgent
+        ,
+        TargetSessionId=CorrelationId
+        ,
+        TargetUserId = UserId
+        ,
+        TargetUsername=UserPrincipalName
+        ,
+        TargetAppId = ResourceIdentity
+        ,
+        TargetAppName=ResourceDisplayName
+    // mapping ASimMatchingUsername
+    | extend temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+    // ActorUsername not coming from source. Hence, not mapped.
+    | extend ASimMatchingUsername = case(
+                                    array_length(username_has_any) == 0,
+                                    "-",
+                                    temp_isMatchTargetUsername,
+                                    "TargetUsername",
+                                    "No match"
+                                )
+    | lookup UserTypeLookup on UserType
+    | project-away UserType
+    // ** Aliases
+    | extend 
+        User=TargetUsername
+        ,
+        LogonTarget=TargetAppName
+        ,
+        Dvc=EventVendor
+        // -- Entity identifier explicit aliases
+        ,
+        TargetUserUpn = TargetUsername
+        ,
+        TargetUserAadId = TargetUserId        
+};
+AADSigninLogs(starttime=starttime, endtime=endtime, username_has_any=username_has_any, targetappname_has_any=targetappname_has_any, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, eventtype_in=eventtype_in, eventresultdetails_in=eventresultdetails_in, eventresult=eventresult, disabled=disabled)
+}
+
+
+
+//
+// Function Name: vimAuthenticationAWSCloudTrail
+// Description: This ASIM parser supports filtering and normalizing Amazon Web Service sign in logs, stored in the  AWSCloudTrail table, to the ASIM Authentication schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) vimAuthenticationAWSCloudTrail(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['username_has_any']:dynamic=dynamic([]),
+    ['targetappname_has_any']:dynamic=dynamic([]),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['eventresultdetails_in']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False)
+{
+// -- Refer to https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-event-reference-user-identity.html for details
+let usertype_lookup = datatable (TargetOriginalUserType: string, TargetUserType: string) [
+    // -- For console login, only IAMUser, Root and AssumedRole are relevant
+    'Root', 'Admin', 
+    'IAMUser', 'Regular', 
+    'AssumedRole', 'Service', 
+    'Role', 'Service', 
+    'FederatedUser', 'Regular',
+    'Directory', 'Other',
+    'AWSAccount', 'Guest',
+    'AWSService', 'Application',
+    'Unknown', 'Other',
+];
+let eventresultdetails_lookup = datatable (
+    EventOriginalResultDetails: string,
+    EventOriginalDetails: string
+) [
+    'No username found in supplied account', 'No such user',
+    'Failed authentication', ''
+];
+let ASIM_GetUsernameType = (username: string) { 
+    case ( 
+    username contains "@",
+    "UPN"
+    ,
+    username contains "\\",
+    "Windows"
+    ,
+    (username has "CN=" or username has "OU=" or username has "DC="),
+    "DN"
+    ,
+    isempty(username),
+    ""
+    ,
+    "Simple"
+)
+};
+let parser= (
+    starttime: datetime=datetime(null), 
+    endtime: datetime=datetime(null), 
+    username_has_any: dynamic = dynamic([]),
+    targetappname_has_any: dynamic = dynamic([]),
+    srcipaddr_has_any_prefix: dynamic = dynamic([]),
+    srchostname_has_any: dynamic = dynamic([]),
+    eventtype_in: dynamic = dynamic([]),
+    eventresultdetails_in: dynamic = dynamic([]),
+    eventresult: string = '*',
+    disabled: bool=false
+    ) {
+    AWSCloudTrail
+    | where not(disabled)
+    //  -- Pre filtering
+    | where (isnull(starttime) or TimeGenerated >= starttime) 
+        and (isnull(endtime) or TimeGenerated <= endtime)
+        and EventName == 'ConsoleLogin'
+        and ((array_length(username_has_any) == 0) or (UserIdentityArn has_any (username_has_any)) or (UserIdentityUserName has_any (username_has_any)))
+        and (array_length(targetappname_has_any) == 0) // TargetAppName not available in source
+        and ((array_length(srcipaddr_has_any_prefix) == 0) or (has_any_ipv4_prefix(SourceIpAddress, srcipaddr_has_any_prefix)))
+        and (array_length(srchostname_has_any) == 0) // SrcHostname not available in source
+        and ((array_length(eventtype_in) == 0) or "Logon" in~ (eventtype_in))
+        and (array_length(eventresultdetails_in) == 0) // EventResultDetails not available in source
+    // eventresult filtering done later in the parser
+    //  -- end pre-filtering
+    | project-rename
+        EventOriginalUid            = AwsEventId,
+        EventOriginalResultDetails  = ErrorMessage,
+        TargetOriginalUserType      = UserIdentityType,
+        EventProductVersion         = EventVersion,
+        SrcIpAddr                   = SourceIpAddress,
+        TargeCloudRegion            = AWSRegion,
+        TargetUserScopeId           = UserIdentityAccountId,
+        HttpUserAgent               = UserAgent,
+        EventUid                    = _ItemId
+    | extend
+        TargetUsername              = case (
+                                  UserIdentityUserName == "HIDDEN_DUE_TO_SECURITY_REASONS",
+                                  "",
+                                  TargetOriginalUserType == 'IAMUser',
+                                  UserIdentityUserName,
+                                  TargetOriginalUserType == 'Root',
+                                  'root',
+                                  TargetOriginalUserType == 'AssumedRole',
+                                  tostring(split(UserIdentityArn, '/')[-1]), // -- This is the AssuderRole session name, which typically represents a user.           
+                                  UserIdentityUserName
+                              )
+    // Filtering on 'username_has_any'
+    | where ((array_length(username_has_any) == 0) or (TargetUsername has_any (username_has_any)))
+    // mapping ASimMatchingUsername
+    | extend temp_isMatchTargetUsername=TargetUsername has_any(username_has_any)
+    // ActorUsername not coming from source. Hence, not mapped.
+    | extend ASimMatchingUsername = case
+        (
+                                    array_length(username_has_any) == 0,
+                                    "-",
+                                    temp_isMatchTargetUsername,
+                                    "TargetUsername",
+                                    "No match"
+                                )
+    | extend
+        EventVendor                 = 'AWS',
+        Dvc                         = 'AWS',
+        EventProduct                = 'CloudTrail',
+        EventCount                  = int(1),
+        EventSchemaVersion          = '0.1.3',
+        EventSchema                 = 'Authentication',
+        EventStartTime              = TimeGenerated,
+        EventEndTime                = TimeGenerated,
+        EventType                   = 'Logon',
+        EventSubType                = 'Interactive',
+        TargetUserIdType            = 'AWSId',
+        LogonProtocol               = 'HTTPS',
+        TargetUserId                = tostring(split(UserIdentityPrincipalid, ':')[0]),
+        LogonMethod                 = iff (AdditionalEventData has '"MFAUsed": "Yes"', 'MFA', ''),
+        SrcDeviceType               = iff (AdditionalEventData has '"MobileVersion":"Yes"', 'Mobile Device', 'Computer'),
+        EventResult                 = iff (ResponseElements has 'Success', 'Success', 'Failure')
+    // Filtering on 'eventresult'
+    | where (eventresult == "*" or (EventResult == eventresult))
+    | extend
+        TargetUsernameType          = ASIM_GetUsernameType (TargetUsername)
+    | parse AdditionalEventData with * '"LoginTo":"' TargetUrl: string '"' *
+    | lookup eventresultdetails_lookup on EventOriginalResultDetails
+    | lookup usertype_lookup on TargetOriginalUserType 
+    | extend 
+        LogonTarget=tostring(split(TargetUrl, '?')[0]),
+        EventSeverity = iff(EventResult == 'Failure', 'Low', 'Informational')
+    // -- Specific idetifier aliases
+    | extend 
+        TargetUserAWSId = TargetUserId
+    // -- Aliases
+    | extend
+        User   = TargetUsername,
+        Dvc    = EventVendor,
+        Dst    = LogonTarget,
+        IpAddr = SrcIpAddr,
+        Src    = SrcIpAddr
+    | project-away
+        EventSource,
+        EventTypeName,
+        EventName,
+        ResponseElements,
+        AdditionalEventData,
+        Session*,
+        Category,
+        ErrorCode,
+        Aws*,
+        ManagementEvent,
+        OperationName,
+        ReadOnly,
+        RequestParameters,
+        Resources,
+        ServiceEventDetails,
+        SharedEventId,
+        SourceSystem,
+        UserIdentity*,
+        VpcEndpointId,
+        APIVersion,
+        RecipientAccountId,
+        TenantId,
+        EC2RoleDelivery,
+        temp_*
+};
+parser (
+    starttime=starttime,
+    endtime=endtime,
+    username_has_any=username_has_any,
+    targetappname_has_any=targetappname_has_any,
+    srcipaddr_has_any_prefix=srcipaddr_has_any_prefix,
+    srchostname_has_any=srchostname_has_any,
+    eventtype_in=eventtype_in,
+    eventresultdetails_in=eventresultdetails_in,
+    eventresult=eventresult,
+    disabled=disabled
+)
+}
+
+
+

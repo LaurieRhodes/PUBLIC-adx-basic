@@ -1,0 +1,1791 @@
+//
+// Function Name: ASimAuditEvent
+// Description: This ASIM parser supports normalizing audit events from all supported sources to the ASIM Audit Event activity normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuditEvent(    ['pack']:bool=False)
+{
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludeASimAuditEvent') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser);
+let BuiltInDisabled=toscalar('ExcludeASimAuditEventBuiltIn' in (DisabledParsers) or 'Any' in (DisabledParsers)); 
+union isfuzzy=true
+  vimAuditEventEmpty, 
+  ASimAuditEventMicrosoftExchangeAdmin365  (BuiltInDisabled or ('ExcludeASimAuditEventMicrosoftExchangeAdmin365' in (DisabledParsers))),
+  ASimAuditEventMicrosoftWindowsEvents  (BuiltInDisabled or ('ExcludeASimAuditEventMicrosoftWindowsEvents' in (DisabledParsers))),
+  ASimAuditEventMicrosoftSecurityEvents  (BuiltInDisabled or ('ExcludeASimAuditEventMicrosoftSecurityEvents' in (DisabledParsers))),
+  ASimAuditEventMicrosoftEvent  (BuiltInDisabled or ('ExcludeASimAuditEventMicrosoftEvents' in (DisabledParsers))),
+  ASimAuditEventAzureActivity  (BuiltInDisabled or ('ExcludeASimAuditEventAzureActivity' in (DisabledParsers))),
+  ASimAuditEventCiscoMeraki  (BuiltInDisabled or ('ExcludeASimAuditEventCiscoMeraki' in (DisabledParsers))),
+  ASimAuditEventCiscoMerakiSyslog  (BuiltInDisabled or ('ExcludeASimAuditEventCiscoMerakiSyslog' in (DisabledParsers))),
+  ASimAuditEventBarracudaWAF (BuiltInDisabled or ('ExcludeASimAuditEventBarracudaWAF' in (DisabledParsers))),
+  ASimAuditEventBarracudaCEF (BuiltInDisabled or ('ExcludeASimAuditEventBarracudaCEF' in (DisabledParsers))),
+  ASimAuditEventCiscoISE  (BuiltInDisabled or ('ExcludeASimAuditEventCiscoISE' in (DisabledParsers))),
+  ASimAuditEventVectraXDRAudit(BuiltInDisabled or ('ExcludeASimAuditEventVectraXDRAudit' in (DisabledParsers))),
+  ASimAuditEventSentinelOne  (BuiltInDisabled or ('ExcludeASimAuditEventSentinelOne' in (DisabledParsers))),
+  ASimAuditEventCrowdStrikeFalconHost(BuiltInDisabled or ('ExcludeASimAuditEventCrowdStrikeFalconHost' in (DisabledParsers))),
+  ASimAuditEventVMwareCarbonBlackCloud(BuiltInDisabled or ('ExcludeASimAuditEventVMwareCarbonBlackCloud' in (DisabledParsers)))
+}
+
+
+
+//
+// Function Name: ASimAuditEventAzureActivity
+// Description: This ASIM parser supports normalizing Azure administrative activity in the AzureActivity table to the ASIM Audit Event schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuditEventAzureActivity(    ['disabled']:bool=False)
+{
+let parser=(disabled:bool=false){
+   let AzureActivityOperationLookup = datatable (op:string, EventType:string) 
+  [
+    'ACTION', 'Execute',
+    'WRITE', 'Set',
+    'DELETE', 'Delete'
+  ];
+  let AzureActivityStatusLookup = datatable (ActivityStatusValue:string, ActivitySubstatusValue:string, EventResult:string, EventResultDetails:string) 
+  [
+      "Accept","Accepted","Success","",
+      "Accept","Created","Success","",
+      "Accept","OK","Success","",
+      "Accept","","Success","",
+      "Accepted","","Success","",
+      "Active","","Success","Active",
+      "Failed","","Failure","",
+      "Failure","BadRequest","Failure","Bad Request",
+      "Failure","Conflict","Failure","Bad Request",
+      "Failure","Forbidden","Failure","Unauthorized",
+      "Failure","InternalServerError","Failure","Internal error",
+      "Failure","MethodNotAllowed","Failure","Bad Request",
+      "Failure","NotFound","Failure","Not found",
+      "Failure","Unauthorized","Failure","Unauthorized",
+      "Failure","","Failure","",
+      "In Progress","","Success","In Progress",
+      "Resolved","","Success","",
+      "Start","","Success","Start",
+      "Started","","Success","Start",
+      "Succeeded","","Success","",
+      "Success","Created","Success","",
+      "Success","NoContent","Success","",
+      "Success","OK","Success","",
+      "Success","","Success","",
+      "Updated","","Success","",
+      "Succeeded","OK","Success","",
+      "Accepted","Accepted","Success","",
+      "Accepted","OK","Success","",
+      "Failed","Forbidden","Failure","Unauthorized",
+      "Succeeded","Created","Success","",
+      "Failed","BadRequest","Failure","Bad request",
+      "Accepted","Created","Success","",
+      "Failed","Conflict","Failure","Bad request",
+      "Failed","MethodNotAllowed","Failure","Bad request",
+      "Failure","BadGateway","Failure","Bad request",
+      "Succeeded","NoContent","Success","",
+      "Failure","ServiceUnavailable","Failure","Internal error",
+      "Failure","GatewayTimeout","Failure","Internal error",
+      "Failed","NotFound","Failure","Not found",
+      "Failed","BadGateway","Failure","Bad request",
+      "Failure","UnsupportedMediaType","Failure","Bad request",
+      "Failed","Unauthorized","Failure","Unauthorized",
+      "Cancel","","Failure","Cancelled"
+  ];
+  AzureActivity 
+  | where not(disabled)
+  | where CategoryValue == "Administrative"
+  | project-away HTTPRequest, Level, SourceSystem, EventSubmissionTimestamp, TenantId, OperationId, Hierarchy, Category, ResourceId, ResourceProvider, Resource
+  | project-rename 
+      Operation = OperationNameValue,
+      SrcIpAddr = CallerIpAddress,
+      EventOriginalUid = EventDataId,
+      ActorSessionId = CorrelationId,
+      EventOriginalType = CategoryValue
+  | extend
+      EventCount = int(1),
+      EventStartTime = TimeGenerated, 
+      EventEndTime= TimeGenerated,
+      EventProduct = 'Azure',
+      EventVendor = 'Microsoft',
+      EventSchemaVersion = '0.1.0',
+      EventSchema = 'AuditEvent',
+      ObjectType = "Cloud Resource",
+      TargetAppName = "Azure",
+      TargetAppType = "CSP"
+  // --
+  // Calculate EventResult, EventResultDetails, and EventResultOriginalDetails
+  | extend
+      EventOriginalResultDetails = strcat (
+          ActivityStatusValue, 
+          iff (ActivitySubstatusValue !="", strcat(' [', ActivitySubstatusValue, ']'), "")
+      )
+  | extend 
+      ActivitySubstatusValue = iff (ActivitySubstatusValue matches regex "\\d+", "", ActivitySubstatusValue)
+  | lookup AzureActivityStatusLookup on ActivityStatusValue, ActivitySubstatusValue
+  | extend EventResult = iff(EventResult == "", "Other", EventResult)
+  | extend EventSeverity = iff(EventResult == "Failure", "Low", "Informational")
+  | project-away ActivityStatus*, ActivitySubstatus*
+  // --
+  // Calculate Actor
+  | extend 
+      Caller = iff(Caller == "Microsoft.RecoveryServices", "", Caller)
+  | extend 
+      ActorUsernameType = iff (Caller has "@", "UPN", "")
+  | extend 
+      ActorUsername = iff (ActorUsernameType == "UPN", Caller, ""),
+      ActorUserId = iff (ActorUsernameType != "UPN", Caller, "")
+  | extend
+      ActorUserIdType = iff  (ActorUserId != "", "AADID", "")
+  | project-away Caller
+  // --
+  // Calculate Object
+  | extend 
+      entity = tostring(Properties_d.entity), 
+      resource = tostring(Properties_d.resource),
+      entity_name = tostring(Properties_d.["Entity Name"])
+  | extend Object = case ( 
+          entity != "", entity,
+          strcat ("/subscriptions/", SubscriptionId, "/resourceGroups/", ResourceGroup, "/providers/", ResourceProviderValue, "/",resource, iff (entity_name != "", strcat("/", entity_name), ""))
+      )
+  | project-away entity, resource,entity_name, _SubscriptionId, SubscriptionId, ResourceGroup, ResourceProviderValue
+  // --
+  // Calculate EventType
+  | extend op = toupper(tostring(split(Operation,"/")[-1]))
+  | lookup AzureActivityOperationLookup on op
+  | extend EventType = iff (EventType == "", "Other", EventType)
+  | project-away op
+  // Aliases
+  | extend AdditionalFields = pack_dictionary("Authorization", Authorization_d, "Claims", Claims_d, "Error", Properties_d.statusMessage)
+  // -- Aliases
+  | extend 
+      IpAddr = SrcIpAddr,
+      User = ActorUsername,
+      Application = TargetAppName,
+      Dst = TargetAppName,
+      Src = SrcIpAddr,
+  // -- Entity identifier explicit aliases
+      ActorUserUpn = ActorUsername,
+      ActorUserAadId = ActorUserId
+  | project-away OperationName, Properties*, Authorization*, Claims*
+  // -- Properties*
+};
+parser (disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimAuditEventBarracudaCEF
+// Description: This ASIM parser supports normalizing Barracuda WAF logs ingested in 'CommonSecurityLog' table to the ASIM Audit Event schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuditEventBarracudaCEF(    ['disabled']:bool=False)
+{
+let EventTypeLookup = datatable (
+    ChangeType_s: string,
+    EventType_lookup: string
+)
+    [
+    "SET", "Set",
+    "ADD", "Create",
+    "DEL", "Delete",
+    "NONE", "Other",
+    "", "Other"
+];
+let SeverityLookup = datatable (severity: int, EventSeverity: string)
+    [
+    0, "High", 
+    1, "High", 
+    2, "High", 
+    3, "Medium",
+    4, "Low",
+    5, "Low", 
+    6, "Informational",
+    7, "Informational" 
+];
+let ObjectTypeLookup = datatable (ObjectType_s: string, ObjectType: string)[
+    "global", "Other",
+    "Services", "Service",
+    "web_firewall_policy", "Policy Rule",
+    "service", "Service",
+    "json_url_profile", "Other",
+    "server", "Service",
+    "header_acl", "Directory Service Object",
+    "virtual_ip_config_address", "Configuration Atom",
+    "aps_req_rewrite_policy", "Policy Rule",
+    "aps_url_acl", "Directory Service Object",
+    "websocket_security_policy", "Policy Rule",
+    "aps_ftp_acl", "Directory Service Object",
+    "user_system_ip", "Configuration Atom",
+    "syslog_server", "Service",
+    "attack_action", "Configuration Atom",
+    "global_adr", "Configuration Atom",
+    "aps_content_protection", "Other"
+];
+let parser = (disabled: bool=false) {
+    let BarracudaCEF = 
+        CommonSecurityLog
+        | where not(disabled)
+            and DeviceVendor startswith "Barracuda"
+            and (DeviceProduct == "WAF" or DeviceProduct == "WAAS")
+        | where DeviceEventCategory == "AUDIT" 
+            and (toupper(ProcessName) !in ("LOGIN", "LOGOUT", "UNSUCCESSFUL_LOGIN"))
+        | parse trim(@'[^\w(")]+', Message) with * "Reason=" Reason: string 
+        | extend Reason = trim('"', Reason)
+        | extend 
+            EventResultDetails = Reason,
+            severity = toint(LogSeverity)
+        | lookup SeverityLookup on severity
+        | lookup EventTypeLookup on $left.EventOutcome == $right.ChangeType_s
+        | lookup ObjectTypeLookup on $left.FileType == $right.ObjectType_s
+        | extend
+            EventResult = "Success", 
+            EventSchema = "AuditEvent",
+            EventSchemaVersion = "0.1.0",
+            EventVendor = "Barracuda",
+            EventProduct = "WAF",
+            EventCount = toint(1)
+        | extend
+            EventType = EventType_lookup,
+            Dvc = DeviceName, 
+            EventStartTime = iff(isnotempty(FlexNumber2), unixtime_milliseconds_todatetime(tolong(ReceiptTime) - tolong(FlexNumber2)), unixtime_milliseconds_todatetime(tolong(ReceiptTime))),
+            Operation = ProcessName,
+            DvcIpAddr = DeviceAddress,
+            NewValue = DeviceCustomString1,
+            SrcIpAddr = SourceIP,
+            EventMessage = Message,
+            OldValue = DeviceCustomString2,
+            DvcHostname = DeviceName,
+            ActorUsername = DestinationUserName,
+            Object = FileName,
+            ThreatConfidence = toint(ThreatConfidence) ,
+            EventUid = _ItemId    
+        | extend
+            Src = SrcIpAddr,
+            EventEndTime = EventStartTime,
+            ActorUsernameType = iff(isnotempty(ActorUsername), "Simple", ""),
+            ActorUserType = iff(isnotempty(ActorUsername), "Admin", ""),
+            User = ActorUsername,
+            Value = NewValue 
+        | extend
+            IpAddr = SrcIpAddr,
+            ValueType = iff(isnotempty(Value), "Other", "")
+        | project-away
+            EventType_lookup,
+            ThreatConfidence,
+            CommunicationDirection,
+            AdditionalExtensions,
+            Device*,
+            Source*,
+            Reason,
+            Destination*,
+            Activity,
+            LogSeverity,
+            ApplicationProtocol,
+            ProcessID,
+            ExtID,
+            Protocol,
+            ReceiptTime,
+            SimplifiedDeviceAction,
+            OriginalLogSeverity,
+            ProcessName,
+            EndTime,
+            ExternalID,
+            File*,
+            ReceivedBytes,
+            Message,
+            Old*,
+            EventOutcome,
+            Request*,
+            StartTime,
+            Field*,
+            Flex*,
+            Remote*,
+            Malicious*,
+            severity,
+            ThreatSeverity,
+            IndicatorThreatType,
+            ThreatDescription,
+            _ResourceId,
+            SentBytes,
+            ReportReferenceLink,
+            Computer,
+            TenantId,
+            CollectorHostName,
+            _ItemId;
+    BarracudaCEF
+};
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimAuditEventBarracudaWAF
+// Description: This ASIM parser supports normalizing Barracuda WAF logs ingested in 'barracuda_CL' table to the ASIM Audit Event schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuditEventBarracudaWAF(    ['disabled']:bool=False)
+{
+let barracudaSchema = datatable(
+    LogType_s: string,
+    UnitName_s: string,
+    EventName_s: string,
+    DeviceReceiptTime_s: string,
+    ChangeType_s: string,
+    CommandName_s: string,
+    Severity_s: string,
+    LoginIP_s: string,
+    NewValue_s: string,
+    HostIP_s: string,
+    host_s: string,
+    OldValue_s: string,
+    EventMessage_s: string,
+    AdminName_s: string,
+    ObjectType_s: string,
+    ObjectName_s: string,
+    TimeTaken_d: real,
+    _ResourceId: string,
+    RawData: string,
+    SourceIP: string,
+    Message: string,
+    Computer: string,
+    MG: string,
+    ManagementGroupName: string,
+    TenantId: string,
+    SourceSystem: string
+)[];
+let EventTypeLookup = datatable (
+    ChangeType_s: string,
+    EventType_lookup: string
+)
+    [
+    "SET", "Set",
+    "ADD", "Create",
+    "DEL", "Delete",
+    "NONE", "Other",
+    "", "Other"
+];
+let SeverityLookup = datatable (severity: int, EventSeverity: string)
+    [
+    0, "High", 
+    1, "High", 
+    2, "High", 
+    3, "Medium",
+    4, "Low",
+    5, "Low", 
+    6, "Informational",
+    7, "Informational" 
+];
+let ObjectTypeLookup = datatable (ObjectType_s: string, ObjectType: string)[
+    "global", "Other",
+    "Services", "Service",
+    "web_firewall_policy", "Policy Rule",
+    "service", "Service",
+    "json_url_profile", "Other",
+    "server", "Service",
+    "header_acl", "Directory Service Object",
+    "virtual_ip_config_address", "Configuration Atom",
+    "aps_req_rewrite_policy", "Policy Rule",
+    "aps_url_acl", "Directory Service Object",
+    "websocket_security_policy", "Policy Rule",
+    "aps_ftp_acl", "Directory Service Object",
+    "user_system_ip", "Configuration Atom",
+    "syslog_server", "Service",
+    "attack_action", "Configuration Atom",
+    "global_adr", "Configuration Atom",
+    "aps_content_protection", "Other"
+];
+let parser = (disabled: bool=false) {
+    let BarracudaCustom = 
+        (union isfuzzy=true
+            barracudaSchema,
+            barracuda_CL
+        | where not(disabled) 
+            and LogType_s == "AUDIT" 
+            and EventName_s !in ("LOGIN", "LOGOUT", "UNSUCCESSFUL_LOGIN")
+        | parse trim(@'[^\w(")]+', EventMessage_s) with * "Reason=" Reason: string
+        | extend Reason = trim('"', Reason)
+        | extend
+            EventResultDetails = Reason,
+            severity = toint(Severity_s)
+        | lookup SeverityLookup on severity
+        | lookup EventTypeLookup on ChangeType_s
+        | lookup ObjectTypeLookup on ObjectType_s
+        | extend
+            EventType = EventType_lookup,
+            EventResult = "Success", 
+            EventSchema = "AuditEvent",
+            EventSchemaVersion = "0.1.0",
+            EventVendor = "Barracuda",
+            EventProduct = "WAF",
+            EventCount = toint(1)
+        | extend
+            Dvc = UnitName_s, 
+            EventStartTime = iff(isnotempty(TimeTaken_d), unixtime_milliseconds_todatetime(tolong(DeviceReceiptTime_s) - tolong(TimeTaken_d)), unixtime_milliseconds_todatetime(tolong(DeviceReceiptTime_s))),
+            Operation = CommandName_s,
+            DvcIpAddr = HostIP_s,
+            NewValue = NewValue_s,
+            SrcIpAddr = LoginIP_s,
+            EventMessage = EventMessage_s,
+            OldValue = OldValue_s,
+            DvcHostname = host_s,
+            ActorUsername = AdminName_s,
+            Object = ObjectName_s      
+        | extend
+            Src = SrcIpAddr,
+            EventEndTime = EventStartTime,
+            ActorUsernameType = iff(isnotempty(ActorUsername), "Simple", ""),
+            ActorUserType = iff(isnotempty(ActorUsername), "Admin", ""),
+            User = ActorUsername,
+            Value = NewValue          
+        | extend
+            IpAddr = SrcIpAddr,
+            ValueType = iff(isnotempty(Value), "Other", "")
+        | project-away
+            *_d,
+            *_s,
+            EventType_lookup,
+            _ResourceId,
+            Reason,
+            severity,
+            RawData,
+            SourceIP,
+            Message,
+            Computer,
+            MG,
+            ManagementGroupName,
+            TenantId,
+            SourceSystem
+        );
+    BarracudaCustom
+};
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimAuditEventCiscoISE
+// Description: This ASIM parser supports normalizing administrative activity in the Cisco ISE events to the ASIM Audit Event schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuditEventCiscoISE(    ['disabled']:bool=False)
+{
+let EventFieldsLookup=datatable(
+EventOriginalType: int,
+EventType: string,
+EventResult: string,
+EventOriginalSeverity: string,
+EventSeverity: string,
+Object: string,
+Operation: string,
+EventMessage: string
+)[
+"52000", "Create", "Success", "NOTICE", "Informational", "ISE instance", "Added configuration", "Added configuration",
+"52001", "Set", "Success", "NOTICE", "Informational", "ISE instance", "Changed configuration", "Changed configuration",
+"52002", "Delete", "Success", "NOTICE", "Informational", "ISE instance", "Deleted configuration", "Deleted configuration",
+"52003", "Other", "Success", "NOTICE", "Informational", "Node", "Deregister Node", "One of the ISE instances in the deployment has been de-registered.",
+"52004", "Other", "Success", "NOTICE", "Informational", "Node", "Register Node", "A new ISE instance has been registered and has joined the deployment.",
+"52005", "Enable", "Success", "NOTICE", "Informational", "Node", "Activate Node", "An ISE instance has been activated to receive updates from the Primary node.",
+"52006", "Disable", "Success", "NOTICE", "Informational", "Node", "Deactivate ISE Node", "An ISE instance has been deactivated and will no longer receive updates from the Primary node.",
+"52007", "Other", "Success", "NOTICE", "Informational", "ISE instance", "Force Full replication", "A Force Full replication has been issued for an ISE instance.",
+"52008", "Other", "Success", "NOTICE", "Informational", "ISE instance", "Replacement Register Handler", "A new ISE instance has joined the deployment through hardware replacement.",
+"52009", "Other", "Success", "NOTICE", "Informational", "Node", "Promote Node", "A Secondary node has been promoted to be the Primary node of the deployment.",
+"52013", "Other", "Success", "NOTICE", "Informational", "ISE instance", "Hardware Replacement", "A new ISE instance has joined the deployment through hardware replacement.",
+"52015", "Enable", "Success", "NOTICE", "Informational", "LogCollector Target", "Enable LogCollector Target", "Enable the deployment Log Collector target.",
+"52016", "Other", "Success", "NOTICE", "Informational", "LogCollector Node", "Select LogCollector Node", "The Log Collector node for the deployment has been selected.",
+"52017", "Other", "Success", "NOTICE", "Informational", "ISE instance", "Apply software update", "Apply a software update to the selected ISE instances.",
+"52030", "Other", "Success", "NOTICE", "Informational", "ISE instance", "Full replication succeeded", "Full replication was completed successfully",
+"52031", "Other", "Failure", "NOTICE", "Low", "ISE instance", "Full replication failed", "Failed to complete full replication",
+"52033", "Other", "Success", "NOTICE", "Informational", "ISE instance", "Registration succeeded", "Registration with the primary node was completed successfully",
+"52035", "Other", "Failure", "NOTICE", "Low", "ISE instance", "Registration failed", "Failed to perform the full replication requested by the primary instance",
+"52038", "Other", "Success", "NOTICE", "Informational", "ISE instance", "Registration succeeded", "The ISE instance was successfully joined to a distributed ISE deployment",
+"52039", "Other", "Failure", "NOTICE", "Low", "ISE instance", "Registration failed", "The ISE instance was unable to join a distributed deployment",
+"52042", "Other", "Success", "NOTICE", "Informational", "Primary instance", "Demotion succeeded", "Demotion of the existing primary instance was completed successfully",
+"52043", "Other", "Failure", "NOTICE", "Low", "Primary instance", "Demotion failed", "Demotion of the existing primary instance failed",
+"52045", "Other", "Success", "NOTICE", "Informational", "Secondary instance", "Promotion succeeded", "Promotion of the secondary instance was completed successfully",
+"52046", "Other", "Failure", "NOTICE", "Low", "Secondary instance", "Promotion failed", "Promotion of a secondary instance failed",
+"52072", "Other", "Success", "NOTICE", "Informational", "ISE instance", "Deregister succeeded", "Deregistration was completed successfully",
+"52073", "Other", "Failure", "NOTICE", "Low", "ISE instance", "Deregister failed", "Deregistration failed",
+"52078", "Delete", "Failure", "NOTICE", "Low", "ISE secondary instance", "Delete node failed", "Failed to delete the ISE secondary instance in inactive mode from the deployment",
+"52079", "Delete", "Success", "NOTICE", "Informational", "ISE secondary instance", "Delete node succeeded", "The ISE primary instance successfully deleted the secondary instance in inactive mode",
+"52080", "Delete", "Failure", "NOTICE", "Low", "ISE secondary instance", "Delete node failed", "Failed to delete the ISE secondary instance in inactive mode from the primary instance",
+"52082", "Other", "Failure", "NOTICE", "Low", "ISE secondary instance", "Backup failed", "An immediate backup for the secondary instance failed",
+"52084", "Other", "Success", "NOTICE", "Informational", "ISE primary instance", "Backup succeeded", "An immediate backup for the primary instance was completed successfully",
+"52085", "Other", "Failure", "NOTICE", "Low", "ISE primary instance", "Backup failed", "An immediate backup for the primary failed",
+"52091", "Other", "Failure", "NOTICE", "Low", "Update bundle", "Software update failed", "Software update download of update bundle failed",
+"52092", "Other", "Success", "NOTICE", "Informational", "ISE instance", "Software update succeeded", "The software update was completed successfully",
+"52093", "Other", "Failure", "NOTICE", "Low", "ISE instance", "Software update failed", "The software update failed",
+"57000", "Other", "Success", "NOTICE", "Informational", "Log file(s)", "Deleted rolled-over local log file(s)", "Deleted rolled-over local log file(s)",
+"58001", "Other", "Success", "NOTICE", "Informational", "ISE process", "ISE process started", "An ISE process has started",
+"58002", "Other", "Success", "NOTICE", "Informational", "ISE process", "ISE process stopped", "An ISE process has stopped",
+"58003", "Other", "Success", "NOTICE", "Informational", "ISE processes", "ISE processes started", "All ISE processes have started",
+"58004", "Other", "Success", "NOTICE", "Informational", "ISE processes", "ISE processes stopped", "All ISE processes have stopped",
+"58005", "Other", "Success", "NOTICE", "Informational", "ISE process", "ISE process was restarted by watchdog service", "The watchdog service has restarted an ISE process",
+"60000", "Install", "Success", "NOTICE", "Informational", "Node", "Patch installation completed successfully on the node", "Patch installation completed successfully on the node",
+"60001", "Install", "Failure", "NOTICE", "Low", "Node", "Patch installation failed on the node", "Patch installation failed on the node",
+"60002", "Other", "Success", "NOTICE", "Informational", "Node", "Patch rollback completed successfully on the node", "Patch rollback completed successfully on the node",
+"60003", "Other", "Failure", "NOTICE", "Low", "Node", "Patch rollback failed on the node", "Patch rollback failed on the node",
+"60050", "Create", "Success", "NOTICE", "Informational", "Node", "Node added to deployment successfully", "Node added to deployment successfully",
+"60051", "Create", "Failure", "NOTICE", "Low", "Node", "Failed to add node to deployment", "Failed to add node to deployment",
+"60052", "Delete", "Success", "NOTICE", "Informational", "Node", "Node removed from deployment", "Node removed from deployment",
+"60053", "Delete", "Failure", "NOTICE", "Low", "Node", "Failed to remove node from deployment", "Failed to remove node from deployment",
+"60054", "Other", "Success", "NOTICE", "Informational", "Node", "Node updated successfully", "Node updated successfully",
+"60055", "Other", "Failure", "NOTICE", "Low", "Node", "Failed to update node", "Failed to update node",
+"60056", "Other", "Success", "NOTICE", "Informational", "Cluster", "The runtime status of the node group has changed", "There is a change in the cluster state",
+"60057", "Other", "Success", "NOTICE", "Informational", "PSN node", "A PSN node went down", "One of the PSN nodes in the node group has gone down",
+"60058", "Other", "Success", "NOTICE", "Informational", "Heartbeat System", "The initial status of the heartbeat system", "The initial status of the heartbeat system",
+"60059", "Other", "Success", "NOTICE", "Informational", "Node", "Node has successfully registered with MnT", "Node has successfully registered with MnT",
+"60060", "Other", "Success", "NOTICE", "Informational", "Policy Service nodes", "Administrator invoked OCSP Clear Cache operation for all Policy Service nodes", "The ISE Administrator invoked OCSP Clear Cache operation for all Policy Service nodes",
+"60061", "Other", "Success", "NOTICE", "Informational", "Policy Service nodes", "OCSP Clear Cache operation completed successfully", "OCSP Clear Cache operation completed successfully on all Policy Service nodes",
+"60062", "Other", "Failure", "NOTICE", "Low", "Policy Service nodes", "OCSP Clear Cache operation terminated with error", "OCSP Clear Cache clear operation terminated with error on one or more Policy Service nodes",
+"60063", "Other", "Success", "NOTICE", "Informational", "ISE secondary node", "Replication to node completed successfully", "Replication of data to secondary node completed successfully",
+"60064", "Other", "Failure", "NOTICE", "Low", "ISE secondary node", "Replication to node failed", "Replication of data to secondary node failed",
+"60068", "Other", "Success", "INFO", "Informational", "Profiler Feed Service", "Profiler Feed Service - manual download initiated", "The Profiler Feed Service has begun the check and download of new and/or updated Profiles in response to Administrator's request",
+"60069", "Other", "Success", "INFO", "Informational", "Profiler Feed Service", "Profiler Feed Service - Profiles Downloaded", "The Profiler Feed Service has downloaded new and/or updated Profiles",
+"60070", "Other", "Success", "INFO", "Informational", "Profiler Feed Service", "Profiler Feed Service - No Profiles Downloaded", "The Profiler Feed Service found no new and/or updated Profiles to download",
+"60083", "Set", "Success", "INFO", "Informational", "Syslog Server", "Syslog Server configuration change", "Syslog Server configuration change has occurred",
+"60084", "Set", "Success", "INFO", "Informational", "ADEOS CLI user", "ADEOS CLI user configuration change", "Configuration change occurred for ADEOS CLI user",
+"60085", "Set", "Success", "INFO", "Informational", "ADEOS Repository", "ADEOS Repository configuration change", "Configuration change occurred for ADEOS repository",
+"60086", "Set", "Success", "INFO", "Informational", "ADEOS SSH Service", "ADEOS SSH Service configuration change", "Configuration change occurred for ADEOS SSH Service",
+"60087", "Set", "Success", "INFO", "Informational", "ADEOS Maximum SSH CLI sessions", "ADEOS Maximum SSH CLI sessions configuration change", "Configuration change occurred for ADEOS Maximum CLI sessions",
+"60088", "Set", "Success", "INFO", "Informational", "ADEOS SNMP agent", "ADEOS SNMP agent configuration change", "Configuration change occurred for ADEOS SNMP agent",
+"60089", "Set", "Success", "INFO", "Informational", "ADEOS CLI kron scheduler", "ADEOS CLI kron scheduler policy configuration change", "Configuration change occurred for ADEOS CLI kron scheduler policy",
+"60090", "Set", "Success", "INFO", "Informational", "ADEOS CLI kron scheduler", "ADEOS CLI kron scheduler occurence configuration change", "Configuration change occurred for ADEOS CLI kron scheduler occurence",
+"60091", "Set", "Success", "INFO", "Informational", "ADEOS CLI pre-login banner", "ADEOS CLI pre-login banner configuration change", "Configuration change occurred for ADEOS CLI pre-login banner",
+"60092", "Set", "Success", "INFO", "Informational", "ADEOS CLI post-login banner", "ADEOS CLI post-login banner configuration change", "Configuration change occurred for ADEOS CLI post-login banner",
+"60094", "Other", "Success", "INFO", "Informational", "ISE instance", "ISE Backup has completed successfully", "ISE Backup has completed successfully",
+"60095", "Other", "Failure", "ERROR", "Low", "ISE instance", "ISE Backup has failed", "ISE Backup has failed",
+"60097", "Other", "Success", "INFO", "Informational", "ISE instance", "ISE Log Backup has completed successfully", "ISE Log Backup has completed successfully",
+"60098", "Other", "Failure", "ERROR", "Low", "ISE instance", "ISE Log Backup has failed", "ISE Log Backup has failed",
+"60100", "Other", "Success", "INFO", "Informational", "ISE instance", "ISE Restore has completed successfully", "ISE Restore has completed successfully",
+"60101", "Other", "Failure", "ERROR", "Low", "ISE instance", "ISE Restore has failed", "ISE Restore has failed",
+"60102", "Install", "Success", "INFO", "Informational", "ISE instance", "Application installation completed successfully", "Application installation completed successfully",
+"60103", "Install", "Failure", "ERROR", "Low", "ISE instance", "Application installation failed", "Application installation failed",
+"60105", "Delete", "Success", "INFO", "Informational", "ISE instance", "Application remove completed successfully", "Application remove completed successfully",
+"60106", "Delete", "Failure", "ERROR", "Low", "ISE instance", "Application remove failed", "Application remove failed",
+"60107", "Other", "Failure", "ERROR", "Low", "ISE instance", "Application upgrade failed", "Application upgrade failed",
+"60111", "Delete", "Success", "INFO", "Informational", "ISE instance", "Application patch remove has completed successfully", "Application patch remove has completed successfully",
+"60112", "Delete", "Failure", "ERROR", "Low", "ISE instance", "Application patch remove has failed", "Application patch remove has failed",
+"60113", "Other", "Success", "WARN", "Informational", "ISE server", "ISE server reload has been initiated", "ISE server reload has been initiated",
+"60114", "Other", "Success", "WARN", "Informational", "ISE server", "ISE server shutdown has been initiated", "ISE server shutdown has been initiated",
+"60118", "Delete", "Success", "INFO", "Informational", "File", "ADEOS CLI user has used delete CLI to delete file", "ADEOS CLI user has used delete CLI to delete file",
+"60119", "Execute", "Success", "INFO", "Informational", "File", "ADEOS CLI user has used copy CLI to copy file", "ADEOS CLI user has used copy CLI to copy file",
+"60120", "Execute", "Success", "INFO", "Informational", "Directory", "ADEOS CLI user has used mkdir CLI to create a directory", "ADEOS CLI user has used mkdir CLI to create a directory",
+"60121", "Other", "Success", "INFO", "Informational", "System Config", "ADEOS CLI user has copied out running system configuration", "ADEOS CLI user has copied out running system configuration",
+"60122", "Other", "Success", "INFO", "Informational", "System Config", "ADEOS CLI user has copied in system configuration", "ADEOS CLI user has copied in system configuration",
+"60123", "Other", "Success", "INFO", "Informational", "System Config", "ADEOS CLI user has saved running system configuration", "ADEOS CLI user has saved running system configuration",
+"60126", "Install", "Failure", "ERROR", "Low", "ISE instance", "Application patch installation failed", "Application patch installation failed",
+"60128", "Other", "Failure", "ERROR", "Low", "File", "Failure occurred trying to copy file in from ADEOS CLI", "Failure occurred trying to copy file in from ADEOS CLI",
+"60129", "Other", "Failure", "ERROR", "Low", "File", "Failure occurred trying to copy file out from ADEOS CLI", "Failure occurred trying to copy file out from ADEOS CLI",
+"60130", "Set", "Success", "INFO", "Informational", "ISE Backup", "ISE Scheduled Backup has been configured", "ISE Scheduled Backup has been configured",
+"60131", "Create", "Success", "INFO", "Informational", "ISE Support bundle", "ISE Support bundle has been created from web UI", "ISE Support bundle has been created from web UI",
+"60132", "Delete", "Success", "INFO", "Informational", "ISE Support bundle", "ISE Support bundle has been deleted from web UI", "ISE Support bundle has been deleted from web UI",
+"60133", "Other", "Failure", "ERROR", "Low", "ISE Support bundle", "ISE Support bundle generation from web UI has failed", "ISE Support bundle generation from web UI has failed",
+"60153", "Other", "Success", "INFO", "Informational", "Certificate", "Certificate has been exported", "Certificate has been exported",
+"60166", "Other", "", "WARN", "Informational", "Certificate", "Certificate will expire soon", "Certificate Expiration warning",
+"60167", "Other", "", "WARN", "Informational", "Certificate", "Certificate has expired", "Certificate has expired",
+"60172", "Other", "Success", "INFO", "Informational", "ISE instance", "Alarm(s) has/have been acknowledged", "These alarms are acknowledged and will not be displayed on the Dashboard",
+"60173", "Other", "Success", "INFO", "Informational", "ISE instance", "Outdated alarms are purged", "Only latest 15000 alarms would be retained and rest of them are purged",
+"60187", "Other", "Success", "INFO", "Informational", "ISE instance", "Application upgrade succeeded", "Application upgrade succeeded",
+"60189", "Set", "Success", "INFO", "Informational", "ISE instance", "Terminal Session timeout has been modified", "Configuration change occurred for ADEOS CLI Terminal Session timeout",
+"60193", "Set", "Success", "INFO", "Informational", "ISE instance", "RSA key configuration has been modified", "Configuration change occurred for ADEOS CLI RSA key",
+"60194", "Set", "Success", "INFO", "Informational", "ISE instance", "Host key configuration has been modified", "Configuration change occurred for ADEOS CLI host key",
+"60197", "Disable", "Success", "NOTICE", "Informational", "Certificate", "Revoked ISE CA issued Certificate.", "Certificate issued to Endpoint by ISE CA is revoked by Administrator",
+"60198", "Delete", "Success", "INFO", "Informational", "MnT", "MnT purge event occurred", "MnT purge event occurred",
+"60199", "Other", "Success", "INFO", "Informational", "ISE instance", "An IP-SGT mapping was deployed successfully", "An IP-SGT mapping was deployed successfully to a TrustSec device",
+"60200", "Other", "Failure", "INFO", "Low", "ISE instance", "An IP-SGT mapping has failed deploying", "An IP-SGT mapping has failed deploying to a TrustSec device",
+"60201", "Other", "Success", "INFO", "Informational", "ISE instance", "IP-SGT deployment to TrustSec device was successful", "IP-SGT deployment to TrustSec device was successful",
+"60202", "Other", "Failure", "INFO", "Low", "ISE instance", "IP-SGT deployment to TrustSec device failed", "IP-SGT deployment to TrustSec device failed",
+"60207", "Set", "Success", "INFO", "Informational", "ISE instance", "Logging loglevel configuration has been modified", "Configuration change occurred for ADEOS CLI logging loglevel",
+"60208", "Other", "Success", "INFO", "Informational", "ISE instance", "Root CA certificate has been replaced", "Root CA certificate has been replaced",
+"60209", "Enable", "Success", "INFO", "Informational", "CA service", "CA service enabled", "CA service enabled",
+"60210", "Disable", "Success", "INFO", "Informational", "CA service", "CA service disabled", "CA service disabled",
+"60213", "Other", "Success", "INFO", "Informational", "ISE instance", "CA keys were replaced by import operation", "CA keys were replaced by import operation",
+"60214", "Other", "Success", "INFO", "Informational", "ISE instance", "CA keys were exported", "CA keys were exported",
+"60215", "Other", "Success", "INFO", "Informational", "ISE instance", "Endpoint certs were marked expired", "Endpoint certs were marked expired by daily scheduled job",
+"60216", "Delete", "Success", "INFO", "Informational", "ISE instance", "Endpoint certs were purged", "Endpoint certs were purged by daily scheduled job",
+"60451", "Enable", "Success", "INFO", "Informational", "ISE instance", "Telemetry is enabled on this deployment", "Telemetry is enabled on this deployment",
+"60452", "Disable", "Success", "INFO", "Informational", "ISE instance", "Telemetry is disabled on this deployment", "Telemetry is disabled on this deployment",
+"61002", "Other", "Success", "INFO", "Informational", "ISE instance", "ISE has learned a new SGT from IEPG", "ISE has learned a new SGT from IEPG",
+"61003", "Other", "Success", "INFO", "Informational", "ISE instance", "ISE has propagated a new EEPG to APIC", "ISE has propagated a new EEPG to APIC.",
+"61004", "Other", "Success", "INFO", "Informational", "ISE instance", "ISE has learned a new SXP mapping from APIC endpoint", "ISE has learned a new SXP mapping from APIC endpoint",
+"61005", "Other", "Success", "INFO", "Informational", "ISE instance", "ISE has propagated a new endpoint(SXP mapping) to APIC", "ISE has propagated a new endpoint(SXP mapping) to APIC",
+"61006", "Delete", "Success", "INFO", "Informational", "SGT", "ISE has removed an SGT due to deleted IEPG", "ISE has removed an SGT due to deleted IEPG",
+"61007", "Delete", "Success", "INFO", "Informational", "APIC", "ISE has removed EEPG from APIC due to SGT deletion", "ISE has removed EEPG from APIC due to SGT deletion",
+"61008", "Delete", "Success", "INFO", "Informational", "APIC", "ISE has removed an SXP mapping due to endpoint deletion on APIC", "ISE has removed an SXP mapping due to endpoint deletion on APIC",
+"61009", "Delete", "Success", "INFO", "Informational", "APIC", "ISE has removed endpoint APIC due to SXP mapping removal a new SXP mapping to APIC", "ISE has removed endpoint APIC due to SXP mapping removal a new SXP mapping to APIC",
+"61016", "Other", "Failure", "INFO", "Low", "ISE instance", "ISE failed to refresh EPG subscriber against APIC", "ISE failed to refresh EPG subscriber against APIC",
+"61017", "Other", "Failure", "INFO", "Low", "ISE instance", "ISE failed to refresh endpoint subscriber against APIC", "ISE failed to refresh endpoint subscriber against APIC",
+"61018", "Other", "Failure", "INFO", "Low", "ISE instance", "ISE failed to refresh EEPG subscriber against APIC", "ISE failed to refresh EEPG subscriber against APIC",
+"61020", "Other", "Failure", "INFO", "Low", "ISE instance", "ISE failed to refresh L3EXTOUT subscriber against APIC", "ISE failed to refresh L3EXTOUT subscriber against APIC",
+"61022", "Other", "Failure", "INFO", "Low", "ISE instance", "ISE has failed to propagate SGT to EEPG", "ISE has failed to propagate SGT to EEPG",
+"61023", "Other", "Failure", "INFO", "Low", "ISE instance", "ISE has failed to learn IEPG from APIC", "ISE has failed to learn IEPG from APIC",
+"61024", "Other", "Failure", "INFO", "Low", "ISE instance", "ISE has failed to parse VRF for EPG", "ISE has failed to parse VRF for EPG",
+"61030", "Other", "Failure", "INFO", "Low", "ISE instance", "TrustSec deploy verification was canceled.", "TrustSec deployment verification process was canceled as a new TrustSec deploy started.",
+"61033", "Other", "Success", "INFO", "Informational", "ISE instance", "TrustSec deployment verification process succeeded.", "ISE trustsec configuration was successfully deployed to all network access devices.",
+"61034", "Other", "", "INFO", "Low", "ISE instance", "Maximum resource limit reached.", "Maximum resource limit reached.",
+"61051", "Set", "Success", "INFO", "Informational", "ISE instance", "Synflood-limit configured", "Synflood-limit configured",
+"61052", "Set", "Success", "INFO", "Informational", "ISE instance", "Rate-limit configured", "Rate-limit configured",
+"61100", "Other", "Success", "INFO", "Informational", "ISE instance", "ISE has learned a new tenant from ACI", "ISE has learned a new tenant from ACI",
+"61101", "Delete", "Success", "INFO", "Informational", "ACI tenant", "ISE has removed ACI tenant", "ISE has removed ACI tenant",
+"61102", "Other", "Failure", "ERROR", "Low", "ISE instance", "Failed to learn new tenant from ACI in ISE", "Failed to learn new tenant from ACI in ISE",
+"61103", "Delete", "Failure", "ERROR", "Low", "ISE instance", "Failed to remove ACI tenant in ISE", "Failed to remove ACI tenant in ISE",
+"61104", "Other", "Success", "INFO", "Informational", "ISE instance", "ISE has learned a new tenant from SDA", "ISE has learned a new tenant from SDA",
+"61105", "Other", "Success", "INFO", "Informational", "ISE instance", "ISE has learned a new VN info", "IISE has learned a new VN info",
+"61106", "Create", "Failure", "ERROR", "Low", "ISE instance", "Failed to create VN info in ISE", "Failed to create VN info in ISE",
+"61107", "Other", "Success", "INFO", "Informational", "ISE instance", "VN info is updated in ISE", "VN info is updated in ISE",
+"61108", "Other", "Failure", "ERROR", "Low", "ISE instance", "Failed to update VN info in ISE", "Failed to update VN info in ISE",
+"61109", "Delete", "Success", "INFO", "Informational", "ACI tenant", "VN info is deleted in ISE", "VN info is deleted in ISE",
+"61110", "Delete", "Failure", "ERROR", "Low", "ISE instance", "Failed to deleted VN info in ISE", "Failed to deleted VN info in ISE",
+"61111", "Other", "Failure", "ERROR", "Low", "ISE instance", "Domain registration process failed", "Domain registration process failed",
+"61114", "Other", "Success", "INFO", "Informational", "ISE instance", "Domain registration completed successfully", "Domain registration completed successfully",
+"61115", "Other", "Failure", "ERROR", "Low", "ISE instance", "Domain registration failed", "Domain registration failed",
+"61116", "Other", "Failure", "ERROR", "Low", "ACI certificate", "Unable to store ACI certificate", "Unable to store ACI certificate",
+"61117", "Other", "Success", "INFO", "Informational", "ACI connector", "ACI connector started successfully", "ACI connector started successfully",
+"61118", "Other", "Failure", "ERROR", "Low", "ACI connector", "Failed to start ACI connector", "Failed to start ACI connector",
+"61120", "Delete", "Success", "INFO", "Informational", "ACI certificate", "Successfully deleted ACI certificate from ISE", "Successfully deleted ACI certificate from ISE",
+"61121", "Delete", "Failure", "ERROR", "Low", "ACI certificate", "Failed to delete ACI certificate from ISE", "Failed to delete ACI certificate from ISE",
+"61122", "Delete", "Failure", "ERROR", "Low", "ACI keystore", "Failed to delete ACI keystore", "Failed to delete ACI keystore",
+"61123", "Other", "Success", "INFO", "Informational", "ISE instance", "ISE has learned a new ACI domain", "ISE has learned a new ACI domain",
+"61124", "Other", "Failure", "ERROR", "Low", "ISE instance", "Failed to learn a new ACI domain", "Failed to learn a new ACI domain",
+"61125", "Delete", "Success", "INFO", "Informational", "ACI domain", "ISE has removed ACI domain", "ISE has removed ACI domain",
+"61126", "Delete", "Failure", "ERROR", "Low", "ACI domain", "Failed to remove ACI domain", "Failed to remove ACI domain",
+"61127", "Other", "Success", "INFO", "Informational", "ISE instance", "ISE has learned a new SDA domain", "ISE has learned a new SDA domain",
+"61128", "Other", "Failure", "ERROR", "Low", "ISE instance", "Failed to learn a new SDA domain", "Failed to learn a new SDA domain",
+"61129", "Delete", "Success", "INFO", "Informational", "SDA domain", "ISE has removed SDA domain", "ISE has removed SDA domain",
+"61130", "Delete", "Failure", "ERROR", "Low", "SDA domain", "Failed to remove SDA domain", "Failed to remove SDA domain",
+"61158", "Other", "Failure", "ERROR", "Low", "ISE instance", "ISE failed in receiving SDA SXP configuration", "ISE failed in receiving SDA SXP configuration",
+"61160", "Other", "Failure", "ERROR", "Low", "ISE instance", "ISE failed to publish Gateway advertisement message to ACI", "ISE failed to publish Gateway advertisement message to ACI",
+"61161", "Other", "Success", "INFO", "Informational", "ISE instance", "ISE learned new SXP Listener", "ISE learned new SXP Listener",
+"61162", "Other", "Success", "INFO", "Informational", "SXP Listener", "ISE updates VN defined for SXP Listener", "ISE updates VN defined for SXP Listener",
+"61163", "Other", "Success", "INFO", "Informational", "SXP Listener", "ISE learned new VN defined for SXP Listener", "ISE learned new VN defined for SXP Listener",
+"61164", "Other", "Success", "INFO", "Informational", "SXP Listener", "ISE updates SXP Listener", "ISE updates SXP Listener",
+"61165", "Delete", "Success", "INFO", "Informational", "SXP Listener", "ISE removed all SXP connections related to SXP Listener", "ISE removed all SXP connections related to SXP Listener",
+"61166", "Other", "Success", "INFO", "Informational", "ACI", "ACI published Gateway advertisement message to SDA", "ACI published Gateway advertisement message to SDA",
+"61167", "Other", "Success", "INFO", "Informational", "ISE instance", "Send ACI Gateway advertisement message to ISE", "Send ACI Gateway advertisement message to ISE",
+"61168", "Other", "Failure", "ERROR", "Low", "ISE instance", "Failed to send ACI Gateway advertisement message to ISE", "Failed to send ACI Gateway advertisement message to ISE/SDA",
+"61169", "Other", "Success", "INFO", "Informational", "ISE instance", "Successfully Send ACI Gateway advertisement message", "Successfully Send ACI Gateway advertisement message",
+"61234", "Other", "Success", "WARN", "Informational", "ISE instance", "Got event with unknown properties", "Got event with unknown properties",
+"62000", "Execute", "Success", "INFO", "Informational", "ISE instance", "Agentless script execute completed", "Agentless script execute completed",
+"62001", "Execute", "Failure", "WARN", "Low", "ISE instance", "Agentless script execute failed", "Agentless script execute failed",
+"62002", "Other", "Success", "INFO", "Informational", "ISE instance", "Agentless script upload completed", "Agentless script upload completed",
+"62003", "Other", "Failure", "WARN", "Low", "ISE instance", "Agentless script upload failed", "Agentless script upload failed",
+"61300", "Other", "Success", "INFO", "Informational", "ISE instance", "Network Access policy request", "Network Access policy request",
+"61301", "Other", "Success", "INFO", "Informational", "ISE instance", "Device Admin policy request", "Device Admin policy request",
+"61302", "Other", "Success", "INFO", "Informational", "ISE instance", "Policy component request", "Policy component request",
+"60467", "Other", "Failure", "ERROR", "Low", "ISE instance", "OCSP Certificate renewal failed", "OCSP Certificate renewal failed.",
+"60468", "Other", "Failure", "ERROR", "Low", "ISE instance", "Root CA Regeneration failed", "Regeneration of Root CA failed.",
+"62008", "Other", "Success", "INFO", "Informational", "Meraki connector", "Meraki connector sync service starts", "Meraki connector sync service starts",
+"62009", "Other", "Success", "INFO", "Informational", "Meraki connector", "Meraki connector sync service stops", "Meraki connector sync service stops",
+"62010", "Other", "Failure", "WARN", "Low", "Meraki connector", "Meraki connector sync service failure", "Meraki connector sync service failure",
+"62011", "Other", "Success", "INFO", "Informational", "Meraki connector", "Meraki connector sync cycle starts", "Meraki connector sync cycle starts",
+"62012", "Other", "Success", "INFO", "Informational", "Meraki connector", "Meraki connector sync cycle stops", "Meraki connector sync cycle stops",
+"62013", "Other", "Failure", "WARN", "Low", "Meraki connector", "Meraki connector sync cycle failure", "Meraki connector sync cycle failure",
+"62014", "Other", "Success", "INFO", "Informational", "Meraki connector", "Meraki connector sync operation success", "Meraki connector sync operation success",
+"62015", "Other", "Failure", "WARN", "Low", "Meraki connector", "Meraki connector sync operation failure", "Meraki connector sync operation failure",
+"62016", "Other", "Success", "INFO", "Informational", "ISE instance", "Port 2484 opened for Data Connect", "Port 2484 opened for Data Connect",
+"62017", "Other", "Success", "INFO", "Informational", "ISE instance", "Data Connect port 2484 closed", "Data Connect port 2484 closed"];
+let EventOriginalTypeList = toscalar(EventFieldsLookup 
+| summarize make_set(EventOriginalType));
+let CiscoISEAuditParser=(disabled: bool=false) {
+Syslog
+| where not(disabled)
+| where ProcessName has_any ("CISE", "CSCO")
+| parse SyslogMessage with * " " longvalue:long " " EventOriginalType:int " " *
+| where EventOriginalType in (EventOriginalTypeList)
+| lookup EventFieldsLookup on EventOriginalType 
+| parse-kv SyslogMessage as (NetworkDeviceName: string, ['User-Name']: string, UserName: string, User: string, ['Remote-Address']: string, ['Device IP Address']: string) with (pair_delimiter=',', kv_delimiter='=')
+| project-rename SrcIpAddr=['Remote-Address'], TargetIpAddr =['Device IP Address']
+| extend DvcHostname = coalesce(NetworkDeviceName, Computer, HostName)
+| extend ActorUsername = coalesce(['User-Name'], UserName, User)
+| extend ActorUsernameType = _ASIM_GetUsernameType(ActorUsername)      
+| extend 
+    DvcIpAddr = iif(isnotempty(HostIP) and HostIP != "Unknown IP", HostIP, extract(@"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", 1, Computer))
+    , EventStartTime = coalesce(EventTime, TimeGenerated)
+    , EventEndTime = coalesce(EventTime, TimeGenerated)
+    , EventVendor = "Cisco"
+    , EventProduct = "ISE"
+    , EventProductVersion = "3.2"
+    , EventCount = int(1)
+    , EventSchema = "AuditEvent"
+    , EventSchemaVersion = "0.1.0"
+    , ObjectType = "Configuration Atom"
+    , TargetAppName = "ISE"
+    , TargetAppType = "Service"
+// ***************** <Aliases> ********************
+| extend 
+    Dvc = coalesce(DvcIpAddr, DvcHostname)
+    , Application = TargetAppName
+    , IpAddr = coalesce(SrcIpAddr, TargetIpAddr)
+    , Dst = TargetIpAddr
+    , Src = SrcIpAddr
+    , User = ActorUsername
+// ***************** </Aliases> *******************
+| project-away
+    TenantId,
+    SourceSystem,
+    MG,
+    Computer,
+    EventTime,
+    Facility,
+    HostName,
+    SeverityLevel,
+    SyslogMessage,
+    HostIP,
+    ProcessName,
+    ProcessID,
+    _ResourceId,
+    NetworkDeviceName,
+    ['User-Name'],
+    UserName
+};
+CiscoISEAuditParser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimAuditEventCiscoMeraki
+// Description: This ASIM parser supports normalizing Cisco Meraki logs ingested in 'meraki_CL' table to the ASIM Audit Event normalized schema. Cisco Meraki events are generated from network activity and security events from Meraki devices such as firewalls, switches, and access points. These logs are captured through the Cisco Meraki Sentinel connector which uses a Linux agent to collect logs in Syslog format.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuditEventCiscoMeraki(    ['disabled']:bool=False)
+{
+let EventFieldsLookup = datatable(TempOperation: string, Operation: string, EventResult: string, EventType: string)
+[
+  "vpn_connectivity_change", "VPN connectivity change","Success", "Set",
+  "purging ISAKMP-SA", "Purging ISAKMP-SA","Partial", "Delete",
+  "purged ISAKMP-SA", "Purged ISAKMP-SA","Success", "Delete",
+  "ISAKMP-SA deleted", "ISAKMP-SA deleted","Success", "Delete",
+  "IPsec-SA request", "IPsec-SA request queued","Failure", "Other",
+  "failed to get sainfo", "Failed to get sainfo","Failure", "Other",
+  "failed to pre-process ph2 packet", "Failed to pre-process ph2 packet","Failure", "Other",
+  "phase2 negotiation failed", "Phase2 negotiation failed","Failure", "Other",
+  "initiate new phase 1 negotiation", "Initiate new phase 1 negotiation","Success", "Initialize",
+  "ISAKMP-SA established", "ISAKMP-SA established","Success", "Create",
+  "initiate new phase 2 negotiation", "Initiate new phase 2 negotiation","Partial", "Initialize",
+  "IPsec-SA established", "IPsec-SA established","Success", "Create",
+  "STP role", "Spanning-tree interface role change","Success", "Set",
+  "STP BPDU", "Spanning-tree guard state change", "", "",
+  "VRRP transition", "VRRP transition","Success", "Set",
+  "port status change", "Port status change", "", ""
+];
+let EventSeverityLookup=datatable(EventResult: string, EventSeverity: string)[
+    "Success", "Informational",
+    "Partial", "Informational",
+    "Failure", "Low"
+];
+let parser=(disabled: bool=false) {
+let allData = union isfuzzy=true
+    (
+    meraki_CL
+    | project-rename LogMessage =  Message
+    );
+let PreFilteredData = allData
+    | where not(disabled)
+        and LogMessage has "events"
+        and (LogMessage has_any ("vpn_connectivity_change", "status changed", "VRRP active", "VRRP passive") or LogMessage has_cs "Site-to-site" or LogMessage has_cs "Port")
+    | extend Parser = extract_all(@"(\d+.\d+)\s([\w\-\_]+)\s([\w\-\_]+)\s([\S\s]+)$", dynamic([1, 2, 3, 4]), LogMessage)[0]
+    | extend
+        LogType = tostring(Parser[2]),
+        Substring = tostring(Parser[3])
+    | where LogType == "events";
+let SiteToSiteData = PreFilteredData
+    | where Substring has_cs "Site-to-site";
+let SiteToSite_deleted = SiteToSiteData
+    | where Substring has "ISAKMP-SA deleted"
+    | extend TempOperation = "ISAKMP-SA deleted"
+    | parse Substring with * " deleted " temp_deletedSrcIp:string  "-" temp_deletedTargetIp:string " " temp_restmessage:string
+    | extend temp_srcipport = temp_deletedSrcIp,
+            temp_targetipport = temp_deletedTargetIp;
+let SiteToSite_negotiation = SiteToSiteData
+    | where Substring has_any("initiate new phase 1 negotiation", "initiate new phase 2 negotiation")
+    | parse Substring with * "Site-to-site VPN: " TempOperation:string ": " temp_negotiationSrcIp:string "<=>" temp_negotiationTargetIp:string
+    | extend temp_srcipport = temp_negotiationSrcIp,
+            temp_targetipport = temp_negotiationTargetIp;
+let SiteToSite_ESP = SiteToSiteData
+    | where Substring has "phase2 negotiation failed due to time up waiting for phase1"
+    | parse Substring with * "Site-to-site VPN: " TempOperation:string " due to " EventResultDetails " ESP " temp_espSrcIp:string "->" temp_espTargetIp:string
+    | extend temp_srcipport = temp_espSrcIp,
+            temp_targetipport = temp_espTargetIp;
+let SiteToSite_tunnel = SiteToSiteData
+    | where Substring has "IPsec-SA established"
+    | parse Substring with * "Site-to-site VPN: " TempOperation:string ":" * "Tunnel " temp_tunnelSrcIp:string "->" temp_tunnelTargetIp:string " " temp_restmessage:string
+    | extend temp_srcipport = temp_tunnelSrcIp,
+            temp_targetipport = temp_tunnelTargetIp;
+let SiteToSite_ISAKMPestablished = SiteToSiteData
+    | where Substring has "ISAKMP-SA established"
+    | parse Substring with * "Site-to-site VPN: " TempOperation:string " established " temp_estSrcIp:string "-" temp_estTargetIp:string " " temp_restmessage:string
+    | extend TempOperation = strcat(TempOperation, ' ', 'established'),
+            temp_srcipport = temp_estSrcIp,
+            temp_targetipport = temp_estTargetIp;
+let SiteToSite_IPsecSArequest = SiteToSiteData
+    | where Substring has "IPsec-SA request"
+    | parse Substring with * "Site-to-site VPN: " TempOperation:string " for " temp_forTaregtSrcIp:string " " * " due to" EventResultDetails:string
+    | extend temp_targetipport = temp_forTaregtSrcIp;
+let SiteToSite_purging = SiteToSiteData
+    | where Substring has_any("purging ISAKMP-SA", "purged ISAKMP-SA")
+    | parse Substring with * "Site-to-site VPN: " TempOperation:string " spi=" temp_restmessage:string;
+let SiteToSite_failed = SiteToSiteData
+    | where Substring has_any ("failed to get sainfo", "failed to pre-process ph2 packet")
+    | parse Substring with * "Site-to-site VPN: " TempOperation:string
+    | extend TempOperation = tostring(split(TempOperation, ' (')[0]);
+let VPNConnectivityChangeData = PreFilteredData
+    | where Substring has "vpn_connectivity_change"
+    | parse-kv Substring as (type: string, peer_contact: string, connectivity: string) with (pair_delimiter=" ", kv_delimiter="=", quote="'")
+    | extend type = trim('"', type),
+            connectivity = trim('"', connectivity)
+    | extend TempOperation = type,
+            temp_srcipport = peer_contact;
+let StatusChangedData = PreFilteredData
+    | where Substring has "status changed"
+    | parse Substring with * "port " port:string " " portnextpart:string
+    | extend TempOperation = "port status change";
+let PortData = PreFilteredData
+    | where Substring has_cs "Port"
+    | parse Substring with * "Port " Port1:string " received an " TempOperation1:string " from " STPMac:string " " temp_restmessage:string
+    | parse Substring with * "Port " Port2:string " changed " TempOperation2:string " from " PortNextPart:string
+    | extend Port = coalesce(Port1,Port2)
+    | extend TempOperation = coalesce(TempOperation1, TempOperation2);
+let VRRPData = PreFilteredData
+    | where Substring has_any("VRRP active", "VRRP passive")
+    | extend TempOperation = "VRRP transition";
+union VPNConnectivityChangeData, StatusChangedData, PortData, VRRPData, SiteToSite_deleted, SiteToSite_ESP, SiteToSite_failed, SiteToSite_IPsecSArequest, SiteToSite_ISAKMPestablished, SiteToSite_negotiation, SiteToSite_purging, SiteToSite_tunnel
+      | extend Epoch = tostring(Parser[0]),
+          Device = tostring(Parser[1])
+      | extend EpochTimestamp = split(Epoch, ".")
+      | extend EventStartTime = unixtime_seconds_todatetime(tolong(EpochTimestamp[0]))
+      | lookup EventFieldsLookup on TempOperation
+      | extend 
+          temp_srcipport = iff(temp_srcipport has "]" and temp_srcipport !has ":", trim(']', temp_srcipport), temp_srcipport),
+          temp_targetipport = iff(temp_targetipport has "]" and temp_targetipport !has ":", trim(']', temp_targetipport), temp_targetipport)
+      | extend 
+          temp_srcipport = iff(temp_srcipport has "[" and temp_srcipport !has ":", replace_string(temp_srcipport,'[',':'), temp_srcipport),
+          temp_targetipport = iff(temp_targetipport has "[" and temp_targetipport !has ":", replace_string(temp_targetipport,'[',':'), temp_targetipport),
+          DvcMacAddr = iff(Operation == "Spanning-tree guard state change" and isnotempty(STPMac) and STPMac matches regex "([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})|([0-9a-fA-F]{4}\\.[0-9a-fA-F]{4}\\.[0-9a-fA-F]{4})\'*", STPMac, "")
+      | extend temp_srcipport = iff(isempty(DvcMacAddr) and isnotempty(STPMac) and Operation == "Spanning-tree guard state change", STPMac, temp_srcipport)
+      | extend
+          temp_srcipport = trim("'", temp_srcipport),
+          temp_targetipport = trim("'", temp_targetipport)
+      | extend 
+          temp_srcipport = trim('"', temp_srcipport),
+          temp_targetipport = trim('"', temp_targetipport)
+      | parse temp_srcipport with * "[" temp_srcip "]:" temp_srcport
+      | extend SrcIpAddr = iff(temp_srcipport has ".", split(temp_srcipport, ":")[0], coalesce(temp_srcip, temp_srcipport))
+      | parse temp_targetipport with * "[" temp_targetip "]:" temp_targetport
+      | extend TargetIpAddr = iff(temp_targetipport has ".", split(temp_targetipport, ":")[0], coalesce(temp_targetip, temp_targetipport))
+      | extend TargetPortNumber = iff(TargetIpAddr has ".", toint(split(temp_targetipport, ":")[1]), toint(coalesce(temp_targetport, "")))
+      | extend SrcPortNumber = case(
+                              isnotempty(temp_srcipport),
+                              iff(SrcIpAddr has ".", toint(split(temp_srcipport, ":")[1]), toint(coalesce(temp_srcport, ""))),
+                              Substring has_cs "Port",
+                              toint(Port),
+                              Operation == "Port status change",
+                              toint(port),
+                              int(null)
+                          )
+      | extend EventResult = case(
+                              (Operation == "Port status change" and Substring has "from Down") or (Operation has_cs "Spanning-tree guard state change" and Substring has_any ("connected", "forwarding")),
+                              "Success",
+                              (Operation == "Port status change" and Substring has "to Down") or (Operation has_cs "Spanning-tree guard state change" and Substring has_any ("disconnected", "error disabled", "blocked", "disabled", "not configured")),
+                              "Failure",
+                              Operation has_cs "Spanning-tree guard state change" and Substring has "learning",
+                              "Partial",
+                              EventResult
+                          )
+        | extend EventType = case(Operation in("Port status change", "Spanning-tree guard state change") and EventResult == "Success", "Enable",
+            (Operation == "Port status change" and EventResult == "Failure") or (Operation == "Spanning-tree guard state change" and EventResult in ("Partial", "Failure")), "Disable",
+            EventType
+        )
+      | lookup EventSeverityLookup on EventResult
+      | extend
+          EventResultDetails = case(
+                                  Operation == "VPN connectivity change" and isnotempty(connectivity), strcat("connectivity=", connectivity),
+                                  Operation == "IPsec-SA request queued" or Operation == "Phase2 negotiation failed", split(Substring, 'due to')[1], 
+                                  Substring has "Site-to-site", split(Substring, 'Site-to-site ')[1],
+                                  Substring
+                              ),
+          EventMessage = Substring,
+          EventOriginalType = LogType,
+          EventUid = _ResourceId
+      | invoke _ASIM_ResolveDvcFQDN('Device')
+      | extend
+          Dvc = DvcHostname,
+          IpAddr = SrcIpAddr,
+          Src = SrcIpAddr,
+          EventEndTime = EventStartTime, 
+          EventCount = int(1),
+          EventProduct = "Meraki",
+          EventVendor = "Cisco",
+          EventSchema = "AuditEvent",
+          EventSchemaVersion = "0.1"
+      | project-away
+          LogMessage,
+          Parser,
+          Epoch,
+          EpochTimestamp,
+          Device,
+          Substring,
+          TempOperation*,
+          temp*,
+          STPMac,
+          peer_contact,
+          connectivity,
+          Port*,
+          port,
+          portnextpart,
+          LogType,
+          type,
+          TenantId,
+          SourceSystem,
+          Computer,
+          _ResourceId,
+          MG,
+          ManagementGroupName,
+          RawData
+  };
+  parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimAuditEventCiscoMerakiSyslog
+// Description: This ASIM parser supports normalizing Cisco Meraki logs ingested in 'Syslog' table to the ASIM Audit Event normalized schema. Cisco Meraki events are generated from network activity and security events from Meraki devices such as firewalls, switches, and access points. These logs are captured through the Cisco Meraki Sentinel connector which uses a Linux agent to collect logs in Syslog format.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuditEventCiscoMerakiSyslog(    ['disabled']:bool=False)
+{
+let EventFieldsLookup = datatable(TempOperation: string, Operation: string, EventResult: string, EventType: string)
+[
+  "vpn_connectivity_change", "VPN connectivity change","Success", "Set",
+  "purging ISAKMP-SA", "Purging ISAKMP-SA","Partial", "Delete",
+  "purged ISAKMP-SA", "Purged ISAKMP-SA","Success", "Delete",
+  "ISAKMP-SA deleted", "ISAKMP-SA deleted","Success", "Delete",
+  "IPsec-SA request", "IPsec-SA request queued","Failure", "Other",
+  "failed to get sainfo", "Failed to get sainfo","Failure", "Other",
+  "failed to pre-process ph2 packet", "Failed to pre-process ph2 packet","Failure", "Other",
+  "phase2 negotiation failed", "Phase2 negotiation failed","Failure", "Other",
+  "initiate new phase 1 negotiation", "Initiate new phase 1 negotiation","Success", "Initialize",
+  "ISAKMP-SA established", "ISAKMP-SA established","Success", "Create",
+  "initiate new phase 2 negotiation", "Initiate new phase 2 negotiation","Partial", "Initialize",
+  "IPsec-SA established", "IPsec-SA established","Success", "Create",
+  "STP role", "Spanning-tree interface role change","Success", "Set",
+  "STP BPDU", "Spanning-tree guard state change", "", "",
+  "VRRP transition", "VRRP transition","Success", "Set",
+  "port status change", "Port status change", "", ""
+];
+let EventSeverityLookup=datatable(EventResult: string, EventSeverity: string)[
+    "Success", "Informational",
+    "Partial", "Informational",
+    "Failure", "Low"
+];
+let parser=(disabled: bool=false) {
+let allData = union isfuzzy=true
+    (
+    Syslog
+    | where Computer in (_ASIM_GetSourceBySourceType('CiscoMeraki'))
+    | project-rename LogMessage =  SyslogMessage
+    );
+let PreFilteredData = allData
+    | where not(disabled)
+        and LogMessage has "events"
+        and (LogMessage has_any ("vpn_connectivity_change", "status changed", "VRRP active", "VRRP passive") or LogMessage has_cs "Site-to-site" or LogMessage has_cs "Port")
+    | extend Parser = extract_all(@"(\d+.\d+)\s([\w\-\_]+)\s([\w\-\_]+)\s([\S\s]+)$", dynamic([1, 2, 3, 4]), LogMessage)[0]
+    | extend
+        LogType = tostring(Parser[2]),
+        Substring = tostring(Parser[3])
+    | where LogType == "events";
+let SiteToSiteData = PreFilteredData
+    | where Substring has_cs "Site-to-site";
+let SiteToSite_deleted = SiteToSiteData
+    | where Substring has "ISAKMP-SA deleted"
+    | extend TempOperation = "ISAKMP-SA deleted"
+    | parse Substring with * " deleted " temp_deletedSrcIp:string  "-" temp_deletedTargetIp:string " " temp_restmessage:string
+    | extend temp_srcipport = temp_deletedSrcIp,
+            temp_targetipport = temp_deletedTargetIp;
+let SiteToSite_negotiation = SiteToSiteData
+    | where Substring has_any("initiate new phase 1 negotiation", "initiate new phase 2 negotiation")
+    | parse Substring with * "Site-to-site VPN: " TempOperation:string ": " temp_negotiationSrcIp:string "<=>" temp_negotiationTargetIp:string
+    | extend temp_srcipport = temp_negotiationSrcIp,
+            temp_targetipport = temp_negotiationTargetIp;
+let SiteToSite_ESP = SiteToSiteData
+    | where Substring has "phase2 negotiation failed due to time up waiting for phase1"
+    | parse Substring with * "Site-to-site VPN: " TempOperation:string " due to " EventResultDetails " ESP " temp_espSrcIp:string "->" temp_espTargetIp:string
+    | extend temp_srcipport = temp_espSrcIp,
+            temp_targetipport = temp_espTargetIp;
+let SiteToSite_tunnel = SiteToSiteData
+    | where Substring has "IPsec-SA established"
+    | parse Substring with * "Site-to-site VPN: " TempOperation:string ":" * "Tunnel " temp_tunnelSrcIp:string "->" temp_tunnelTargetIp:string " " temp_restmessage:string
+    | extend temp_srcipport = temp_tunnelSrcIp,
+            temp_targetipport = temp_tunnelTargetIp;
+let SiteToSite_ISAKMPestablished = SiteToSiteData
+    | where Substring has "ISAKMP-SA established"
+    | parse Substring with * "Site-to-site VPN: " TempOperation:string " established " temp_estSrcIp:string "-" temp_estTargetIp:string " " temp_restmessage:string
+    | extend TempOperation = strcat(TempOperation, ' ', 'established'),
+            temp_srcipport = temp_estSrcIp,
+            temp_targetipport = temp_estTargetIp;
+let SiteToSite_IPsecSArequest = SiteToSiteData
+    | where Substring has "IPsec-SA request"
+    | parse Substring with * "Site-to-site VPN: " TempOperation:string " for " temp_forTaregtSrcIp:string " " * " due to" EventResultDetails:string
+    | extend temp_targetipport = temp_forTaregtSrcIp;
+let SiteToSite_purging = SiteToSiteData
+    | where Substring has_any("purging ISAKMP-SA", "purged ISAKMP-SA")
+    | parse Substring with * "Site-to-site VPN: " TempOperation:string " spi=" temp_restmessage:string;
+let SiteToSite_failed = SiteToSiteData
+    | where Substring has_any ("failed to get sainfo", "failed to pre-process ph2 packet")
+    | parse Substring with * "Site-to-site VPN: " TempOperation:string
+    | extend TempOperation = tostring(split(TempOperation, ' (')[0]);
+let VPNConnectivityChangeData = PreFilteredData
+    | where Substring has "vpn_connectivity_change"
+    | parse-kv Substring as (type: string, peer_contact: string, connectivity: string) with (pair_delimiter=" ", kv_delimiter="=", quote="'")
+    | extend type = trim('"', type),
+            connectivity = trim('"', connectivity)
+    | extend TempOperation = type,
+            temp_srcipport = peer_contact;
+let StatusChangedData = PreFilteredData
+    | where Substring has "status changed"
+    | parse Substring with * "port " port:string " " portnextpart:string
+    | extend TempOperation = "port status change";
+let PortData = PreFilteredData
+    | where Substring has_cs "Port"
+    | parse Substring with * "Port " Port1:string " received an " TempOperation1:string " from " STPMac:string " " temp_restmessage:string
+    | parse Substring with * "Port " Port2:string " changed " TempOperation2:string " from " PortNextPart:string
+    | extend Port = coalesce(Port1,Port2)
+    | extend TempOperation = coalesce(TempOperation1, TempOperation2);
+let VRRPData = PreFilteredData
+    | where Substring has_any("VRRP active", "VRRP passive")
+    | extend TempOperation = "VRRP transition";
+union VPNConnectivityChangeData, StatusChangedData, PortData, VRRPData, SiteToSite_deleted, SiteToSite_ESP, SiteToSite_failed, SiteToSite_IPsecSArequest, SiteToSite_ISAKMPestablished, SiteToSite_negotiation, SiteToSite_purging, SiteToSite_tunnel
+      | extend Epoch = tostring(Parser[0]),
+          Device = tostring(Parser[1])
+      | extend EpochTimestamp = split(Epoch, ".")
+      | extend EventStartTime = unixtime_seconds_todatetime(tolong(EpochTimestamp[0]))
+      | lookup EventFieldsLookup on TempOperation
+      | extend 
+          temp_srcipport = iff(temp_srcipport has "]" and temp_srcipport !has ":", trim(']', temp_srcipport), temp_srcipport),
+          temp_targetipport = iff(temp_targetipport has "]" and temp_targetipport !has ":", trim(']', temp_targetipport), temp_targetipport)
+      | extend 
+          temp_srcipport = iff(temp_srcipport has "[" and temp_srcipport !has ":", replace_string(temp_srcipport,'[',':'), temp_srcipport),
+          temp_targetipport = iff(temp_targetipport has "[" and temp_targetipport !has ":", replace_string(temp_targetipport,'[',':'), temp_targetipport),
+          DvcMacAddr = iff(Operation == "Spanning-tree guard state change" and isnotempty(STPMac) and STPMac matches regex "([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})|([0-9a-fA-F]{4}\\.[0-9a-fA-F]{4}\\.[0-9a-fA-F]{4})\'*", STPMac, "")
+      | extend temp_srcipport = iff(isempty(DvcMacAddr) and isnotempty(STPMac) and Operation == "Spanning-tree guard state change", STPMac, temp_srcipport)
+      | extend
+          temp_srcipport = trim("'", temp_srcipport),
+          temp_targetipport = trim("'", temp_targetipport)
+      | extend 
+          temp_srcipport = trim('"', temp_srcipport),
+          temp_targetipport = trim('"', temp_targetipport)
+      | parse temp_srcipport with * "[" temp_srcip "]:" temp_srcport
+      | extend SrcIpAddr = iff(temp_srcipport has ".", split(temp_srcipport, ":")[0], coalesce(temp_srcip, temp_srcipport))
+      | parse temp_targetipport with * "[" temp_targetip "]:" temp_targetport
+      | extend TargetIpAddr = iff(temp_targetipport has ".", split(temp_targetipport, ":")[0], coalesce(temp_targetip, temp_targetipport))
+      | extend TargetPortNumber = iff(TargetIpAddr has ".", toint(split(temp_targetipport, ":")[1]), toint(coalesce(temp_targetport, "")))
+      | extend SrcPortNumber = case(
+                              isnotempty(temp_srcipport),
+                              iff(SrcIpAddr has ".", toint(split(temp_srcipport, ":")[1]), toint(coalesce(temp_srcport, ""))),
+                              Substring has_cs "Port",
+                              toint(Port),
+                              Operation == "Port status change",
+                              toint(port),
+                              int(null)
+                          )
+      | extend EventResult = case(
+                              (Operation == "Port status change" and Substring has "from Down") or (Operation has_cs "Spanning-tree guard state change" and Substring has_any ("connected", "forwarding")),
+                              "Success",
+                              (Operation == "Port status change" and Substring has "to Down") or (Operation has_cs "Spanning-tree guard state change" and Substring has_any ("disconnected", "error disabled", "blocked", "disabled", "not configured")),
+                              "Failure",
+                              Operation has_cs "Spanning-tree guard state change" and Substring has "learning",
+                              "Partial",
+                              EventResult
+                          )
+        | extend EventType = case(Operation in("Port status change", "Spanning-tree guard state change") and EventResult == "Success", "Enable",
+            (Operation == "Port status change" and EventResult == "Failure") or (Operation == "Spanning-tree guard state change" and EventResult in ("Partial", "Failure")), "Disable",
+            EventType
+        )
+      | lookup EventSeverityLookup on EventResult
+      | extend
+          EventResultDetails = case(
+                                  Operation == "VPN connectivity change" and isnotempty(connectivity), strcat("connectivity=", connectivity),
+                                  Operation == "IPsec-SA request queued" or Operation == "Phase2 negotiation failed", split(Substring, 'due to')[1], 
+                                  Substring has "Site-to-site", split(Substring, 'Site-to-site ')[1],
+                                  Substring
+                              ),
+          EventMessage = Substring,
+          EventOriginalType = LogType,
+          EventUid = _ResourceId
+      | invoke _ASIM_ResolveDvcFQDN('Device')
+      | extend
+          Dvc = DvcHostname,
+          IpAddr = SrcIpAddr,
+          Src = SrcIpAddr,
+          EventEndTime = EventStartTime, 
+          EventCount = int(1),
+          EventProduct = "Meraki",
+          EventVendor = "Cisco",
+          EventSchema = "AuditEvent",
+          EventSchemaVersion = "0.1"
+      | project-away
+          LogMessage,
+          Parser,
+          Epoch,
+          EpochTimestamp,
+          Device,
+          Substring,
+          TempOperation*,
+          temp*,
+          STPMac,
+          peer_contact,
+          connectivity,
+          Port*,
+          port,
+          portnextpart,
+          LogType,
+          type,
+          TenantId,
+          SourceSystem,
+          Computer,
+          _ResourceId,
+          MG,
+          EventTime,
+          Facility,
+          HostName,
+          SeverityLevel,
+          ProcessID,
+          HostIP,
+          ProcessName,CollectorHostName
+  };
+  parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimAuditEventCrowdStrikeFalconHost
+// Description: This ASIM parser supports normalizing CrowdStrike Falcon Endpoint Protection logs to the ASIM Audit Event normalized schema. These events are captured through CrowdStrike Falcon Endpoint Protection data connector which allows you to easily connect your CrowdStrike Falcon Event Stream with Microsoft Sentinel.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuditEventCrowdStrikeFalconHost(    ['disabled']:bool=False)
+{
+let EventFieldsLookup = datatable(
+    Activity: string,
+    Operation: string,
+    EventType_lookup: string,
+    EventSubType: string,
+    Object: string,
+    ObjectType: string
+) 
+    [
+    "delete_report_execution", "Delete Report Execution", "Delete", "", "Report Execution", "Scheduled Task",
+    "delete_scheduled_report", "Delete Scheduled Report", "Delete", "", "Scheduled Report", "Scheduled Task",
+    "update_scheduled_report", "Update Scheduled Report", "Set", "", "Scheduled Report", "Scheduled Task",
+    "create_scheduled_report", "Create Scheduled Report", "Create", "", "Scheduled Report", "Scheduled Task",
+    "update_class_action", "Update Class Action", "Set", "", "Class Action", "Other",
+    "update_policy", "Update Policy", "Set", "", "Policy", "Policy Rule",
+    "enable_policy", "Enable Policy", "Enable", "", "Policy", "Policy Rule",
+    "create_policy", "Create Policy", "Create", "", "Policy", "Policy Rule",
+    "remove_rule_group", "Remove Rule Group", "Other", "Remove", "Rule Group", "Service",
+    "create_rule_group", "Create Rule Group", "Create", "", "Rule Group", "Service",
+    "delete_rule_group", "Delete Rule Group", "Delete", "", "Rule Group", "Service",
+    "add_rule_group", "Add Rule Group", "Other", "Add", "Rule Group", "Service",
+    "delete_rule", "Delete Rule", "Delete", "", "Rule", "Policy Rule",
+    "update_rule", "Update Rule", "Set", "", "Rule", "Policy Rule",
+    "create_rule", "Create Rule", "Create", "", "Rule", "Policy Rule",
+    "disable_policy", "Disable Policy", "Disable", "", "Policy", "Policy Rule",
+    "delete_policy", "Delete Policy", "Delete", "", "Policy", "Policy Rule",
+    "update_priority", "Update Priority", "Set", "", "Policy", "Policy Rule",
+    "assign_policy", "Assign Policy", "Other", "Assign", "Policy", "Policy Rule",
+    "remove_policy", "Remove Policy", "Other", "Remove", "Policy", "Policy Rule",
+    "ip_rules_added", "IP Rules Added", "Create", "", "Rule", "Other",
+    "ip_rules_removed", "IP Rules Removed", "Delete", "", "Rule", "Other",
+    "hide_host_requested", "Hide Host Requested", "Delete", "", "Host", "Other",
+    "mobile_hide_host_requested", "Mobile Hide Host Requested", "Delete", "", "Mobile Host", "Other",
+    "CreateAPIClient", "Create API Client", "Create", "", "API Client", "Service",
+    "UpdateAPIClient", "Update API Client", "Set", "", "API Client", "Service"
+];
+let EventSeverityLookup = datatable (LogSeverity: string, EventSeverity: string)
+    [
+    "0", "Informational",
+    "1", "Informational",
+    "2", "Low",
+    "3", "Medium",
+    "4", "High",
+    "5", "High"
+];
+let UserAuditActivities = dynamic(["delete_report_execution", "delete_scheduled_report", "update_scheduled_report", "create_scheduled_report", "update_class_action", "update_policy", "enable_policy", "create_policy", "remove_rule_group", "create_rule_group", "delete_rule_group", "add_rule_group", "delete_rule", "update_rule", "create_rule", "disable_policy", "delete_policy", "update_priority", "assign_policy", "remove_policy", "ip_rules_added", "ip_rules_removed", "hide_host_requested", "mobile_hide_host_requested"]);
+let AuthAuditActivities = dynamic(["CreateAPIClient", "UpdateAPIClient"]);
+let parser = (disabled: bool=false) {
+    CommonSecurityLog
+    | where not(disabled)
+    | where (DeviceVendor == "CrowdStrike" and DeviceProduct == "FalconHost")
+    | where (DeviceEventClassID == "UserActivityAuditEvent" and Activity in (UserAuditActivities)) or (DeviceEventCategory == "AuthActivityAuditEvent" and Activity in (AuthAuditActivities))
+    | lookup EventFieldsLookup on Activity
+    | lookup EventSeverityLookup on LogSeverity
+    | extend
+        EventType = EventType_lookup,
+        EventStartTime = case(
+                    DeviceEventClassID == "UserActivityAuditEvent",
+                    unixtime_milliseconds_todatetime(tolong(ReceiptTime)),
+                    DeviceEventCategory == "AuthActivityAuditEvent",
+                    todatetime(DeviceCustomDate1),
+                    datetime(null)
+                ),
+        EventOriginalType = case(
+                        DeviceEventClassID == "UserActivityAuditEvent",
+                        DeviceEventClassID,
+                        DeviceEventCategory == "AuthActivityAuditEvent",
+                        DeviceEventCategory,
+                        ""
+                    ),
+        EventResult = iff(EventOutcome == "false", "Failure", "Success"),
+        EventSchema = "AuditEvent",
+        EventSchemaVersion = "0.1",
+        EventCount = int(1),
+        DvcAction = "Allowed",
+        EventProduct = "FalconHost",
+        EventVendor = "CrowdStrike"
+    | project-rename
+        ActorUsername = DestinationUserName,
+        EventUid = _ItemId,
+        DvcIpAddr = DestinationTranslatedAddress,
+        EventOriginalSeverity = LogSeverity,
+        EventProductVersion = DeviceVersion,
+        TargetAppName = ProcessName,
+        EventOriginalResultDetails = EventOutcome,
+        EventOriginalSubType = Activity
+    | extend
+        EventEndTime = EventStartTime,
+        Application = TargetAppName,
+        TargetIpAddr = DvcIpAddr,
+        User = ActorUsername,
+        ActorUsernameType = _ASIM_GetUsernameType(ActorUsername),
+        ActorUserType = _ASIM_GetUserType(ActorUsername, ""),
+        TargetAppType = iff(isnotempty(TargetAppName), "Service", "")
+    | extend
+        Dvc = coalesce(DvcIpAddr, EventProduct),
+        Dst = TargetIpAddr
+    | project-away 
+        Source*,
+        Destination*,
+        Device*,
+        AdditionalExtensions,
+        CommunicationDirection,
+        Computer,
+        EndTime,
+        FieldDevice*,
+        Flex*,
+        File*,
+        Old*,
+        MaliciousIP*,
+        OriginalLogSeverity,
+        Process*,
+        Protocol,
+        ReceivedBytes,
+        SentBytes,
+        Remote*,
+        Request*,
+        SimplifiedDeviceAction,
+        StartTime,
+        TenantId,
+        Threat*,
+        ExternalID,
+        ReportReferenceLink,
+        ReceiptTime,
+        Reason,
+        ApplicationProtocol,
+        _ResourceId,
+        ExtID,
+        Message,
+        IndicatorThreatType,
+        EventType_*
+};
+parser(disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimAuditEventMicrosoftEvent
+// Description: This ASIM parser supports normalizing Microsoft Windows Events audit events (1102) logs ingested in 'Event' table to the ASIM Audit Event schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuditEventMicrosoftEvent(    ['disabled']:bool=False)
+{
+let parser = (disabled: bool = false) {
+  // Parsed Events Ids
+  let ParsedEventIds = dynamic([4698, 4699, 4700, 4701, 4702, 4929, 5025, 5027, 5028, 5029, 5030, 5034, 5035, 5037, 7035, 7036, 7040, 7045, 2009, 5136]);
+  // Eventlog Event Ids
+  let EventlogEventIds = dynamic([1102]);
+  // Scheduled Task Event Ids
+  let ScheduledTaskEventIds = dynamic([4698, 4699, 4700, 4701, 4702]);
+  // Active Directory Replica Source Naming Context Event Ids
+  let ActiveDirectoryReplicaIds = dynamic([4929]);
+  // Firewall Event Ids
+  let FirewallEventIds = dynamic([5025, 5027, 5028, 5029, 5030, 5034, 5035, 5037]);
+  // Service Event Ids
+  let ServiceEventIds = dynamic([7035, 7036, 7040, 7045, 2009]); 
+  // Directory Service Object Ids
+  let DirectoryServiceIds = dynamic([5136]);
+  // Clear Audit Log Event
+  let AuditLogClearedEventID = dynamic([1102]); 
+  // EventID Lookup
+  let EventIDLookup = datatable(
+  EventID: int,
+  Operation: string,
+  EventType: string,
+  Object: string,
+  ObjectType: string,
+  EventResult: string
+  )
+          [   
+      1102, "Delete Logs", "Delete", "Security Logs", "Event Log", "Success",
+      4698, "Create Scheduled Task", "Create", "", "Scheduled Task", "Success",
+      4699, "Delete Scheduled Task", "Delete", "", "Scheduled Task", "Success",
+      4700, "Enable Scheduled Task", "Enable", "", "Scheduled Task", "Success",
+      4701, "Disable Scheduled Task ", "Disable", "", "Scheduled Task", "Success",
+      4702, "Update Scheduled Task", "Set", "", "Scheduled Task", "Success",
+      4929, "Remove Active Directory Replica Source Naming Context", "Delete", "", "Other", "Success",
+      5025, "Stop Firewall Service", "Disable", "Firewall Service", "Service", "Success",
+      5027, "Retrieve the Security Policy From The Local Storage", "Read", "Firewall Service", "Service", "Failure",
+      5028, "Parse the new Security Policy", "Set", "Firewall Service", "Service", "Failure",
+      5029, "Initialize the Firewall Driver", "Initialize", "Firewall Service", "Service", "Failure",
+      5030, "Start the Firewall Service", "Start", "Firewall Service", "Service", "Failure",
+      5034, "Stop Firewall Driver", "Stop", "Firewall Driver", "Driver", "Failure",
+      5035, "Start Firewall Driver", "Start", "Firewall Driver", "Driver", "Failure",
+      5037, "Terminating Firewall Driver", "Terminate", "Firewall Driver", "Driver", "Failure",
+      7035, "Start Control Sent", "Execute", "Service", "Service", "Success",
+      7036, "Enter Stop State", "Stop", "Service", "Service", "Success",
+      7040, "Changed Service Settings", "Set", "Service", "Service", "Success",
+      7045, "Install Service", "Install", "Service", "Service", "Success",
+      2009, "Load Group Policy", "Other", "Service", "Service", "Failure",
+      5136, "Modified Directory Services Object", "Set", "", "Directory Service Object", "Success"
+  ];
+      let ParsedEvents =
+          Event
+                  | where not(disabled)
+                  | where EventID in(ParsedEventIds)
+                  | project EventID, EventData, _ResourceId, TimeGenerated, Computer, Type, _ItemId
+              | parse-kv EventData as 
+                  (
+                  SubjectUserSid: string,
+                  SubjectUserName: string,
+                  SubjectDomainName: string,
+                  SubjectLogonId: string,
+                  TaskName: string,
+                  TaskContent: string,
+                  TaskContentNew: string,
+                  ClientProcessId: string,
+                  DestinationDRA: string,
+                  SourceDRA: string,
+                  SourceAddr: string,
+                  ObjectDN: string,
+                  AttributeValue: string
+                  )
+                  with (regex=@'<Data Name="(\w+)">{?([^<]*?)}?</Data>')
+              | project-away EventData
+          | lookup EventIDLookup on EventID
+      ;
+      // Parse EventLog
+      let EventLog = ParsedEvents
+          | where EventID in(EventlogEventIds)
+          | project-away Task*, *DRA, SourceAddr, ObjectDN, AttributeValue;
+      // Parse Scheduled Task
+      let ScheduledTask = ParsedEvents
+          | where EventID in(ScheduledTaskEventIds)
+          | extend 
+              Object = TaskName,
+              NewValue = coalesce(
+              TaskContent,
+              TaskContentNew
+          )
+          | extend 
+              Value = NewValue
+          | project-away Task*, *DRA, SourceAddr, ObjectDN, AttributeValue
+      ;
+      // Parse ADR
+      let ActiveDirectoryReplica = ParsedEvents
+          | where EventID in(ActiveDirectoryReplicaIds)
+          | extend 
+              NewValue = SourceDRA,
+              OldValue = DestinationDRA,
+              SrcFQDN = SourceAddr
+          | extend 
+              Value = NewValue,
+              Object = OldValue
+          | project-away Task*, *DRA, SourceAddr, ObjectDN, AttributeValue
+      ;
+      // Parse WindowsFirewall
+      let WindowsFirewall = ParsedEvents
+          | where EventID in(FirewallEventIds)
+          | project-away Task*, *DRA, SourceAddr, ObjectDN, AttributeValue
+      ;
+      // Parse ServiceEvent
+      let ServiceEvent = ParsedEvents
+          | where EventID in(ServiceEventIds)
+          | project-away Task*, *DRA, SourceAddr, ObjectDN, AttributeValue
+      ;
+      // Parse DirectoryService
+      let DirectoryService = ParsedEvents
+          | where EventID in(DirectoryServiceIds)
+          | extend 
+              Object = ObjectDN
+          | project-rename 
+              NewValue = AttributeValue
+          | extend
+              Value = NewValue
+          | project-away Task*, *DRA, SourceAddr, ObjectDN
+      ;
+      // Union Events
+      union
+          EventLog,
+          ScheduledTask,
+          ActiveDirectoryReplica,
+          WindowsFirewall,
+          ServiceEvent,
+          DirectoryService
+      | invoke _ASIM_ResolveDvcFQDN("Computer")
+      | project-rename 
+          ActorUserId = SubjectUserSid,
+          ActorSessionId = SubjectLogonId,
+          DvcId = _ResourceId,
+          ActingAppId = ClientProcessId,
+          EventUid = _ItemId
+      | extend
+          EventCount = int(1),
+          EventStartTime = TimeGenerated, 
+          EventEndTime= TimeGenerated,
+          EventProduct = 'Security Events',
+          EventVendor = 'Microsoft',
+          EventSchemaVersion = '0.1.0',
+          EventSchema = 'AuditEvent',
+          EventOriginalType = tostring(EventID),
+          DvcIdType = iff (DvcId == "", "", "AzureResourceID"),
+          ActorUsername = iff (SubjectDomainName == "", SubjectUserName, strcat (SubjectDomainName, '\\', SubjectUserName)),
+          ActorUsernameType = iff (SubjectDomainName == "", 'Simple', 'Windows'),
+          ActorUserIdType = iff (ActorUserId == "", "", "SID"),
+          ActingAppType = "Process"
+      | extend
+          User = ActorUsername,
+          Dvc = DvcFQDN
+      | project-away Subject*, EventID, Computer
+  };
+  parser (disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimAuditEventMicrosoftExchangeAdmin365
+// Description: This ASIM parser supports normalizing Microsoft Exchange 365 administrative activity in the OfficeActivity table to the ASIM Audit Event schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuditEventMicrosoftExchangeAdmin365(    ['disabled']:bool=False)
+{
+let usertypes=datatable (ActorOriginalUserType:string, ActorUserType:string)
+[
+ // Regular, Regular
+ "Admin", "Admin"
+ , "DcAdmin", "Admin"
+ , "System", "System"
+ , "Application", "Application"
+ , "ServicePrincipal", "Service Principal"
+ , "CustomPolicy", "Other"
+ , "SystemPolicy", "Other"
+ , "Reserved", "Other"
+];
+let eventtypes=datatable (op:string, EventType:string)
+[
+ "Remove", "Delete",
+ "New", "Create",
+ "Add", "Create",
+ "Enable", "Enable",
+ "Install", "Install",
+ "Set", "Set",
+ "Disable", "Disable",
+ "disable", "Disable"
+];
+let parser=(disabled:bool=false){
+  OfficeActivity
+  | where not(disabled)
+  | where RecordType  in ('ExchangeAdmin')
+  | project Operation, ResultStatus, Parameters, OrganizationName, OrganizationId, OfficeObjectId, ClientIP, UserId, UserKey, UserAgent, UserType, TimeGenerated, OriginatingServer, SourceRecordId, Type, _ResourceId
+  | extend 
+      SplitOp = split (Operation,"-")
+  | extend
+      op=tostring(SplitOp[0])
+  | lookup eventtypes on op
+  | project-away op
+  // --
+  // Calculate Object
+  | extend
+      SplitObject = extract_all(@'^(.*?)[\\/](.*)$', OfficeObjectId)[0]
+  | extend 
+      Object = case (
+          SplitObject[0] == OrganizationName, SplitObject[1], 
+          OfficeObjectId == "", SplitOp[1],
+          OfficeObjectId
+      )
+  | project-away SplitOp, OfficeObjectId
+  // --
+  // Calculate source IP address and port
+  | extend 
+      SplitIpAddr = extract_all(@'^\[?(.*?)\]?:(\d+)$', ClientIP)[0]
+  | extend 
+      SrcIpAddr = iff (SplitIpAddr[1] == "", ClientIP, SplitIpAddr[0]),
+      SrcPortNumber = toint(iff (SplitIpAddr[1] == "", "", SplitIpAddr[1]))
+  | parse UserId with ActorUsername " (" ActingAppName ")"
+  | extend 
+      ActorUsernameType = iff (ActorUsername == "", "UPN", "Windows"),
+      ActorUsername = iff (ActorUsername == "", UserId, ActorUsername),
+      ActingAppType = iff (ActingAppName == "", "", "Process")
+  | project-rename
+      SrcDescription = OriginatingServer,
+      NewValue = Parameters 
+  | project-away SplitObject, UserKey, SplitIpAddr, ClientIP, UserId
+  | project-rename
+      HttpUserAgent = UserAgent, 
+      ActorOriginalUserType = UserType,
+      ActorScopeId = OrganizationId,
+      ActorScope = OrganizationName,
+      EventOriginalUid = SourceRecordId
+  | lookup usertypes on ActorOriginalUserType
+  | extend
+      EventCount = int(1),
+      EventStartTime = TimeGenerated, 
+      EventEndTime= TimeGenerated,
+      EventProduct = 'Exchange 365',
+      EventVendor = 'Microsoft',
+      EventSchemaVersion = '0.1.0',
+      EventSchema = 'AuditEvent',
+      TargetAppName = 'Exchange 365',
+      TargetAppType = 'SaaS application',
+      EventResult = iff(ResultStatus == "True", "Success", "Failure")
+  | project-away 
+      ResultStatus
+  | extend
+      EventSeverity = iff(EventResult == "Failure", "Low", "Informational")
+  // -- Aliases
+  | extend 
+      User=ActorUsername,
+      IpAddr = SrcIpAddr,
+      Value = NewValue,
+      Application = TargetAppName,
+      Dst = TargetAppName,
+      Src = coalesce (SrcIpAddr, SrcDescription),
+      Dvc = TargetAppName,
+  // -- Entity identifier explicit aliases
+      ActorUserUpn = iif (ActorUsernameType == "UPN", ActorUsername, ""),
+      ActorWindowsUsername = iif (ActorUsernameType == "Windows", ActorUsername, "")
+ };
+ parser (disabled=disabled)
+}
+
+
+
+//
+// Function Name: ASimAuditEventMicrosoftSecurityEvents
+// Description: This ASIM parser supports normalizing Microsoft Windows Events audit events (1102) logs ingested in 'SecurityEvent' table to the ASIM Audit Event schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimAuditEventMicrosoftSecurityEvents(    ['disabled']:bool=False)
+{
+let parser = (disabled: bool = false) {
+  // Parsed Events Ids
+  let ParsedEventIds = dynamic([4698, 4699, 4700, 4701, 4702, 4929, 5025, 5027, 5028, 5029, 5030, 5034, 5035, 5037, 7035, 7036, 7040, 7045, 2009, 5136]);
+  // Eventlog Event Ids
+  let EventlogEventIds = dynamic([1102]);
+  // Scheduled Task Event Ids
+  let ScheduledTaskEventIds = dynamic([4698, 4699, 4700, 4701, 4702]);
+  // Active Directory Replica Source Naming Context Event Ids
+  let ActiveDirectoryReplicaIds = dynamic([4929]);
+  // Firewall Event Ids
+  let FirewallEventIds = dynamic([5025, 5027, 5028, 5029, 5030, 5034, 5035, 5037]);
+  // Service Event Ids
+  let ServiceEventIds = dynamic([7035, 7036, 7040, 7045, 2009]); 
+  // Directory Service Object Ids
+  let DirectoryServiceIds = dynamic([5136]);
+  // Clear Audit Log Event
+  let AuditLogClearedEventID = dynamic([1102]); 
+  // EventID Lookup
+  let EventIDLookup = datatable(
+  EventID: int,
+  Operation: string,
+  EventType: string,
+  Object: string,
+  ObjectType: string,
+  EventResult: string
+  )
+          [   
+      1102, "Delete Logs", "Delete", "Security Logs", "Event Log", "Success",
+      4698, "Create Scheduled Task", "Create", "", "Scheduled Task", "Success",
+      4699, "Delete Scheduled Task", "Delete", "", "Scheduled Task", "Success",
+      4700, "Enable Scheduled Task", "Enable", "", "Scheduled Task", "Success",
+      4701, "Disable Scheduled Task ", "Disable", "", "Scheduled Task", "Success",
+      4702, "Update Scheduled Task", "Set", "", "Scheduled Task", "Success",
+      4929, "Remove Active Directory Replica Source Naming Context", "Delete", "", "Other", "Success",
+      5025, "Stop Firewall Service", "Disable", "Firewall Service", "Service", "Success",
+      5027, "Retrieve the Security Policy From The Local Storage", "Read", "Firewall Service", "Service", "Failure",
+      5028, "Parse the new Security Policy", "Set", "Firewall Service", "Service", "Failure",
+      5029, "Initialize the Firewall Driver", "Initialize", "Firewall Service", "Service", "Failure",
+      5030, "Start the Firewall Service", "Start", "Firewall Service", "Service", "Failure",
+      5034, "Stop Firewall Driver", "Stop", "Firewall Driver", "Driver", "Failure",
+      5035, "Start Firewall Driver", "Start", "Firewall Driver", "Driver", "Failure",
+      5037, "Terminating Firewall Driver", "Terminate", "Firewall Driver", "Driver", "Failure",
+      7035, "Start Control Sent", "Execute", "Service", "Service", "Success",
+      7036, "Enter Stop State", "Stop", "Service", "Service", "Success",
+      7040, "Changed Service Settings", "Set", "Service", "Service", "Success",
+      7045, "Install Service", "Install", "Service", "Service", "Success",
+      2009, "Load Group Policy", "Other", "Service", "Service", "Failure",
+      5136, "Modified Directory Services Object", "Set", "", "Directory Service Object", "Success"
+  ];
+      let ParsedEvents =
+          union
+              (
+                  // SecurityEvents
+                  SecurityEvent
+                  | where not(disabled)
+                  | where EventID in(ParsedEventIds)
+                  | project EventID, EventData, _ResourceId, TimeGenerated, Computer, Type, _ItemId
+              | parse-kv EventData as 
+                  (
+                  SubjectUserSid: string,
+                  SubjectUserName: string,
+                  SubjectDomainName: string,
+                  SubjectLogonId: string,
+                  TaskName: string,
+                  TaskContent: string,
+                  TaskContentNew: string,
+                  ClientProcessId: string,
+                  DestinationDRA: string,
+                  SourceDRA: string,
+                  SourceAddr: string,
+                  ObjectDN: string,
+                  AttributeValue: string
+                  ) 
+                  with (regex=@'<Data Name="(\w+)">{?([^<]*?)}?</Data>')
+              | project-away EventData
+              ),
+              (
+              SecurityEvent
+              | where not(disabled)
+              | where EventID in (AuditLogClearedEventID) and EventSourceName == "Microsoft-Windows-Eventlog"
+              | project EventID, EventData, _ResourceId, TimeGenerated, Computer, Type, _ItemId
+              | extend Parsed_EventData = parse_xml(EventData)
+              | extend
+                  SubjectUserSid = tostring(Parsed_EventData.UserData.LogFileCleared.SubjectUserSid),
+                  SubjectUserName = tostring(Parsed_EventData.UserData.LogFileCleared.SubjectUserName),
+                  SubjectDomainName = tostring(Parsed_EventData.UserData.LogFileCleared.SubjectDomainName),
+                  SubjectLogonId = tostring(Parsed_EventData.UserData.LogFileCleared.SubjectLogonId)
+              | project-away EventData, Parsed_EventData
+              )
+          | lookup EventIDLookup on EventID
+      ;
+      // Parse EventLog
+      let EventLog = ParsedEvents
+          | where EventID in(EventlogEventIds)
+          | project-away Task*, *DRA, SourceAddr, ObjectDN, AttributeValue;
+      // Parse Scheduled Task
+      let ScheduledTask = ParsedEvents
+          | where EventID in(ScheduledTaskEventIds)
+          | extend 
+              Object = TaskName,
+              NewValue = coalesce(
+              TaskContent,
+              TaskContentNew
+          )
+          | extend 
+              Value = NewValue
+          | project-away Task*, *DRA, SourceAddr, ObjectDN, AttributeValue
+      ;
+      // Parse ADR
+      let ActiveDirectoryReplica = ParsedEvents
+          | where EventID in(ActiveDirectoryReplicaIds)
+          | extend 
+              NewValue = SourceDRA,
+              OldValue = DestinationDRA,
+              SrcFQDN = SourceAddr
+          | extend 
+              Value = NewValue,
+              Object = OldValue
+          | project-away Task*, *DRA, SourceAddr, ObjectDN, AttributeValue
+      ;
+      // Parse WindowsFirewall
+      let WindowsFirewall = ParsedEvents
+          | where EventID in(FirewallEventIds)
+          | project-away Task*, *DRA, SourceAddr, ObjectDN, AttributeValue
+      ;
+      // Parse ServiceEvent
+      let ServiceEvent = ParsedEvents
+          | where EventID in(ServiceEventIds)
+          | project-away Task*, *DRA, SourceAddr, ObjectDN, AttributeValue
+      ;
+      // Parse DirectoryService
+      let DirectoryService = ParsedEvents
+          | where EventID in(DirectoryServiceIds)
+          | extend 
+              Object = ObjectDN
+          | project-rename 
+              NewValue = AttributeValue
+          | extend
+              Value = NewValue
+          | project-away Task*, *DRA, SourceAddr, ObjectDN
+      ;
+      // Union Events
+      union
+          EventLog,
+          ScheduledTask,
+          ActiveDirectoryReplica,
+          WindowsFirewall,
+          ServiceEvent,
+          DirectoryService
+      | invoke _ASIM_ResolveDvcFQDN("Computer")
+      | project-rename 
+          ActorUserId = SubjectUserSid,
+          ActorSessionId = SubjectLogonId,
+          DvcId = _ResourceId,
+          ActingAppId = ClientProcessId,
+          EventUid = _ItemId
+      | extend
+          EventCount = int(1),
+          EventStartTime = TimeGenerated, 
+          EventEndTime= TimeGenerated,
+          EventProduct = 'Security Events',
+          EventVendor = 'Microsoft',
+          EventSchemaVersion = '0.1.0',
+          EventSchema = 'AuditEvent',
+          EventOriginalType = tostring(EventID),
+          DvcIdType = iff (DvcId == "", "", "AzureResourceID"),
+          ActorUsername = iff (SubjectDomainName == "", SubjectUserName, strcat (SubjectDomainName, '\\', SubjectUserName)),
+          ActorUsernameType = iff (SubjectDomainName == "", 'Simple', 'Windows'),
+          ActorUserIdType = iff (ActorUserId == "", "", "SID"),
+          ActingAppType = "Process"
+      | extend
+          User = ActorUsername,
+          Dvc = DvcFQDN
+      | project-away Subject*, EventID, Computer
+  };
+  parser (disabled=disabled)
+}
+
+
+

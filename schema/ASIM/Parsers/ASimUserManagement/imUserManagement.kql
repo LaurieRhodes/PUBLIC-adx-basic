@@ -1,0 +1,48 @@
+﻿//
+// Function Name: imUserManagement
+// Description: This ASIM parser supports normalizing User Management logs from all supported sources to the ASIM User Management normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) imUserManagement(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['targetusername_has_any']:dynamic=dynamic([]),
+    ['actorusername_has_any']:dynamic=dynamic([]),
+    ['eventtype_in']:dynamic=dynamic([]),
+    ['pack']:bool=false)
+{
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers')
+  | where SearchKey in ('Any', 'ExcludevimUserManagement')
+  | extend SourceSpecificParser=column_ifexists('SourceSpecificParser', '')
+  | distinct SourceSpecificParser
+  | where isnotempty(SourceSpecificParser));
+let ASimBuiltInDisabled=toscalar('ExcludevimUserManagement' in (DisabledParsers) or 'Any' in (DisabledParsers)); 
+let parser=(
+    starttime: datetime=datetime(null), 
+    endtime: datetime=datetime(null),
+    srcipaddr_has_any_prefix: dynamic=dynamic([]),
+    targetusername_has_any: dynamic=dynamic([]),
+    actorusername_has_any: dynamic=dynamic([]),
+    eventtype_in: dynamic=dynamic([]),
+    pack: bool=false) {
+    union isfuzzy=true
+        vimUserManagementEmpty,
+        vimUserManagementMicrosoftSecurityEvent(starttime=starttime, endtime=endtime, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, targetusername_has_any=targetusername_has_any, actorusername_has_any=actorusername_has_any, eventtype_in=eventtype_in, disabled = (ASimBuiltInDisabled or ('ExcludevimUserManagementMicrosoftSecurityEvent'      in (DisabledParsers)))),
+        vimUserManagementMicrosoftWindowsEvent(starttime=starttime, endtime=endtime, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, targetusername_has_any=targetusername_has_any, actorusername_has_any=actorusername_has_any, eventtype_in=eventtype_in, disabled = (ASimBuiltInDisabled or ('ExcludevimUserManagementMicrosoftWindowsEvent'      in (DisabledParsers)))),
+        vimUserManagementCiscoISE(starttime=starttime, endtime=endtime, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, targetusername_has_any=targetusername_has_any, actorusername_has_any=actorusername_has_any, eventtype_in=eventtype_in, disabled = (ASimBuiltInDisabled or ('ExcludevimUserManagementCiscoISE'      in (DisabledParsers)))),
+        vimUserManagementSentinelOne(starttime=starttime, endtime=endtime, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, targetusername_has_any=targetusername_has_any, actorusername_has_any=actorusername_has_any, eventtype_in=eventtype_in, disabled = (ASimBuiltInDisabled or ('ExcludevimUserManagementSentinelOne'      in (DisabledParsers)))),
+        vimUserManagementLinuxAuthpriv(starttime=starttime, endtime=endtime, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, targetusername_has_any=targetusername_has_any, actorusername_has_any=actorusername_has_any, eventtype_in=eventtype_in, disabled = (ASimBuiltInDisabled or ('ExcludevimUserManagementLinuxAuthpriv'      in (DisabledParsers)))),
+        vimUserManagementNative(starttime=starttime, endtime=endtime, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, targetusername_has_any=targetusername_has_any, actorusername_has_any=actorusername_has_any, eventtype_in=eventtype_in, disabled = (ASimBuiltInDisabled or ('ExcludevimUserManagementNative'      in (DisabledParsers))))
+}; 
+parser (
+    starttime=starttime, 
+    endtime=endtime, 
+    srcipaddr_has_any_prefix = srcipaddr_has_any_prefix,
+    targetusername_has_any   = targetusername_has_any, 
+    actorusername_has_any    = actorusername_has_any,
+    eventtype_in             = eventtype_in,
+    pack=pack
+)
+}

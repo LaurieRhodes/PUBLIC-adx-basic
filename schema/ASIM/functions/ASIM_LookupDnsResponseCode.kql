@@ -1,0 +1,43 @@
+﻿//
+// Function Name: ASIM_LookupDnsResponseCode
+// Description: This ASIM function returns the DNS response code(RCode) name associated with the response code numerical value provided as a parameter. For example, for the RCode 3, the function returns NXDOMAIN.  
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASIM_LookupDnsResponseCode(    ['ResponseCode']:int)
+{
+let function = (ResponseCode:int) {
+  let ResponseCodesTable=dynamic
+    ({
+      '0':'NOERROR',
+      '1':'FORMERR',
+      '2':'SERVFAIL',
+      '3':'NXDOMAIN',
+      '4':'NOTIMP',
+      '5':'REFUSED',
+      '6':'YXDOMAIN',
+      '7':'YXRRSET',
+      '8':'NXRRSET',
+      '9':'NOTAUTH',
+      '10':'NOTZONE',
+      '11':'DSOTYPENI',
+      '16':'BADVERS',
+      //'16':'BADSIG',
+      '17':'BADKEY',
+      '18':'BADTIME',
+      '19':'BADMODE',
+      '20':'BADNAME',
+      '21':'BADALG',
+      '22':'BADTRUNC',
+      '23':'BADCOOKIE'
+          });
+  let ResponseCodeNameLookup = ResponseCodesTable[tostring(ResponseCode)];
+  case (
+    ResponseCodeNameLookup != "", ResponseCodeNameLookup,
+    ResponseCode between (3841 .. 4095), 'Reserved for Private Use',
+    'Unassigned'
+  )
+};
+function(ResponseCode)
+}

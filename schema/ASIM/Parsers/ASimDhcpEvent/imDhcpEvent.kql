@@ -1,0 +1,33 @@
+﻿//
+// Function Name: imDhcpEvent
+// Description: This ASIM parser supports filtering and normalizing Dhcp event logs from all supported sources to the ASIM Dhcp Event normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) imDhcpEvent(    ['starttime']:datetime=datetime(null),
+    ['endtime']:datetime=datetime(null),
+    ['srcipaddr_has_any_prefix']:dynamic=dynamic([]),
+    ['srchostname_has_any']:dynamic=dynamic([]),
+    ['srcusername_has_any']:dynamic=dynamic([]),
+    ['eventresult']:string='*',
+    ['disabled']:bool=False,
+    ['pack']:bool=False)
+{
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludevimDhcpEvent') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser | where isnotempty(SourceSpecificParser));
+let vimBuiltInDisabled=toscalar('ExcludevimDhcpEvent' in (DisabledParsers) or 'Any' in (DisabledParsers)); 
+let parser=(
+  starttime:datetime=datetime(null), 
+  endtime:datetime=datetime(null),
+  srcipaddr_has_any_prefix:dynamic=dynamic([]),
+  srchostname_has_any:dynamic=dynamic([]),
+  srcusername_has_any:dynamic=dynamic([]),
+  eventresult:string='*',
+  pack:bool=false)
+{
+union isfuzzy=true
+  vimDhcpEventEmpty,
+  vimDhcpEventNative (starttime=starttime, endtime=endtime, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, srcusername_has_any=srcusername_has_any, eventresult=eventresult, disabled=(vimBuiltInDisabled or ('ExcludevimDhcpEventNative' in (DisabledParsers))))
+};
+parser (starttime=starttime, endtime=endtime, srcipaddr_has_any_prefix=srcipaddr_has_any_prefix, srchostname_has_any=srchostname_has_any, srcusername_has_any=srcusername_has_any, eventresult=eventresult, pack=pack)
+}

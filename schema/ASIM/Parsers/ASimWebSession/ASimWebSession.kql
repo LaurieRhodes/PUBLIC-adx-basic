@@ -1,0 +1,33 @@
+﻿//
+// Function Name: ASimWebSession
+// Description: This ASIM parser supports normalizing Web Session logs from all supported sources to the ASIM Web Session normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimWebSession(    ['pack']:bool=false)
+{
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludeASimWebSession') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser| where isnotempty(SourceSpecificParser));
+let ASimBuiltInDisabled=toscalar('ExcludeASimWebSession' in (DisabledParsers) or 'Any' in (DisabledParsers)); 
+let parser=(pack:bool=false){
+union isfuzzy=true
+  vimWebSessionEmpty,
+  ASimWebSessionSquidProxy (ASimBuiltInDisabled or ('ExcludeASimWebSessionSquidProxy' in (DisabledParsers))),
+  ASimWebSessionZscalerZIA (ASimBuiltInDisabled or ('ExcludeASimWebSessionZscalerZIA' in (DisabledParsers))),
+  ASimWebSessionNative (disabled=(ASimBuiltInDisabled or ('ExcludeASimWebSessionNative' in (DisabledParsers)))),
+  ASimWebSessionVectraAI (pack=pack, disabled=(ASimBuiltInDisabled or ('ExcludeASimWebSessionVectraAI' in (DisabledParsers)))),
+  ASimWebSessionIIS (disabled=(ASimBuiltInDisabled or ('ExcludeASimWebSessionIIS' in (DisabledParsers)))),
+  ASimWebSessionPaloAltoCEF (ASimBuiltInDisabled or ('ExcludeASimWebSessionPaloAltoCEF' in (DisabledParsers))),
+  ASimWebSessionApacheHTTPServer (ASimBuiltInDisabled or ('ExcludeASimWebSessionApacheHTTPServer' in (DisabledParsers))),
+  ASimWebSessionFortinetFortiGate (ASimBuiltInDisabled or ('ExcludeASimWebSessionFortinetFortiGate' in (DisabledParsers))),
+  ASimWebSessionCiscoMeraki (ASimBuiltInDisabled or ('ExcludeASimWebSessionCiscoMeraki' in (DisabledParsers))),
+  ASimWebSessionBarracudaWAF (ASimBuiltInDisabled or ('ExcludeASimWebSessionBarracudaWAF' in (DisabledParsers))),
+  ASimWebSessionBarracudaCEF (ASimBuiltInDisabled or ('ExcludeASimWebSessionBarracudaCEF' in (DisabledParsers))),
+  ASimWebSessionCitrixNetScaler (ASimBuiltInDisabled or ('ExcludeASimWebSessionCitrixNetScaler' in (DisabledParsers))),
+  ASimWebSessionCiscoFirepower (ASimBuiltInDisabled or ('ExcludeASimWebSessionCiscoFirepower' in (DisabledParsers))),
+  ASimWebSessionF5ASM (ASimBuiltInDisabled or ('ExcludeASimWebSessionF5ASM' in (DisabledParsers))),
+  ASimWebSessionPaloAltoCortexDataLake (ASimBuiltInDisabled or ('ExcludeASimWebSessionPaloAltoCortexDataLake' in (DisabledParsers))),
+  ASimWebSessionSonicWallFirewall (ASimBuiltInDisabled or ('ExcludeASimWebSessionSonicWallFirewall' in (DisabledParsers)))
+}; 
+parser(pack=pack)
+}

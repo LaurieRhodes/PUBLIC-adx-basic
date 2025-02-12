@@ -1,0 +1,33 @@
+﻿//
+// Function Name: ASimFileEvent
+// Description: This ASIM parser supports normalizing File activity logs from all supported sources to the ASIM File Event normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimFileEvent(    ['pack']:bool=False)
+{
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludeASimFile') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser| where isnotempty(SourceSpecificParser));
+let ASimBuiltInDisabled=toscalar('ExcludeASimFileEventBuiltIn' in (DisabledParsers) or 'Any' in (DisabledParsers));
+let parser=(pack:bool=false){
+union isfuzzy=true
+  vimFileEventEmpty,
+  ASimFileEventLinuxSysmonFileCreated(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventLinuxSysmonFileCreated' in (DisabledParsers) ))),
+  ASimFileEventLinuxSysmonFileDeleted(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventLinuxSysmonFileDeleted' in (DisabledParsers) ))),
+  ASimFileEventAzureBlobStorage(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventAzureBlobStorage' in (DisabledParsers) ))),
+  ASimFileEventMicrosoft365D(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventMicrosoft365D' in (DisabledParsers) ))),
+  ASimFileEventAzureFileStorage(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventAzureFileStorage' in (DisabledParsers) ))),
+  ASimFileEventAzureQueueStorage(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventAzureQueueStorage' in (DisabledParsers) ))),
+  ASimFileEventMicrosoftSharePoint(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventMicrosoftSharePoint' in (DisabledParsers) ))),
+  ASimFileEventMicrosoftSysmon(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventMicrosoftSysmon' in (DisabledParsers) ))),
+  ASimFileEventMicrosoftSysmonWindowsEvent(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventMicrosoftSysmonWindowsEvent' in (DisabledParsers) ))),
+  ASimFileEventAzureTableStorage(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventAzureTableStorage' in (DisabledParsers) ))),
+  ASimFileEventMicrosoftWindowsEvents(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventMicrosoftWindowsEvents' in (DisabledParsers) ))),
+  ASimFileEventMicrosoftSecurityEvents(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventMicrosoftSecurityEvents' in (DisabledParsers) ))),
+  ASimFileEventNative(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventNative' in (DisabledParsers) ))),
+  ASimFileEventSentinelOne(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventSentinelOne' in (DisabledParsers) ))),
+  ASimFileEventVMwareCarbonBlackCloud(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventVMwareCarbonBlackCloud' in (DisabledParsers) ))),
+  ASimFileEventGoogleWorkspace(disabled=(ASimBuiltInDisabled or ('ExcludeASimFileEventGoogleWorkspace' in (DisabledParsers) )))
+  };
+  parser (pack=pack)
+}

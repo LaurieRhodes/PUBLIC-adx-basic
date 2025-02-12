@@ -1,0 +1,28 @@
+﻿//
+// Function Name: ASimDns
+// Description: This ASIM parser supports normalizing DNS activity logs from all supported sources to the ASIM DNS activity normalized schema.
+
+// Version: 
+// Last Updated: 
+//
+.create-or-alter function with (skipvalidation=true) ASimDns(    ['pack']:bool=False)
+{
+let DisabledParsers=materialize(_GetWatchlist('ASimDisabledParsers') | where SearchKey in ('Any', 'ExcludeASimDns') | extend SourceSpecificParser=column_ifexists('SourceSpecificParser','') | distinct SourceSpecificParser);
+let imDnsBuiltInDisabled=toscalar('ExcludeASimDnsBuiltIn' in (DisabledParsers) or 'Any' in (DisabledParsers)); 
+union isfuzzy=true
+  vimDnsEmpty,
+  ASimDnsAzureFirewall     (imDnsBuiltInDisabled or ('ExcludeASimASimDnsAzureFirewall'  in (DisabledParsers) )),
+  ASimDnsCiscoUmbrella     (imDnsBuiltInDisabled or ('ExcludeASimDnsCiscoUmbrella'      in (DisabledParsers) )),
+  ASimDnsCorelightZeek     (imDnsBuiltInDisabled or ('ExcludeASimDnsCorelightZeek'      in (DisabledParsers) )),
+  ASimDnsFortinetFortiGate (imDnsBuiltInDisabled or ('ExcludeASimDnsFortinetFortiGate'  in (DisabledParsers) )),
+  ASimDnsGcp               (imDnsBuiltInDisabled or ('ExcludeASimDnsDnsGcp'             in (DisabledParsers) )),
+  ASimDnsInfobloxNIOS      (imDnsBuiltInDisabled or ('ExcludeASimDnsInfobloxNIOS'       in (DisabledParsers) )),
+  ASimDnsMicrosoftNXlog    (imDnsBuiltInDisabled or ('ExcludeASimDnsMicrosoftNXlog'     in (DisabledParsers) )),
+  ASimDnsMicrosoftOMS      (imDnsBuiltInDisabled or ('ExcludeASimDnsMicrosoftOMS'       in (DisabledParsers) )),
+  ASimDnsMicrosoftSysmon   (imDnsBuiltInDisabled or ('ExcludeASimDnsMicrosoftSysmon'    in (DisabledParsers) )),
+  ASimDnsMicrosoftSysmonWindowsEvent   (imDnsBuiltInDisabled or ('ExcludeASimDnsMicrosoftSysmonWindowsEvent'    in (DisabledParsers) )),
+  ASimDnsNative            (imDnsBuiltInDisabled or ('ExcludeASimDnsNative'             in (DisabledParsers) )),
+  ASimDnsSentinelOne       (imDnsBuiltInDisabled or ('ExcludeASimDnsSentinelOne'        in (DisabledParsers) )),
+  ASimDnsVectraAI          (imDnsBuiltInDisabled or ('ExcludeASimDnsVectraAI'           in (DisabledParsers) )),
+  ASimDnsZscalerZIA        (imDnsBuiltInDisabled or ('ExcludeASimDnsZscalerZIA'         in (DisabledParsers) ))
+}
