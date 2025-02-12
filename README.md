@@ -6,18 +6,9 @@ This repository contains an example template for a basic Azure Data Explorer clu
 
 ## Project Structure
 
-PUBLIC-ADX-Basic/
-├── infrastructure/
-│ ├── adx.bicep
-│ ├── main.bicep
-│ ├── parameters.json
-│ ├── securitydb1.kql
-│ ├── securitydb2.kql
-│ └── securitydb3.kql
-├── schema/
-│ ├── ASIM
-│ └── securitydb
-└── README.md
+```
+
+```
 
 ## Prerequisites
 
@@ -43,8 +34,6 @@ The infrastructure can be deployed using the Bicep files included in the infrast
 ```sh
 az deployment group create --resource-group myResourceGroup --template-file infrastructure/main.bicep --parameters infrastructure/parameters.json
 ```
-
-
 
 ## Contributing
 
