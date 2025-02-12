@@ -6,8 +6,19 @@ This repository contains an example template for a basic Azure Data Explorer clu
 
 ## Project Structure
 
-```
-
+```plaintext
+PUBLIC-ADX-Basic/
+├── infrastructure/
+│ ├── adx.bicep
+│ ├── main.bicep
+│ ├── parameters.json
+│ ├── securitydb1.kql
+│ ├── securitydb2.kql
+│ └── securitydb3.kql
+├── schema/
+│ ├── ASIM
+│ └── securitydb
+└── README.md
 ```
 
 ## Prerequisites
