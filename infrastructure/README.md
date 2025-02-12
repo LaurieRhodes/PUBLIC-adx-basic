@@ -60,45 +60,17 @@ The deployment creates:
 
 ### Deployment Steps
 
-1. **Login to Azure**:
+1. **Run Deploy.ps1**:
    
    ```powershell
-   az login
+   deploy.ps1 
    ```
 
-2. **Set your subscription**:
-   
-   ```powershell
-   az account set --subscription "<subscription-id>"
-   ```
+A PowerShell script is used with this deployment to overcome some of the limitations surrounding the size of KQL files that can be deployed with Bicep and the total size of a Bicept deployment.
 
-3. **Create Resource Group** (if it doesn't exist):
-   
-   ```powershell
-   az group create --name rg-adx --location australiasoutheast
-   ```
+For simplicity, this is consolidated by a PowerShell script.
 
-4. **Deploy the Bicep template**:
-   
-   ```powershell
-   az deployment group create `
-     --resource-group rg-adx `
-     --template-file main.bicep `
-     --parameters parameters.json
-   ```
-
-### Deployment Validation
-
-To validate the deployment before executing:
-
-```powershell
-az deployment group what-if `
-  --resource-group rg-adx `
-  --template-file main.bicep `
-  --parameters parameters.json
-```
-
-## Post-Deployment
+2. ## Post-Deployment
 
 After deployment, the ADX cluster will be created with:
 
@@ -125,6 +97,7 @@ You can access the cluster through:
 Monitor the deployment progress in:
 
 - Azure Portal
+
 - Azure CLI:
   
   ```powershell
