@@ -16,7 +16,7 @@ param skuCapacity int
 @description('Name of the security database')
 param securitydatabaseName string
 
-resource cluster 'Microsoft.Kusto/clusters@2022-02-01' = {
+resource cluster 'Microsoft.Kusto/clusters@2024-04-13' = {
   name: ADXClusterName
   location: location
   sku: {

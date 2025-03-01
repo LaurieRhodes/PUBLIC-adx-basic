@@ -6,16 +6,16 @@
       "value": "australiasoutheast"
     },
     "ADXClusterName": {
-      "value": "adx-security-cluster"
+      "value": "myadx-security-cluster"
     },
     "skuName": {
-      "value": "Standard_D12_v2"
+      "value": "Dev(No SLA)_Standard_D11_v2"
     },
     "skutier": {
-      "value": "Standard"
+      "value": "Basic"
     },
     "skuCapacity": {
-      "value": 2
+      "value": 1
     },
     "securitydatabaseName": {
       "value": "security"

@@ -13,7 +13,7 @@ resource cluster 'Microsoft.Kusto/clusters@2022-02-01' existing = {
     resource ASIM11Script 'scripts' = {
       name: 'ASIM11Script'
       properties: {
-        scriptContent: loadTextContent('../ASIM11.kql')
+        scriptContent: loadTextContent('Asim/ASIM11.kql')
         continueOnErrors: false
       }
     }
@@ -21,7 +21,7 @@ resource cluster 'Microsoft.Kusto/clusters@2022-02-01' existing = {
     resource ASIM12Script 'scripts' = {
       name: 'ASIM12Script'
       properties: {
-        scriptContent: loadTextContent('../ASIM12.kql')
+        scriptContent: loadTextContent('Asim/ASIM12.kql')
         continueOnErrors: false
       }
     }
@@ -29,7 +29,7 @@ resource cluster 'Microsoft.Kusto/clusters@2022-02-01' existing = {
     resource ASIM13Script 'scripts' = {
       name: 'ASIM13Script'
       properties: {
-        scriptContent: loadTextContent('../ASIM13.kql')
+        scriptContent: loadTextContent('Asim/ASIM13.kql')
         continueOnErrors: false
       }
     }
@@ -37,7 +37,7 @@ resource cluster 'Microsoft.Kusto/clusters@2022-02-01' existing = {
     resource ASIM14Script 'scripts' = {
       name: 'ASIM14Script'
       properties: {
-        scriptContent: loadTextContent('../ASIM14.kql')
+        scriptContent: loadTextContent('Asim/ASIM14.kql')
         continueOnErrors: false
       }
     }
@@ -45,7 +45,7 @@ resource cluster 'Microsoft.Kusto/clusters@2022-02-01' existing = {
     resource ASIM15Script 'scripts' = {
       name: 'ASIM15Script'
       properties: {
-        scriptContent: loadTextContent('../ASIM15.kql')
+        scriptContent: loadTextContent('Asim/ASIM15.kql')
         continueOnErrors: false
       }
     }

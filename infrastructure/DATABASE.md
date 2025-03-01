@@ -61,5 +61,3 @@ All tables follow these conventions:
 1. All tables have update policies enabled
 2. Raw tables are optimized for ingestion
 3. Processed tables are optimized for querying
-4. Scripts are executed in a specific order during deployment
-5. Tables follow the Advanced Security Information Model (ASIM) schema

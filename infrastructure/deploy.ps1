@@ -14,7 +14,7 @@ param(
 )
 
 # Check if Az module is installed
-if (-not (Get-Module -ListAvailable Az)) {
+if (-not (Get-Module -ListAvailable Az.Accounts)) {
     Write-Host "Azure PowerShell module not found. Installing..."
     Install-Module -Name Az -Scope CurrentUser -Repository PSGallery -Force
 }
