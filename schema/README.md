@@ -161,5 +161,5 @@ The batching approach in these scripts ensures reliable deployment by:
 
 - [ASIM Integration with Azure Data Explorer](https://laurierhodes.info/node/176)
 - [ADX's Role in Large Data Retention for Security](https://www.laurierhodes.info/node/166)
-- [Creating ADX table Schemas for Defender, Entra and Microsoft Sentinel](https://www.laurierhodes.info/node/154)
+- [Creating ADX table Schemas for Defender, Entra and Microsoft Sentinel](https://www.laurierhodes.info/node/189)
 - [Microsoft ASIM Schema Documentation](https://docs.microsoft.com/en-us/azure/sentinel/normalization-schema)

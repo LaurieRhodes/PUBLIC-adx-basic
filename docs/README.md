@@ -33,8 +33,8 @@ This project builds on concepts discussed in the following blog articles by Laur
 
 - [ASIM Integration with Azure Data Explorer](https://laurierhodes.info/node/176)
 - [ADX's Role in Large Data Retention for Security](https://www.laurierhodes.info/node/166)
-- [ADX Continuous Export to Blob / Data Lake](https://www.laurierhodes.info/node/158)
-- [Creating ADX table Schemas](https://www.laurierhodes.info/node/154)
+- [ADX Continuous Export to Blob / Data Lake](https://www.laurierhodes.info/node/187)
+- [Creating ADX table Schemas](https://www.laurierhodes.info/node/189)
 - [PowerShell - Writing Data Directly to Azure Data Explorer with REST](https://www.laurierhodes.info/node/159)
 - [Querying ADX with PowerShell and REST](https://laurierhodes.info/node/160)
 

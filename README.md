@@ -2,7 +2,7 @@
 
 ## Overview
 
-This repository provides a complete solution for deploying and configuring an Azure Data Explorer (ADX) cluster designed specifically for security log centralization, aligned with Microsoft's Advanced Security Information Model (ASIM) schema. The project serves as a reference implementation for organizations seeking to build a scalable, cost-effective security data lake using Azure Data Explorer.
+This repository provides a complete solution for deploying and configuring an Azure Data Explorer (ADX) cluster designed specifically for security log centralisation, aligned with Microsoft's Advanced Security Information Model (ASIM) schema. The project serves as a reference implementation for organizations seeking to build a scalable, cost-effective security data lake using Azure Data Explorer.
 
 Azure Data Explorer provides an ideal foundation for security data retention with:
 
@@ -81,8 +81,8 @@ This project builds on concepts discussed in the following blog posts:
 
 - [ADX's Role in Large Data Retention for Security](https://www.laurierhodes.info/node/166)
 - [ASIM Integration with Azure Data Explorer](https://laurierhodes.info/node/176)
-- [ADX Continuous Export to Blob / Data Lake](https://www.laurierhodes.info/node/158)
-- [Creating ADX table Schemas](https://www.laurierhodes.info/node/154)
+- [ADX Continuous Export to Blob / Data Lake](https://www.laurierhodes.info/node/187)
+- [Creating ADX table Schemas](https://www.laurierhodes.info/node/189)
 - [PowerShell - Writing Data Directly to Azure Data Explorer with REST](https://www.laurierhodes.info/node/159)
 - [Querying ADX with PowerShell and REST](https://laurierhodes.info/node/160)
 

@@ -91,7 +91,7 @@ Once you start ingesting data you can experiment with expanding a nd projecting 
    
    Where possible, derive the intended table format:
    
-   - [Creating ADX table Schemas](https://www.laurierhodes.info/node/154)
+   - [Creating ADX table Schemas](https://www.laurierhodes.info/node/189)
    
    ```kql
    .create-merge table NewLogType(
@@ -143,7 +143,7 @@ You can experiment with KQL to extract the right column data and values.
 
 For more information on schema design principles and implementation details, refer to these resources:
 
-- [Creating ADX table Schemas](https://www.laurierhodes.info/node/154)
+- [Creating ADX table Schemas](https://www.laurierhodes.info/node/189)
 - [ASIM Integration with Azure Data Explorer](https://laurierhodes.info/node/176)
 - [Microsoft ASIM Schema Documentation](https://docs.microsoft.com/en-us/azure/sentinel/normalization-schema)
 - [Azure Data Explorer Schema Best Practices](https://docs.microsoft.com/en-us/azure/data-explorer/kusto/management/best-practices)

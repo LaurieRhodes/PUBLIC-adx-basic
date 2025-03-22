@@ -24,7 +24,7 @@ Adding a new table to the security database requires several steps:
 
 ### 1. Generate Schema from Source System
 
-The most reliable way to generate an accurate schema is to extract it directly from the source system using KQL. The following script (from [Creating ADX Table Schemas](https://www.laurierhodes.info/node/154)) provides a systematic approach:
+The most reliable way to generate an accurate schema is to extract it directly from the source system using KQL. The following script (from [Creating ADX Table Schemas](https://www.laurierhodes.info/node/189)) provides a systematic approach:
 
 ```kql
 // Query to extract a table schema from source system
